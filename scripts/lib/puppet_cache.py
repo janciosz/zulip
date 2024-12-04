@@ -23,8 +23,7 @@ def generate_sha1sum_puppet_modules() -> str:
     with open(PUPPET_DEPS_FILE_PATH) as fb:
         data["deps.yaml"] = fb.read().strip()
     data["puppet-version"] = subprocess.check_output(
-        # This is 10x faster than `puppet --version`
-        ["ruby", "-r", "puppet/version", "-e", "puts Puppet.version"],
+        ["puppet", "--version"],
         text=True,
     ).strip()
 

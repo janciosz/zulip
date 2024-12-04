@@ -217,7 +217,7 @@ export LANGUAGE="C.UTF-8"
 
 # Force a known path; this fixes problems on Debian where `su` from
 # non-root may not adjust `$PATH` to root's.
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/puppetlabs/bin"
 
 # Check for a supported OS release.
 if [ -f /etc/os-release ]; then
@@ -408,6 +408,7 @@ fi
 
 # Generate /etc/zulip/zulip.conf .
 mkdir -p /etc/zulip
+mkdir -p /var/lib/puppet
 has_class() {
     grep -qx "$1" /var/lib/puppet/classes.txt
 }

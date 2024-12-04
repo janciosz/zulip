@@ -3,7 +3,8 @@
 # This class should only be included by classes that are intended to
 # be able to be deployed on their own host.
 class zulip::profile::base {
-  include zulip::timesync
+  # it is default on Ubuntu, and default chrony on redhat
+  # include zulip::timesync
   include zulip::common
   case $facts['os']['family'] {
     'Debian': {
@@ -22,7 +23,6 @@ class zulip::profile::base {
         # Basics
         'python3',
         'python3-yaml',
-        'puppet',
         'git',
         'curl',
         'jq',
@@ -43,7 +43,6 @@ class zulip::profile::base {
       $base_packages = [
         'python3',
         'python3-pyyaml',
-        'puppet',
         'git',
         'curl',
         'jq',
@@ -114,12 +113,6 @@ class zulip::profile::base {
     owner  => 'root',
     group  => 'root',
     source => 'puppet:///modules/zulip/systemd/system.conf.d/limits.conf',
-  }
-
-  service { 'puppet':
-    ensure  => stopped,
-    enable  => false,
-    require => Package['puppet'],
   }
 
   # This directory is written to by cron jobs for reading by Nagios
