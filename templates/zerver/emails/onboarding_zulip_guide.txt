@@ -16,7 +16,7 @@
 {{ _("View Zulip guide for communities") }}:
 {% endif %}
 <{{ zulip_guide_link }}>
-
+{% trans support_email="it-support@xfel.eu" %}
 {% if corporate_enabled %}
     {% trans %}Do you have questions or feedback to share? Contact us at {{ support_email }} — we'd love to help!{% endtrans %}
 {% else %}
