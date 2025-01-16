@@ -26,6 +26,7 @@
 {% endif %}
 
 <p>
+    {% trans support_email="it-support@xfel.eu" %}
     {% if corporate_enabled %}
         {{macros.contact_us_zulip_cloud(support_email)}}
     {% else %}
