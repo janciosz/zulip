@@ -45,7 +45,7 @@
     {% if reply_to_zulip %}
     {% trans notif_url=realm_url + "/#settings/notifications" %}Reply to this email directly, <a href="{{ narrow_url }}">view it in {{ realm_name }} Zulip</a>, or <a href="{{ notif_url }}">manage email preferences</a>.{% endtrans %}
     {% elif not show_message_content %}
-    {% trans notif_url=realm_url + "/#settings/notifications" %}<a href="{{ narrow_url }}">View or reply in {{ realm_name }} Zulip</a>, or <a href="{{ notif_url }}">manage email preferences</a>.{% endtrans %} <br />
+    {% trans notif_url=realm_url + "/#settings/notifications" %}<a href="{{ narrow_url }}">View or reply in {{ realm_name }} Zulip</a>, <a href="{{ notif_url }}">manage email preferences</a>, or send an email to it-support@xfel.eu.{% endtrans %} <br />
     {% else %}
     {% trans notif_url=realm_url + "/#settings/notifications" %}<a href="{{ narrow_url }}">Reply in {{ realm_name }} Zulip</a>, or <a href="{{ notif_url }}">manage email preferences</a>.{% endtrans %} <br />
     <br />
