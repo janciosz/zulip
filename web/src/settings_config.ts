@@ -266,10 +266,10 @@ export const email_address_visibility_values: Record<
         code: 3,
         description: $t({defaultMessage: "Admins only"}),
     },
-    nobody: {
-        code: 4,
-        description: $t({defaultMessage: "Nobody"}),
-    },
+    //nobody: {
+    //    code: 4,
+    //    description: $t({defaultMessage: "Nobody"}),
+    //},
 };
 
 export const common_policy_values = {
