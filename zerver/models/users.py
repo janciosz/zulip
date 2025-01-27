@@ -291,7 +291,7 @@ class UserBaseSettings(models.Model):
         EMAIL_ADDRESS_VISIBILITY_MEMBERS: gettext_lazy("Admins, moderators and members"),
         EMAIL_ADDRESS_VISIBILITY_MODERATORS: gettext_lazy("Admins and moderators"),
         EMAIL_ADDRESS_VISIBILITY_ADMINS: gettext_lazy("Admins only"),
-        EMAIL_ADDRESS_VISIBILITY_NOBODY: gettext_lazy("Nobody"),
+        # EMAIL_ADDRESS_VISIBILITY_NOBODY: gettext_lazy("Nobody"),
     }
 
     EMAIL_ADDRESS_VISIBILITY_TYPES = list(EMAIL_ADDRESS_VISIBILITY_ID_TO_NAME_MAP.keys())
