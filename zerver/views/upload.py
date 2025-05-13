@@ -22,6 +22,7 @@ from django.urls import reverse
 from django.utils.cache import patch_cache_control, patch_vary_headers
 from django.utils.http import content_disposition_header
 from django.utils.translation import gettext as _
+from pydantic import Json
 
 from zerver.context_processors import get_valid_realm_from_request
 from zerver.decorator import zulip_redirect_to_login
@@ -36,6 +37,7 @@ from zerver.lib.thumbnail import (
     StoredThumbnailFormat,
     get_image_thumbnail_path,
 )
+from zerver.lib.typed_endpoint import typed_endpoint
 from zerver.lib.upload import (
     attachment_source,
     check_upload_within_quota,
@@ -46,6 +48,9 @@ from zerver.lib.upload import (
 from zerver.lib.upload.local import assert_is_local_storage_path
 from zerver.lib.upload.s3 import get_signed_upload_url
 from zerver.models import Attachment, ImageAttachment, Realm, UserProfile
+from zerver.models.users import (
+    get_user_profile_by_id_in_realm
+)
 from zerver.worker.thumbnail import ensure_thumbnails
 
 
@@ -453,11 +458,17 @@ def serve_local_avatar_unauthed(request: HttpRequest, path: str) -> HttpResponse
     return response
 
 
-def upload_file_backend(request: HttpRequest, user_profile: UserProfile) -> HttpResponse:
+@typed_endpoint
+def upload_file_backend(request: HttpRequest, user_profile: UserProfile, *, sender_id: Json[int] | None = None) -> HttpResponse:
     if len(request.FILES) == 0:
         raise JsonableError(_("You must specify a file to upload"))
     if len(request.FILES) != 1:
         raise JsonableError(_("You may only upload one file at a time"))
+
+    if user_profile.can_forge_sender and sender_id is not None:
+        upload_owner = get_user_profile_by_id_in_realm(sender_id, user_profile.realm)
+    else:
+        upload_owner = user_profile
 
     [user_file] = request.FILES.values()
     assert isinstance(user_file, UploadedFile)
@@ -483,7 +494,7 @@ def upload_file_backend(request: HttpRequest, user_profile: UserProfile) -> Http
             )
     check_upload_within_quota(user_profile.realm, file_size)
 
-    url, filename = upload_message_attachment_from_request(user_file, user_profile)
+    url, filename = upload_message_attachment_from_request(user_file, upload_owner)
 
     # TODO/compatibility: uri is a deprecated alias for url that can
     # be removed once there are no longer clients relying on it.
