@@ -19,7 +19,7 @@ from zerver.lib.queue import queue_event_on_commit
 from zerver.lib.stream_subscription import get_subscribed_stream_recipient_ids_for_user
 from zerver.lib.topic import filter_by_topic_name_via_message
 from zerver.lib.user_message import DEFAULT_HISTORICAL_FLAGS, create_historical_user_messages
-from zerver.models import Message, Recipient, UserMessage, UserProfile
+from zerver.models import Message, PushDevice, PushDeviceToken, Recipient, UserMessage, UserProfile
 from zerver.tornado.django_api import send_event_on_commit, send_event_rollback_unsafe
 
 
@@ -38,7 +38,7 @@ def do_mark_all_as_read(user_profile: UserProfile, *, timeout: float | None = No
 
     # First, we clear mobile push notifications.  This is safer in the
     # event that the below logic times out and we're killed.
-    all_push_message_ids = (
+    all_push_message_ids = list(
         UserMessage.objects.filter(
             user_profile=user_profile,
         )
@@ -212,7 +212,7 @@ def do_update_mobile_push_notification(
     # in a sent notification if a message was edited to mention a
     # group rather than a user (or vice versa), though it is likely
     # not worth the effort to do such a change.
-    if not message.is_stream_message():
+    if not message.is_channel_message:
         return
 
     remove_notify_users = prior_mention_user_ids - mentions_user_ids - stream_push_user_ids
@@ -220,31 +220,83 @@ def do_update_mobile_push_notification(
 
 
 def do_clear_mobile_push_notifications_for_ids(
-    user_profile_ids: list[int], message_ids: list[int]
+    user_profile_ids: list[int] | None, message_ids: list[int]
 ) -> None:
     if len(message_ids) == 0:
         return
 
-    # This function supports clearing notifications for several users
-    # only for the message-edit use case where we'll have a single message_id.
-    assert len(user_profile_ids) == 1 or len(message_ids) == 1
+    if user_profile_ids is not None:
+        # This block gets executed in the following cases:
+        # * Message(s) marked as read by a user
+        # * A message edited to remove mention(s)
+        if len(user_profile_ids) == 0:
+            return
+
+        # This supports clearing notifications for several users only for
+        # the message-edit use case where we'll have a single message_id.
+        assert len(user_profile_ids) == 1 or len(message_ids) == 1
+
+        notifications_to_update = (
+            UserMessage.objects.filter(
+                message_id__in=message_ids,
+                user_profile_id__in=user_profile_ids,
+            )
+            .extra(  # noqa: S610
+                where=[UserMessage.where_active_push_notification()],
+            )
+            .values_list("id", "user_profile_id", "message_id")
+        )
+    else:
+        # This block handles clearing notifications when message(s) get deleted.
+        notifications_to_update = (
+            # Uses index: zerver_usermessage_message_active_mobile_push_notification_idx
+            UserMessage.objects.filter(
+                message_id__in=message_ids,
+            )
+            .extra(  # noqa: S610
+                where=[UserMessage.where_active_push_notification()],
+            )
+            .values_list("id", "user_profile_id", "message_id")
+        )
 
     messages_by_user = defaultdict(list)
-    notifications_to_update = (
-        UserMessage.objects.filter(
-            message_id__in=message_ids,
-            user_profile_id__in=user_profile_ids,
-        )
-        .extra(  # noqa: S610
-            where=[UserMessage.where_active_push_notification()],
-        )
-        .values_list("user_profile_id", "message_id")
-    )
-
-    for user_id, message_id in notifications_to_update:
+    for unused, user_id, message_id in notifications_to_update:
         messages_by_user[user_id].append(message_id)
 
+    clear_notifications_user_ids = set(messages_by_user.keys())
+    push_device_registered_user_ids = set(
+        PushDeviceToken.objects.filter(user_id__in=clear_notifications_user_ids)
+        .values_list("user_id", flat=True)
+        .union(
+            # Uses index "zerver_pushdevice_user_bouncer_device_id_idx".
+            PushDevice.objects.filter(
+                user_id__in=clear_notifications_user_ids, bouncer_device_id__isnull=False
+            ).values_list("user_id", flat=True)
+        )
+    )
+    push_device_not_registered_user_ids = (
+        clear_notifications_user_ids - push_device_registered_user_ids
+    )
+
+    usermessages_to_update_ids = []
+    for um_id, user_id, unused in notifications_to_update:
+        if user_id in push_device_not_registered_user_ids:
+            usermessages_to_update_ids.append(um_id)
+
+    if usermessages_to_update_ids:
+        BATCH_SIZE = 1000
+        for i in range(0, len(usermessages_to_update_ids), BATCH_SIZE):
+            with transaction.atomic(savepoint=False):
+                UserMessage.select_for_update_query().filter(
+                    id__in=usermessages_to_update_ids[i : i + BATCH_SIZE]
+                ).update(
+                    flags=F("flags").bitand(~UserMessage.flags.active_mobile_push_notification)
+                )
+
     for user_profile_id, event_message_ids in messages_by_user.items():
+        if user_profile_id in push_device_not_registered_user_ids:
+            continue
+
         notice = {
             "type": "remove",
             "user_profile_id": user_profile_id,
@@ -259,7 +311,7 @@ def do_clear_mobile_push_notifications_for_ids(
 
 def do_update_message_flags(
     user_profile: UserProfile, operation: str, flag: str, messages: list[int]
-) -> int:
+) -> tuple[int, list[int]]:
     valid_flags = [item for item in UserMessage.flags if item not in UserMessage.NON_API_FLAGS]
     if flag not in valid_flags:
         raise JsonableError(_("Invalid flag: '{flag}'").format(flag=flag))
@@ -273,6 +325,7 @@ def do_update_message_flags(
     flagattr = getattr(UserMessage.flags, flag)
     flag_target = flagattr if is_adding else 0
 
+    ignored_because_not_subscribed_channels = []
     with transaction.atomic(durable=True):
         if flag == "read" and not is_adding:
             # We have an invariant that all stream messages marked as
@@ -283,12 +336,20 @@ def do_update_message_flags(
             # currently subscribed to.
             subscribed_recipient_ids = get_subscribed_stream_recipient_ids_for_user(user_profile)
 
-            message_ids_in_unsubscribed_streams = set(
+            messages_in_unsubscribed_streams = set(
                 # Uses index: zerver_message_pkey
                 Message.objects.select_related("recipient")
                 .filter(id__in=messages, recipient__type=Recipient.STREAM)
                 .exclude(recipient_id__in=subscribed_recipient_ids)
-                .values_list("id", flat=True)
+                .values_list("id", "recipient__type_id")
+            )
+
+            message_ids_in_unsubscribed_streams = {
+                message[0] for message in messages_in_unsubscribed_streams
+            }
+
+            ignored_because_not_subscribed_channels = list(
+                {message[1] for message in messages_in_unsubscribed_streams}
             )
 
             messages = [
@@ -340,6 +401,7 @@ def do_update_message_flags(
                         "recipient"
                     )
                 ),
+                is_modifying_message=False,
             )
             if len(historical_messages) != len(historical_message_ids):
                 raise JsonableError(_("Invalid message(s)"))
@@ -395,4 +457,4 @@ def do_update_message_flags(
                 increment=min(1, count),
             )
 
-    return count
+    return (count, ignored_because_not_subscribed_channels)

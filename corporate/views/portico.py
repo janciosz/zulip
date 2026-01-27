@@ -1,6 +1,5 @@
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING
-from urllib.parse import urlencode
 
 import orjson
 from django.conf import settings
@@ -14,7 +13,8 @@ from corporate.lib.decorator import (
     authenticated_remote_realm_management_endpoint,
     authenticated_remote_server_management_endpoint,
 )
-from corporate.models import CustomerPlan, get_current_plan_by_customer, get_customer_by_realm
+from corporate.models.customers import get_customer_by_realm
+from corporate.models.plans import CustomerPlan, get_current_plan_by_customer
 from zerver.context_processors import get_realm_from_request, latest_info_context
 from zerver.decorator import add_google_analytics, zulip_login_required
 from zerver.lib.github import (
@@ -78,8 +78,8 @@ class PlansPageContext:
     is_new_customer: bool = False
     on_free_tier: bool = False
     customer_plan: CustomerPlan | None = None
-    is_legacy_server_with_scheduled_upgrade: bool = False
-    legacy_server_new_plan: CustomerPlan | None = None
+    has_scheduled_upgrade: bool = False
+    scheduled_upgrade_plan: CustomerPlan | None = None
     requested_sponsorship_plan: str | None = None
 
     billing_base_url: str = ""
@@ -103,7 +103,7 @@ def plans_view(request: HttpRequest) -> HttpResponse:
     )
     if is_subdomain_root_or_alias(request):
         # If we're on the root domain, we make this link first ask you which organization.
-        context.sponsorship_url = f"/accounts/go/?{urlencode({'next': context.sponsorship_url})}"
+        context.sponsorship_url = reverse("realm_redirect", query={"next": context.sponsorship_url})
 
     if realm is not None:
         if realm.plan_type == Realm.PLAN_TYPE_SELF_HOSTED and settings.PRODUCTION:
@@ -112,6 +112,8 @@ def plans_view(request: HttpRequest) -> HttpResponse:
             return redirect_to_login(next="/plans/")
         if request.user.is_guest:
             return TemplateResponse(request, "404.html", status=404)
+        if not request.user.has_billing_access:
+            return HttpResponseRedirect(reverse("billing_page"))
 
         customer = get_customer_by_realm(realm)
         context.on_free_tier = customer is None and not context.is_sponsored
@@ -123,6 +125,7 @@ def plans_view(request: HttpRequest) -> HttpResponse:
                 context.on_free_tier = not context.is_sponsored
             else:
                 context.on_free_trial = is_customer_on_free_trial(context.customer_plan)
+                # TODO implement a complimentary access plan/tier for Zulip Cloud.
 
     context.is_new_customer = (
         not context.on_free_tier and context.customer_plan is None and not context.is_sponsored
@@ -178,15 +181,18 @@ def remote_realm_plans_page(
                 and not context.is_sponsored
             )
             context.on_free_trial = is_customer_on_free_trial(context.customer_plan)
-            context.is_legacy_server_with_scheduled_upgrade = (
-                context.customer_plan.status == CustomerPlan.SWITCH_PLAN_TIER_AT_PLAN_END
-            )
-            if context.is_legacy_server_with_scheduled_upgrade:
+            if context.customer_plan.status == CustomerPlan.SWITCH_PLAN_TIER_AT_PLAN_END:
                 assert context.customer_plan.end_date is not None
-                context.legacy_server_new_plan = CustomerPlan.objects.get(
+                context.scheduled_upgrade_plan = CustomerPlan.objects.get(
                     customer=customer,
                     billing_cycle_anchor=context.customer_plan.end_date,
                     status=CustomerPlan.NEVER_STARTED,
+                )
+                # Fixed-price plan renewals have a CustomerPlan.status of
+                # SWITCH_PLAN_TIER_AT_PLAN_END, so we check to see if there is
+                # a CustomerPlan.tier change for the scheduled upgrade note.
+                context.has_scheduled_upgrade = (
+                    context.customer_plan.tier != context.scheduled_upgrade_plan.tier
                 )
 
     if billing_session.customer_plan_exists():
@@ -243,15 +249,18 @@ def remote_server_plans_page(
                 CustomerPlan.TIER_SELF_HOSTED_BASE,
             )
             context.on_free_trial = is_customer_on_free_trial(context.customer_plan)
-            context.is_legacy_server_with_scheduled_upgrade = (
-                context.customer_plan.status == CustomerPlan.SWITCH_PLAN_TIER_AT_PLAN_END
-            )
-            if context.is_legacy_server_with_scheduled_upgrade:
+            if context.customer_plan.status == CustomerPlan.SWITCH_PLAN_TIER_AT_PLAN_END:
                 assert context.customer_plan.end_date is not None
-                context.legacy_server_new_plan = CustomerPlan.objects.get(
+                context.scheduled_upgrade_plan = CustomerPlan.objects.get(
                     customer=customer,
                     billing_cycle_anchor=context.customer_plan.end_date,
                     status=CustomerPlan.NEVER_STARTED,
+                )
+                # Fixed-price plan renewals have a CustomerPlan.status of
+                # SWITCH_PLAN_TIER_AT_PLAN_END, so we check to see if there is
+                # a CustomerPlan.tier change for the scheduled upgrade note.
+                context.has_scheduled_upgrade = (
+                    context.customer_plan.tier != context.scheduled_upgrade_plan.tier
                 )
 
         if billing_session.customer_plan_exists():
@@ -288,6 +297,7 @@ def team_view(request: HttpRequest) -> HttpResponse:
                 "page_type": "team",
                 "contributors": data["contributors"],
             },
+            "REL_CANONICAL_LINK": f"https://zulip.com{request.path}",
             "date": data["date"],
         },
     )
@@ -301,6 +311,7 @@ def landing_view(request: HttpRequest, template_name: str) -> HttpResponse:
             "billing_base_url": "",
             "tier_cloud_standard": str(CustomerPlan.TIER_CLOUD_STANDARD),
             "tier_cloud_plus": str(CustomerPlan.TIER_CLOUD_PLUS),
+            "REL_CANONICAL_LINK": f"https://zulip.com{request.path}",
         }
     )
 
@@ -309,7 +320,9 @@ def landing_view(request: HttpRequest, template_name: str) -> HttpResponse:
 
 @add_google_analytics
 def hello_view(request: HttpRequest) -> HttpResponse:
-    return TemplateResponse(request, "corporate/hello.html", latest_info_context())
+    context = latest_info_context()
+    context["REL_CANONICAL_LINK"] = "https://zulip.com/"
+    return TemplateResponse(request, "corporate/hello.html", context)
 
 
 @add_google_analytics
@@ -323,6 +336,10 @@ def communities_view(request: HttpRequest) -> HttpResponse:
         .exclude(
             # Filter out realms who haven't changed their description from the default.
             description="",
+        )
+        .exclude(
+            # Filter out demo organizations.
+            demo_organization_scheduled_deletion_date__isnull=False,
         )
         .order_by("name")
     )
@@ -372,6 +389,7 @@ def communities_view(request: HttpRequest) -> HttpResponse:
         request,
         "corporate/communities.html",
         context={
+            "REL_CANONICAL_LINK": f"https://zulip.com{request.path}",
             "eligible_realms": eligible_realms,
             "org_types": org_types,
         },

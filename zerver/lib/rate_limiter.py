@@ -1,6 +1,7 @@
 import logging
 import time
 from abc import ABC, abstractmethod
+from ipaddress import IPv6Network, ip_network
 from typing import Optional, cast
 
 import orjson
@@ -138,8 +139,11 @@ class RateLimitedUser(RateLimitedObject):
 
 
 class RateLimitedIPAddr(RateLimitedObject):
-    def __init__(self, ip_addr: str, domain: str = "api_by_ip") -> None:
+    def __init__(
+        self, ip_addr: str, domain: str = "api_by_ip", ipv6_network_prefix: int = 64
+    ) -> None:
         self.ip_addr = ip_addr
+        self.ipv6_network_prefix = ipv6_network_prefix
         self.domain = domain
         if settings.RUNNING_INSIDE_TORNADO and domain in settings.RATE_LIMITING_DOMAINS_FOR_TORNADO:
             backend: type[RateLimiterBackend] | None = TornadoInMemoryRateLimiterBackend
@@ -149,12 +153,38 @@ class RateLimitedIPAddr(RateLimitedObject):
 
     @override
     def key(self) -> str:
-        # The angle brackets are important since IPv6 addresses contain :.
-        return f"{type(self).__name__}:<{self.ip_addr}>:{self.domain}"
+        if self.ip_addr != "tor-exit-node" and isinstance(
+            network := ip_network(self.ip_addr), IPv6Network
+        ):
+            # For IPv6 we use the network portion of that IPv6.
+            # This essentially tells us which bucket should this IPv6 belong to.
+            # For example:
+            # The network portion of 2001:0db8:ce1:12::8a2e:0370
+            # is 2001:db8:ce1:12::/64
+            ip_addr_key = str(network.supernet(new_prefix=self.ipv6_network_prefix))
+        else:
+            ip_addr_key = self.ip_addr
+
+        # The angle brackets are important since an IPv6 address contains :
+        return f"{type(self).__name__}:<{ip_addr_key}>:{self.domain}"
 
     @override
     def rules(self) -> list[tuple[int, int]]:
         return rules[self.domain]
+
+
+class RateLimitedEndpoint(RateLimitedObject):
+    def __init__(self, endpoint_name: str) -> None:
+        self.endpoint_name = endpoint_name
+        super().__init__()
+
+    @override
+    def key(self) -> str:
+        return f"{type(self).__name__}:{self.endpoint_name}"
+
+    @override
+    def rules(self) -> list[tuple[int, int]]:
+        return settings.ABSOLUTE_USAGE_LIMITS_BY_ENDPOINT[self.endpoint_name]
 
 
 class RateLimiterBackend(ABC):
@@ -377,7 +407,7 @@ class RedisRateLimiterBackend(RateLimiterBackend):
     def is_ratelimited(cls, entity_key: str, rules: list[tuple[int, int]]) -> tuple[bool, float]:
         """Returns a tuple of (rate_limited, time_till_free)"""
         assert rules
-        list_key, set_key, blocking_key = cls.get_keys(entity_key)
+        list_key, _set_key, blocking_key = cls.get_keys(entity_key)
 
         # Go through the rules from shortest to longest,
         # seeing if this user has violated any of them. First
@@ -601,6 +631,12 @@ def rate_limit_request_by_ip(request: HttpRequest, domain: str) -> None:
         # service doesn't silently remove this functionality.
         logger.warning("Failed to fetch TOR exit node list: %s", err)
     RateLimitedIPAddr(ip_addr, domain=domain).rate_limit_request(request)
+
+
+def rate_limit_endpoint_absolute(endpoint_name: str) -> None:
+    ratelimited, secs_to_freedom = RateLimitedEndpoint(endpoint_name).rate_limit()
+    if ratelimited:
+        raise RateLimitedError(secs_to_freedom)
 
 
 def should_rate_limit(request: HttpRequest) -> bool:

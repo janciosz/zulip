@@ -11,7 +11,6 @@ export type SavedSnippet = {
     date_created: number;
 };
 
-export const ADD_SAVED_SNIPPET_OPTION_ID = -1;
 let saved_snippets_dict: Map<number, SavedSnippet>;
 
 export function get_saved_snippet_by_id(saved_snippet_id: number): SavedSnippet | undefined {
@@ -23,7 +22,7 @@ export function get_saved_snippet_by_id(saved_snippet_id: number): SavedSnippet 
     return saved_snippet;
 }
 
-export function add_saved_snippet(saved_snippet: SavedSnippet): void {
+export function update_saved_snippet_dict(saved_snippet: SavedSnippet): void {
     saved_snippets_dict.set(saved_snippet.id, saved_snippet);
 }
 
@@ -32,25 +31,19 @@ export function remove_saved_snippet(saved_snippet_id: number): void {
 }
 
 export function get_options_for_dropdown_widget(): Option[] {
-    const saved_snippets = [...saved_snippets_dict.values()].sort((a, b) =>
-        util.strcmp(a.title.toLowerCase(), b.title.toLowerCase()),
-    );
+    const saved_snippets = [...saved_snippets_dict.values()];
+    saved_snippets.sort((a, b) => util.strcmp(a.title.toLowerCase(), b.title.toLowerCase()));
     const options = saved_snippets.map((saved_snippet) => ({
         unique_id: saved_snippet.id,
         name: saved_snippet.title,
         description: saved_snippet.content,
         bold_current_selection: true,
         has_delete_icon: true,
+        has_edit_icon: true,
+        delete_icon_label: $t({defaultMessage: "Delete snippet"}),
+        edit_icon_label: $t({defaultMessage: "Edit snippet"}),
     }));
 
-    // Option for creating a new saved snippet.
-    options.unshift({
-        unique_id: ADD_SAVED_SNIPPET_OPTION_ID,
-        name: $t({defaultMessage: "Add a new saved snippet"}),
-        description: "",
-        bold_current_selection: true,
-        has_delete_icon: false,
-    });
     return options;
 }
 

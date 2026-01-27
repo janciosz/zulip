@@ -43,7 +43,7 @@ def notify_reaction_update(
     # Update the cached message since new reaction is added.
     update_message_cache([message])
 
-    user_ids = event_recipient_ids_for_action_on_messages([message])
+    user_ids = event_recipient_ids_for_action_on_messages([message.id], message.is_channel_message)
     send_event_on_commit(user_profile.realm, event, list(user_ids))
 
 
@@ -106,7 +106,7 @@ def check_add_reaction(
     reaction_type: str | None,
 ) -> None:
     message, user_message = access_message_and_usermessage(
-        user_profile, message_id, lock_message=True
+        user_profile, message_id, lock_message=True, is_modifying_message=True
     )
 
     if emoji_code is None or reaction_type is None:

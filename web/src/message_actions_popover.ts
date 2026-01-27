@@ -1,15 +1,18 @@
-import ClipboardJS from "clipboard";
 import $ from "jquery";
 import assert from "minimalistic-assert";
+import type * as tippy from "tippy.js";
 
 import render_message_actions_popover from "../templates/popovers/message_actions_popover.hbs";
 
+import * as clipboard_handler from "./clipboard_handler.ts";
 import * as compose_reply from "./compose_reply.ts";
 import * as condense from "./condense.ts";
 import {show_copied_confirmation} from "./copied_tooltip.ts";
 import * as emoji_picker from "./emoji_picker.ts";
+import * as message_delete from "./message_delete.ts";
 import * as message_edit from "./message_edit.ts";
 import * as message_lists from "./message_lists.ts";
+import * as message_report from "./message_report.ts";
 import type {Message} from "./message_store.ts";
 import * as message_viewport from "./message_viewport.ts";
 import * as popover_menus from "./popover_menus.ts";
@@ -25,7 +28,7 @@ import {the} from "./util.ts";
 let message_actions_popover_keyboard_toggle = false;
 
 function get_action_menu_menu_items(): JQuery {
-    return $("[data-tippy-root] #message-actions-menu-dropdown li:not(.divider):visible a");
+    return $("[data-tippy-root] #message-actions-menu-dropdown li:not(.divider) a");
 }
 
 function focus_first_action_popover_item(): void {
@@ -64,7 +67,14 @@ export function toggle_message_actions_menu(message: Message): boolean {
     return true;
 }
 
-export function initialize(): void {
+export function initialize({
+    message_reminder_click_handler,
+}: {
+    message_reminder_click_handler: (
+        remind_message_id: number,
+        target: tippy.ReferenceElement,
+    ) => void;
+}): void {
     popover_menus.register_popover_menu(".actions_hover .message-actions-menu-button", {
         theme: "popover-menu",
         placement: "bottom",
@@ -141,6 +151,14 @@ export function initialize(): void {
                 popover_menus.hide_current_popover_if_visible(instance);
             });
 
+            $popper.one("click", ".message-reminder", (e) => {
+                const remind_message_id = Number($(e.currentTarget).attr("data-message-id"));
+                popover_menus.hide_current_popover_if_visible(instance);
+                message_reminder_click_handler(remind_message_id, instance.reference);
+                e.preventDefault();
+                e.stopPropagation();
+            });
+
             $popper.one("click", ".popover_move_message", (e) => {
                 const message_id = Number($(e.currentTarget).attr("data-message-id"));
                 assert(message_lists.current !== undefined);
@@ -181,24 +199,6 @@ export function initialize(): void {
                 popover_menus.hide_current_popover_if_visible(instance);
             });
 
-            $popper.one("click", ".rehide_muted_user_message", (e) => {
-                const message_id = Number($(e.currentTarget).attr("data-message-id"));
-                assert(message_lists.current !== undefined);
-                const $row = message_lists.current.get_row(message_id);
-                const message = message_lists.current.get(rows.id($row));
-                assert(message !== undefined);
-                const message_container = message_lists.current.view.message_containers.get(
-                    message.id,
-                );
-                assert(message_container !== undefined);
-                if ($row && !message_container.is_hidden) {
-                    message_lists.current.view.hide_revealed_message(message_id);
-                }
-                e.preventDefault();
-                e.stopPropagation();
-                popover_menus.hide_current_popover_if_visible(instance);
-            });
-
             $popper.one("click", ".view_read_receipts", (e) => {
                 const message_id = Number($(e.currentTarget).attr("data-message-id"));
                 read_receipts.show_user_list(message_id);
@@ -209,7 +209,18 @@ export function initialize(): void {
 
             $popper.one("click", ".delete_message", (e) => {
                 const message_id = Number($(e.currentTarget).attr("data-message-id"));
-                message_edit.delete_message(message_id);
+                message_delete.delete_message(message_id);
+                e.preventDefault();
+                e.stopPropagation();
+                popover_menus.hide_current_popover_if_visible(instance);
+            });
+
+            $popper.one("click", ".popover_report_message", (e) => {
+                const message_id = Number($(e.currentTarget).attr("data-message-id"));
+                assert(message_lists.current !== undefined);
+                const message = message_lists.current.get(message_id);
+                assert(message !== undefined);
+                message_report.show_message_report_modal(message);
                 e.preventDefault();
                 e.stopPropagation();
                 popover_menus.hide_current_popover_if_visible(instance);
@@ -217,25 +228,25 @@ export function initialize(): void {
 
             $popper.one("click", ".reaction_button", (e) => {
                 const message_id = Number($(e.currentTarget).attr("data-message-id"));
-                // Don't propagate the click event since `toggle_emoji_popover` opens a
-                // emoji_picker which we don't want to hide after actions popover is hidden.
+                // Don't propagate the click event since the emoji_picker code opens a
+                // popover which we don't want to hide after actions popover is hidden.
                 e.stopPropagation();
                 e.preventDefault();
                 assert(instance.reference.parentElement !== null);
-                emoji_picker.toggle_emoji_popover(instance.reference.parentElement, message_id, {
-                    placement: "bottom",
-                });
+                emoji_picker.start_picker_for_message_reaction(
+                    instance.reference.parentElement,
+                    message_id,
+                );
                 popover_menus.hide_current_popover_if_visible(instance);
             });
 
-            new ClipboardJS(the($popper.find(".copy_link"))).on("success", () => {
-                show_copied_confirmation(the($(instance.reference).closest(".message_controls")));
-                setTimeout(() => {
-                    // The Clipboard library works by focusing to a hidden textarea.
-                    // We unfocus this so keyboard shortcuts, etc., will work again.
-                    $(":focus").trigger("blur");
-                }, 0);
-                popover_menus.hide_current_popover_if_visible(instance);
+            $popper.on("click", ".copy_link", function (this: HTMLElement) {
+                void (async () => {
+                    await clipboard_handler.popover_copy_link_to_clipboard(instance, $(this));
+                    show_copied_confirmation(
+                        the($(instance.reference).closest(".message_controls")),
+                    );
+                })();
             });
         },
         onHidden(instance) {

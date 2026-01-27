@@ -4,6 +4,8 @@ const assert = require("node:assert/strict");
 
 const _ = require("lodash");
 
+const {make_realm} = require("./lib/example_realm.cjs");
+const {make_message_list} = require("./lib/message_list.cjs");
 const {mock_esm, zrequire} = require("./lib/namespace.cjs");
 const {noop, run_test} = require("./lib/test.cjs");
 const {page_params} = require("./lib/zpage_params.cjs");
@@ -21,19 +23,18 @@ mock_esm("../src/buddy_list", {
 const compose_fade_helper = zrequire("compose_fade_helper");
 const activity_ui = zrequire("activity_ui");
 const muted_users = zrequire("muted_users");
-const narrow_state = zrequire("narrow_state");
 const peer_data = zrequire("peer_data");
 const people = zrequire("people");
 const presence = zrequire("presence");
 const stream_data = zrequire("stream_data");
 const user_status = zrequire("user_status");
 const buddy_data = zrequire("buddy_data");
-const {Filter} = zrequire("filter");
 const message_lists = zrequire("message_lists");
 const {set_current_user, set_realm} = zrequire("state_data");
 const {initialize_user_settings} = zrequire("user_settings");
+const {user_list_style_values} = zrequire("settings_config");
 
-const realm = {};
+const realm = make_realm();
 set_realm(realm);
 const current_user = {};
 set_current_user(current_user);
@@ -175,6 +176,10 @@ test("user_circle, level", ({override}) => {
     set_presence(fred.user_id, undefined);
     assert.equal(buddy_data.get_user_circle_class(fred.user_id), "user-circle-offline");
     assert.equal(buddy_data.level(fred.user_id), 3);
+
+    set_presence(fred.user_id, undefined);
+    assert.equal(buddy_data.get_user_circle_class(fred.user_id, true), "user-circle-deactivated");
+    assert.equal(buddy_data.level(fred.user_id), 3);
 });
 
 test("title_data", ({override}) => {
@@ -185,11 +190,14 @@ test("title_data", ({override}) => {
     let is_group = true;
     const user_ids_string = "9999,1000";
     let expected_group_data = {
-        first_line: "Human Selma, Old User",
+        first_line: "Human Selma and Old User",
         second_line: "",
         third_line: "",
     };
-    assert.deepEqual(buddy_data.get_title_data(user_ids_string, is_group), expected_group_data);
+    assert.deepEqual(
+        buddy_data.get_title_data(user_ids_string, is_group, true),
+        expected_group_data,
+    );
 
     is_group = "";
 
@@ -201,7 +209,7 @@ test("title_data", ({override}) => {
         is_deactivated: false,
     };
     assert.deepEqual(
-        buddy_data.get_title_data(bot_with_owner.user_id, is_group),
+        buddy_data.get_title_data(bot_with_owner.user_id, is_group, true),
         expected_group_data,
     );
 
@@ -211,7 +219,7 @@ test("title_data", ({override}) => {
         second_line: "",
         third_line: "",
     };
-    assert.deepEqual(buddy_data.get_title_data(bot.user_id, is_group), expected_group_data);
+    assert.deepEqual(buddy_data.get_title_data(bot.user_id, is_group, true), expected_group_data);
 
     // Individual users.
     user_status.set_status_text({
@@ -219,14 +227,24 @@ test("title_data", ({override}) => {
         status_text: "out to lunch",
     });
 
+    override(user_settings, "user_list_style", user_list_style_values.with_status.code);
     let expected_data = {
+        first_line: "Human Myself",
+        second_line: "",
+        third_line: "translated: Active now",
+        show_you: true,
+    };
+    override(current_user, "user_id", me.user_id);
+    assert.deepEqual(buddy_data.get_title_data(me.user_id, is_group, false), expected_data);
+
+    expected_data = {
         first_line: "Human Myself",
         second_line: "out to lunch",
         third_line: "translated: Active now",
         show_you: true,
     };
     override(current_user, "user_id", me.user_id);
-    assert.deepEqual(buddy_data.get_title_data(me.user_id, is_group), expected_data);
+    assert.deepEqual(buddy_data.get_title_data(me.user_id, is_group, true), expected_data);
 
     expected_data = {
         first_line: "Old User",
@@ -234,7 +252,7 @@ test("title_data", ({override}) => {
         third_line: "",
         show_you: false,
     };
-    assert.deepEqual(buddy_data.get_title_data(old_user.user_id, is_group), expected_data);
+    assert.deepEqual(buddy_data.get_title_data(old_user.user_id, is_group, true), expected_data);
 
     // Deactivated users.
     people.deactivate(selma);
@@ -245,7 +263,7 @@ test("title_data", ({override}) => {
         show_you: false,
         is_deactivated: true,
     };
-    assert.deepEqual(buddy_data.get_title_data(selma.user_id, is_group), expected_data);
+    assert.deepEqual(buddy_data.get_title_data(selma.user_id, is_group, true), expected_data);
 
     // Deactivated bots.
     people.deactivate(bot_with_owner);
@@ -256,7 +274,7 @@ test("title_data", ({override}) => {
         is_deactivated: true,
     };
     assert.deepEqual(
-        buddy_data.get_title_data(bot_with_owner.user_id, is_group),
+        buddy_data.get_title_data(bot_with_owner.user_id, is_group, true),
         expected_group_data,
     );
 });
@@ -365,9 +383,10 @@ test("always show me", () => {
     assert.deepEqual(buddy_data.get_filtered_and_sorted_user_ids(""), [me.user_id]);
 });
 
-test("always show pm users", ({override_rewire}) => {
+test("always show pm users", () => {
     people.add_active_user(selma);
-    override_rewire(narrow_state, "pm_ids_set", () => new Set([selma.user_id]));
+    message_lists.set_current(make_message_list([{operator: "dm", operand: selma.email}]));
+
     assert.deepEqual(buddy_data.get_filtered_and_sorted_user_ids(""), [me.user_id, selma.user_id]);
 });
 
@@ -397,15 +416,20 @@ test("show offline channel subscribers for small channels", ({override_rewire}) 
 
     const stream_id = 1001;
     const sub = {name: "Rome", subscribed: true, stream_id};
-    stream_data.add_sub(sub);
+    stream_data.add_sub_for_tests(sub);
     peer_data.set_subscribers(stream_id, [
         selma.user_id,
         alice.user_id,
         fred.user_id,
         jill.user_id,
+        me.user_id,
     ]);
 
-    override_rewire(narrow_state, "stream_id", () => stream_id);
+    const filter_terms = [
+        {operator: "channel", operand: String(sub.stream_id)},
+        {operator: "topic", operand: "Foo"},
+    ];
+    message_lists.set_current(make_message_list(filter_terms));
     assert.deepEqual(buddy_data.get_filtered_and_sorted_user_ids(""), [
         me.user_id,
         alice.user_id,
@@ -419,27 +443,22 @@ test("show offline channel subscribers for small channels", ({override_rewire}) 
     assert.deepEqual(buddy_data.get_filtered_and_sorted_user_ids(""), [me.user_id, alice.user_id]);
 });
 
-test("get_conversation_participants", ({override_rewire}) => {
+test("get_conversation_participants", () => {
     people.add_active_user(selma);
 
     const rome_sub = {name: "Rome", subscribed: true, stream_id: 1001};
-    stream_data.add_sub(rome_sub);
-    peer_data.set_subscribers(rome_sub.stream_id, [selma.user_id]);
+    stream_data.add_sub_for_tests(rome_sub);
+    peer_data.set_subscribers(rome_sub.stream_id, [selma.user_id, me.user_id]);
 
-    const filter = new Filter([
-        {operator: "channel", operand: rome_sub.channel_id},
+    const filter_terms = [
+        {operator: "channel", operand: String(rome_sub.stream_id)},
         {operator: "topic", operand: "Foo"},
-    ]);
-    message_lists.set_current({
-        data: {
-            filter,
-            participants: {
-                visible: () => new Set([selma.user_id]),
-            },
-        },
-    });
-    override_rewire(narrow_state, "stream_id", () => rome_sub.stream_id);
-    override_rewire(narrow_state, "topic", () => "Foo");
+    ];
+    message_lists.set_current(
+        make_message_list(filter_terms, {
+            visible_participants: [selma.user_id],
+        }),
+    );
 
     activity_ui.rerender_user_sidebar_participants();
     assert.deepEqual(
@@ -457,10 +476,8 @@ test("level", ({override}) => {
 
     const server_time = 9999;
     const info = {
-        website: {
-            status: "active",
-            timestamp: server_time,
-        },
+        active_timestamp: 9999,
+        idle_timestamp: 9999,
     };
     presence.update_info_from_event(me.user_id, info, server_time);
     presence.update_info_from_event(selma.user_id, info, server_time);
@@ -483,7 +500,7 @@ test("compare_function", () => {
 
     const stream_id = 1001;
     const sub = {name: "Rome", subscribed: true, stream_id};
-    stream_data.add_sub(sub);
+    stream_data.add_sub_for_tests(sub);
     people.add_active_user(alice);
     people.add_active_user(fred);
 
@@ -491,18 +508,18 @@ test("compare_function", () => {
     peer_data.set_subscribers(stream_id, []);
     assert.equal(
         second_user_shown_higher,
-        buddy_data.compare_function(fred.user_id, alice.user_id, sub, new Set(), new Set()),
+        buddy_data.compare_function(fred.user_id, alice.user_id, stream_id, new Set(), new Set()),
     );
 
     // Fred is higher because they're in the narrow and Alice isn't.
     peer_data.set_subscribers(stream_id, [fred.user_id]);
     assert.equal(
         first_user_shown_higher,
-        buddy_data.compare_function(fred.user_id, alice.user_id, sub, new Set(), new Set()),
+        buddy_data.compare_function(fred.user_id, alice.user_id, stream_id, new Set(), new Set()),
     );
     assert.equal(
         second_user_shown_higher,
-        buddy_data.compare_function(alice.user_id, fred.user_id, sub, new Set(), new Set()),
+        buddy_data.compare_function(alice.user_id, fred.user_id, stream_id, new Set(), new Set()),
     );
 
     // Fred is higher because they're in the DM conversation and Alice isn't.
@@ -566,12 +583,6 @@ test("user_last_seen_time_status", ({override}) => {
 
     assert.equal(buddy_data.user_last_seen_time_status(selma.user_id), "translated: Active now");
 
-    override(realm, "realm_is_zephyr_mirror_realm", true);
-    assert.equal(
-        buddy_data.user_last_seen_time_status(old_user.user_id),
-        "translated: Activity unknown",
-    );
-    override(realm, "realm_is_zephyr_mirror_realm", false);
     assert.equal(
         buddy_data.user_last_seen_time_status(old_user.user_id),
         "translated: Not active in the last year",
@@ -591,6 +602,12 @@ test("user_last_seen_time_status", ({override}) => {
 
     set_presence(selma.user_id, "idle");
     assert.equal(buddy_data.user_last_seen_time_status(selma.user_id), "translated: Idle");
+
+    presence.presence_info.set(old_user.user_id, {last_active: undefined});
+    const missing_callback = (user_id) => {
+        assert.equal(user_id, old_user.user_id);
+    };
+    assert.equal(buddy_data.user_last_seen_time_status(old_user.user_id, missing_callback), "");
 });
 
 test("get_items_for_users", ({override}) => {

@@ -1,8 +1,9 @@
 import os
 
-ZULIP_VERSION = "10.0-dev+git"
+ZULIP_VERSION = "12.0-dev+git"
 
 # Add information on number of commits and commit hash to version, if available
+ZULIP_VERSION_WITHOUT_COMMIT = ZULIP_VERSION
 zulip_git_version_file = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "zulip-git-version"
 )
@@ -13,9 +14,9 @@ if os.path.exists(zulip_git_version_file):
 ZULIP_VERSION = lines.pop(0).strip()
 ZULIP_MERGE_BASE = lines.pop(0).strip()
 
-LATEST_MAJOR_VERSION = "9.0"
-LATEST_RELEASE_VERSION = "9.3"
-LATEST_RELEASE_ANNOUNCEMENT = "https://blog.zulip.com/2023/12/15/zulip-8-0-released/"
+LATEST_MAJOR_VERSION = "11.0"
+LATEST_RELEASE_VERSION = "11.4"
+LATEST_RELEASE_ANNOUNCEMENT = "https://blog.zulip.com/zulip-server-11-0"
 
 # Versions of the desktop app below DESKTOP_MINIMUM_VERSION will be
 # prevented from connecting to the Zulip server.  Versions above
@@ -34,7 +35,7 @@ DESKTOP_WARNING_VERSION = "5.9.3"
 # new level means in api_docs/changelog.md, as well as "**Changes**"
 # entries in the endpoint's documentation in `zulip.yaml`.
 
-API_FEATURE_LEVEL = 339  # Last bumped for reaction events.
+API_FEATURE_LEVEL = 448
 
 # Bump the minor PROVISION_VERSION to indicate that folks should provision
 # only when going from an old version of the code to a newer version. Bump
@@ -49,4 +50,4 @@ API_FEATURE_LEVEL = 339  # Last bumped for reaction events.
 #   historical commits sharing the same major version, in which case a
 #   minor version bump suffices.
 
-PROVISION_VERSION = (309, 0)  # bumped 2024-01-07 to remove spectrum-colorpicker
+PROVISION_VERSION = (364, 0)  # bumped 2026-01-12 to upgrade JavaScript dependencies

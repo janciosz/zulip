@@ -1,7 +1,7 @@
 import $ from "jquery";
 import assert from "minimalistic-assert";
 import SimpleBar from "simplebar";
-import {z} from "zod";
+import * as z from "zod/mini";
 
 import render_read_receipts from "../templates/read_receipts.hbs";
 import render_read_receipts_modal from "../templates/read_receipts_modal.hbs";
@@ -12,6 +12,7 @@ import * as loading from "./loading.ts";
 import * as message_store from "./message_store.ts";
 import * as modals from "./modals.ts";
 import * as people from "./people.ts";
+import {realm} from "./state_data.ts";
 import * as ui_report from "./ui_report.ts";
 import * as util from "./util.ts";
 
@@ -34,6 +35,16 @@ export function fetch_read_receipts(message_id: number): void {
             }),
         );
         $("#read_receipts_modal .modal__content").addClass("compact");
+        return;
+    }
+    if (!realm.realm_enable_read_receipts) {
+        ui_report.error(
+            $t({
+                defaultMessage: "Read receipts are disabled for this organization.",
+            }),
+            undefined,
+            $("#read_receipts_modal #read_receipts_error"),
+        );
         return;
     }
 

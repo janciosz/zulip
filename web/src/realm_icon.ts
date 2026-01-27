@@ -28,18 +28,16 @@ export function build_realm_icon_widget(upload_function: UploadFunction): void {
 
     upload_widget.build_direct_upload_widget(
         get_file_input,
-        $("#realm-icon-upload-widget .image_file_input_error").expectOne(),
+        $("#realm-icon-upload-widget-error").expectOne(),
         $("#realm-icon-upload-widget .image_upload_button").expectOne(),
         upload_function,
         realm.max_icon_file_size_mib,
+        "realm_icon",
     );
 }
 
 export function rerender(): void {
-    $("#realm-icon-upload-widget .image-block, #realm-navbar-icon-logo").attr(
-        "src",
-        realm.realm_icon_url,
-    );
+    $("#realm-icon-upload-widget .image-block").attr("src", realm.realm_icon_url);
     if (realm.realm_icon_source === "U") {
         $("#realm-icon-upload-widget .image-delete-button").show();
     } else {

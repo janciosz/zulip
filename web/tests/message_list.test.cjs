@@ -364,6 +364,7 @@ run_test("bookend", ({override}) => {
 
     override(stream_data, "is_subscribed", () => is_subscribed);
     override(stream_data, "get_sub_by_id", () => ({invite_only, name: "IceCream"}));
+    override(stream_data, "can_toggle_subscription", () => true);
 
     {
         const stub = make_stub();
@@ -386,6 +387,29 @@ run_test("bookend", ({override}) => {
 
     list.last_message_historical = false;
     is_subscribed = false;
+
+    {
+        const stub = make_stub();
+        list.view.render_trailing_bookend = stub.f;
+        list.update_trailing_bookend();
+        assert.equal(stub.num_calls, 1);
+        const bookend = stub.get_args(
+            "stream_id",
+            "stream_name",
+            "subscribed",
+            "deactivated",
+            "just_unsubscribed",
+        );
+        assert.equal(bookend.stream_id, 5);
+        assert.equal(bookend.stream_name, "IceCream");
+        assert.equal(bookend.subscribed, false);
+        assert.equal(bookend.deactivated, false);
+        assert.equal(bookend.just_unsubscribed, false);
+    }
+
+    list.last_message_historical = false;
+    is_subscribed = false;
+    list.empty = () => false;
 
     {
         const stub = make_stub();
@@ -447,6 +471,16 @@ run_test("bookend", ({override}) => {
         assert.equal(bookend.subscribed, false);
         assert.equal(bookend.deactivated, false);
         assert.equal(bookend.just_unsubscribed, false);
+    }
+
+    // If the user is not subscribed and cannot subscribe to the
+    // private channel, no bookend is shown.
+    override(stream_data, "can_toggle_subscription", () => false);
+    {
+        const stub = make_stub();
+        list.view.render_trailing_bookend = stub.f;
+        list.update_trailing_bookend();
+        assert.equal(stub.num_calls, 0);
     }
 });
 

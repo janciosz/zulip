@@ -2,6 +2,7 @@
 
 const assert = require("node:assert/strict");
 
+const {make_realm} = require("./lib/example_realm.cjs");
 const {$t} = require("./lib/i18n.cjs");
 const {mock_esm, set_global, zrequire} = require("./lib/namespace.cjs");
 const {run_test, noop} = require("./lib/test.cjs");
@@ -30,7 +31,7 @@ const text_field_edit = mock_esm("text-field-edit");
 const {set_realm} = zrequire("state_data");
 const {initialize_user_settings} = zrequire("user_settings");
 
-const realm = {};
+const realm = make_realm({realm_topics_policy: "allow_empty_topic"});
 set_realm(realm);
 initialize_user_settings({user_settings: {}});
 
@@ -50,12 +51,7 @@ people.add_active_user(bob);
 
 function make_textbox(s) {
     // Simulate a jQuery textbox for testing purposes.
-    const $widget = {};
-
-    $widget.s = s;
-    $widget.length = 1;
-    $widget[0] = "textarea";
-    $widget.focused = false;
+    const $widget = {s, length: 1, [0]: "textarea", focused: false};
 
     $widget.caret = function (arg) {
         if (typeof arg === "number") {
@@ -209,7 +205,7 @@ run_test("compute_placeholder_text", ({override}) => {
         name: "all",
         stream_id: 2,
     };
-    stream_data.add_sub(stream_all);
+    stream_data.add_sub_for_tests(stream_all);
     opts.stream_id = stream_all.stream_id;
     assert.equal(compose_ui.compute_placeholder_text(opts), $t({defaultMessage: "Message #all"}));
 
@@ -297,6 +293,15 @@ run_test("quote_message", ({override, override_rewire}) => {
         success_function = opts.success;
     });
 
+    function run_success_callback() {
+        success_function({
+            message: {
+                content: quote_text,
+                content_type: "text/x-markdown",
+            },
+        });
+    }
+
     // zjquery does not simulate caret handling, so we provide
     // our own versions of val() and caret()
     let textarea_val = "";
@@ -374,10 +379,7 @@ run_test("quote_message", ({override, override_rewire}) => {
     override_with_quote_text(quote_text);
     set_compose_content_with_caret("hello %there"); // "%" is used to encode/display position of focus before change
     compose_reply.quote_message({message_id: 100});
-
-    success_function({
-        raw_content: quote_text,
-    });
+    run_success_callback();
 
     reset_test_state();
 
@@ -392,9 +394,7 @@ run_test("quote_message", ({override, override_rewire}) => {
 
     quote_text = "Testing with caret initially positioned at 0.";
     override_with_quote_text(quote_text);
-    success_function({
-        raw_content: quote_text,
-    });
+    run_success_callback();
 
     override_rewire(compose_reply, "respond_to_message", () => {
         // Reset compose state to replicate the re-opening of compose-box.
@@ -414,9 +414,7 @@ run_test("quote_message", ({override, override_rewire}) => {
 
     quote_text = "Testing with compose-box closed initially.";
     override_with_quote_text(quote_text);
-    success_function({
-        raw_content: quote_text,
-    });
+    run_success_callback();
 
     reset_test_state();
 
@@ -429,9 +427,7 @@ run_test("quote_message", ({override, override_rewire}) => {
 
     quote_text = "Testing with compose-box containing whitespaces and newlines only.";
     override_with_quote_text(quote_text);
-    success_function({
-        raw_content: quote_text,
-    });
+    run_success_callback();
 
     reset_test_state();
 
@@ -449,9 +445,7 @@ run_test("quote_message", ({override, override_rewire}) => {
     assert.ok(new_message);
 
     override_with_quote_text(quote_text);
-    success_function({
-        raw_content: quote_text,
-    });
+    run_success_callback();
 
     reset_test_state();
 
@@ -466,9 +460,7 @@ run_test("quote_message", ({override, override_rewire}) => {
 
     quote_text = "Testing with caret on a new line between 2 lines of text.";
     override_with_quote_text(quote_text);
-    success_function({
-        raw_content: quote_text,
-    });
+    run_success_callback();
 
     reset_test_state();
 
@@ -483,9 +475,7 @@ run_test("quote_message", ({override, override_rewire}) => {
 
     quote_text = "Testing with caret on a new line between many empty newlines.";
     override_with_quote_text(quote_text);
-    success_function({
-        raw_content: quote_text,
-    });
+    run_success_callback();
 });
 
 run_test("set_compose_box_top", () => {
@@ -1210,6 +1200,15 @@ run_test("markdown_shortcuts", ({override_rewire}) => {
         compose_ui.handle_keydown(event, $("textarea#compose-textarea"));
         assert.equal(format_text_type, "link");
         format_text_type = undefined;
+
+        // Test code block insertion:
+        // Mac = Cmd+Shift+C
+        // Windows/Linux = Ctrl+Shift+C
+        event.key = "c";
+        event.shiftKey = true;
+        compose_ui.handle_keydown(event, $("textarea#compose-textarea"));
+        assert.equal(format_text_type, "code");
+        format_text_type = undefined;
     }
 
     // This function cross tests the Cmd/Ctrl + Markdown shortcuts in
@@ -1280,12 +1279,15 @@ run_test("right-to-left", () => {
 });
 
 const get_focus_area = compose_ui._get_focus_area;
-run_test("get_focus_area", () => {
-    assert.equal(get_focus_area({message_type: "private"}), "#private_message_recipient");
+run_test("get_focus_area", ({override}) => {
+    assert.equal(
+        get_focus_area({message_type: "private", private_message_recipient_ids: []}),
+        "#private_message_recipient",
+    );
     assert.equal(
         get_focus_area({
             message_type: "private",
-            private_message_recipient: "bob@example.com",
+            private_message_recipient_ids: [bob.user_id],
         }),
         "textarea#compose-textarea",
     );
@@ -1293,9 +1295,23 @@ run_test("get_focus_area", () => {
         get_focus_area({message_type: "stream"}),
         "#compose_select_recipient_widget_wrapper",
     );
+
+    stream_data.add_sub_for_tests({
+        message_type: "stream",
+        name: "fun",
+        stream_id: 4,
+        topics_policy: "inherit",
+    });
+
+    override(realm, "realm_topics_policy", "disable_empty_topic");
     assert.equal(
         get_focus_area({message_type: "stream", stream_name: "fun", stream_id: 4}),
         "input#stream_message_recipient_topic",
+    );
+    override(realm, "realm_topics_policy", "allow_empty_topic");
+    assert.equal(
+        get_focus_area({message_type: "stream", stream_name: "fun", stream_id: 4}),
+        "textarea#compose-textarea",
     );
     assert.equal(
         get_focus_area({message_type: "stream", stream_name: "fun", stream_id: 4, topic: "more"}),

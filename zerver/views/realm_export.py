@@ -1,7 +1,6 @@
 from datetime import timedelta
 from typing import Annotated
 
-from django.conf import settings
 from django.db import transaction
 from django.http import HttpRequest, HttpResponse
 from django.utils.timezone import now as timezone_now
@@ -15,6 +14,7 @@ from zerver.lib.exceptions import JsonableError
 from zerver.lib.export import get_realm_exports_serialized
 from zerver.lib.queue import queue_event_on_commit
 from zerver.lib.response import json_success
+from zerver.lib.send_email import FromAddress
 from zerver.lib.typed_endpoint import typed_endpoint
 from zerver.lib.typed_endpoint_validators import check_int_in_validator
 from zerver.models import RealmExport, UserProfile
@@ -46,7 +46,7 @@ def export_realm(
     #
     # It's very possible that higher limits would be completely safe.
     MAX_MESSAGE_HISTORY = 250000
-    MAX_UPLOAD_QUOTA = 10 * 1024 * 1024 * 1024
+    MAX_UPLOAD_QUOTA = 20 * 1024 * 1024 * 1024
 
     # Filter based upon the number of events that have occurred in the delta
     # If we are at the limit, the incoming request is rejected
@@ -77,8 +77,10 @@ def export_realm(
         or user.realm.currently_used_upload_space_bytes() > MAX_UPLOAD_QUOTA
     ):
         raise JsonableError(
-            _("Please request a manual export from {email}.").format(
-                email=settings.ZULIP_ADMINISTRATOR,
+            _(
+                "The export you requested is too large for automatic processing. Please request a manual export by contacting {email}."
+            ).format(
+                email=FromAddress.SUPPORT,
             )
         )
 
@@ -113,7 +115,7 @@ def get_realm_exports(request: HttpRequest, user: UserProfile) -> HttpResponse:
 @require_realm_admin
 def delete_realm_export(request: HttpRequest, user: UserProfile, export_id: int) -> HttpResponse:
     try:
-        export_row = RealmExport.objects.get(id=export_id)
+        export_row = RealmExport.objects.get(realm_id=user.realm_id, id=export_id)
     except RealmExport.DoesNotExist:
         raise JsonableError(_("Invalid data export ID"))
 
@@ -130,9 +132,16 @@ def delete_realm_export(request: HttpRequest, user: UserProfile, export_id: int)
 @require_realm_admin
 def get_users_export_consents(request: HttpRequest, user: UserProfile) -> HttpResponse:
     rows = UserProfile.objects.filter(realm=user.realm, is_active=True, is_bot=False).values(
-        "id", "allow_private_data_export"
+        "id",
+        "allow_private_data_export",
+        "email_address_visibility",
     )
     export_consents = [
-        {"user_id": row["id"], "consented": row["allow_private_data_export"]} for row in rows
+        {
+            "user_id": row["id"],
+            "consented": row["allow_private_data_export"],
+            "email_address_visibility": row["email_address_visibility"],
+        }
+        for row in rows
     ]
     return json_success(request, data={"export_consents": export_consents})

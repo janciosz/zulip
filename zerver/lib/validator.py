@@ -30,7 +30,7 @@ for any particular type of object.
 
 from collections.abc import Collection, Container, Iterator
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime
 from typing import Any, NoReturn, TypeVar, cast, overload
 
 import orjson
@@ -117,14 +117,22 @@ def check_date(var_name: str, val: object) -> str:
     if not isinstance(val, str):
         raise ValidationError(_("{var_name} is not a string").format(var_name=var_name))
     try:
-        if (
-            datetime.strptime(val, "%Y-%m-%d").replace(tzinfo=timezone.utc).strftime("%Y-%m-%d")
-            != val
-        ):
+        if date.fromisoformat(val).isoformat() != val:
             raise ValidationError(_("{var_name} is not a date").format(var_name=var_name))
     except ValueError:
         raise ValidationError(_("{var_name} is not a date").format(var_name=var_name))
     return val
+
+
+def check_iso_datetime(var_name: str, val: object) -> datetime:
+    if not isinstance(val, str):
+        raise ValidationError(_("{var_name} is not a string").format(var_name=var_name))
+    try:
+        return datetime.fromisoformat(val)
+    except ValueError:
+        raise ValidationError(
+            _("{var_name} is not an ISO 8601 datetime string").format(var_name=var_name)
+        )
 
 
 def check_int(var_name: str, val: object) -> int:
@@ -357,6 +365,10 @@ def check_capped_url(max_length: int) -> Validator[str]:
 def check_external_account_url_pattern(var_name: str, val: object) -> str:
     s = check_string(var_name, val)
 
+    # Allow empty URL pattern
+    if not s:
+        return s
+
     if s.count("%(username)s") != 1:
         raise ValidationError(_("URL pattern must contain '%(username)s'."))
     url_val = s.replace("%(username)s", "username")
@@ -569,8 +581,8 @@ def check_string_or_int(var_name: str, val: object) -> str | int:
     raise ValidationError(_("{var_name} is not a string or integer").format(var_name=var_name))
 
 
-@dataclass
-class WildValue:
+@dataclass(eq=False)
+class WildValue:  # noqa: PLW1641
     var_name: str
     value: object
 
@@ -590,7 +602,7 @@ class WildValue:
 
     @override
     def __eq__(self, other: object) -> bool:
-        return self.value == other
+        raise TypeError("cannot compare WildValue")
 
     def __len__(self) -> int:
         if not isinstance(self.value, dict | list | str):

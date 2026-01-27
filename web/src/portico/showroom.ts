@@ -1,13 +1,16 @@
 import Handlebars from "handlebars/runtime.js";
 import $ from "jquery";
+import assert from "minimalistic-assert";
 
 import render_banner from "../../templates/components/banner.hbs";
+import render_filter_input from "../../templates/components/showroom/filter_input.hbs";
 import {$t, $t_html} from "../i18n.ts";
+import type {HTMLSelectOneElement} from "../types.ts";
 
 type ComponentIntent = "neutral" | "brand" | "info" | "success" | "warning" | "danger";
 
 type ActionButton = {
-    type: "primary" | "quiet" | "borderless";
+    variant: "solid" | "subtle" | "text";
     intent: ComponentIntent;
     label: string;
     icon?: string | undefined;
@@ -41,9 +44,9 @@ const custom_normal_banner: Banner = {
     label: "This is a normal banner. Use the controls below to modify this banner.",
     buttons: [
         {
-            type: "quiet",
+            variant: "subtle",
             intent: "neutral",
-            label: "Quiet Button",
+            label: "Subtle Button",
         },
     ],
     close_button: true,
@@ -56,9 +59,9 @@ const alert_banners: Record<string, AlertBanner> = {
         label: "This is a navbar alerts banner. Use the controls below to modify this banner.",
         buttons: [
             {
-                type: "quiet",
+                variant: "subtle",
                 intent: "neutral",
-                label: "Quiet Button",
+                label: "Subtle Button",
             },
         ],
         close_button: true,
@@ -70,12 +73,12 @@ const alert_banners: Record<string, AlertBanner> = {
         label: "Welcome back! You have 12 unread messages. Do you want to mark them all as read?",
         buttons: [
             {
-                type: "quiet",
+                variant: "subtle",
                 intent: "info",
                 label: "Yes, please!",
             },
             {
-                type: "borderless",
+                variant: "text",
                 intent: "info",
                 label: "No, I'll catch up.",
             },
@@ -89,7 +92,7 @@ const alert_banners: Record<string, AlertBanner> = {
         label: "Zulip needs to send email to confirm users' addresses and send notifications.",
         buttons: [
             {
-                type: "quiet",
+                variant: "subtle",
                 intent: "warning",
                 label: "Configuration instructions",
             },
@@ -101,51 +104,48 @@ const alert_banners: Record<string, AlertBanner> = {
         process: "demo-organization-deadline",
         intent: "info",
         label: new Handlebars.SafeString(
-            $t_html(
-                {
-                    defaultMessage:
-                        "This <demo_link>demo organization</demo_link> will be automatically deleted in 30 days, unless it's <convert_link>converted into a permanent organization</convert_link>.",
-                },
-                {
-                    demo_link: (content_html) =>
-                        `<a class="banner__link" href="https://zulip.com/help/demo-organizations" target="_blank" rel="noopener noreferrer">${content_html.join("")}</a>`,
-                    convert_link: (content_html) =>
-                        `<a class="banner__link" href="https://zulip.com/help/demo-organizations#convert-a-demo-organization-to-a-permanent-organization" target="_blank" rel="noopener noreferrer">${content_html.join("")}</a>`,
-                },
-            ),
+            $t_html({
+                defaultMessage:
+                    "This demo organization will be automatically deactivated in 30 days, unless it's converted into a permanent organization.",
+            }),
         ),
-        buttons: [],
+        buttons: [
+            {
+                variant: "text",
+                intent: "info",
+                label: $t({defaultMessage: "Learn more"}),
+            },
+            {
+                variant: "subtle",
+                intent: "info",
+                label: $t({defaultMessage: "Convert"}),
+            },
+        ],
         close_button: true,
         custom_classes: "navbar-alert-banner",
     },
     notifications: {
-        process: "notifications",
+        process: "desktop-notifications",
         intent: "brand",
         label: new Handlebars.SafeString(
-            $t_html(
-                {
-                    defaultMessage:
-                        "Zulip needs your permission to enable desktop notifications for messages you receive. You can <z-link>customize</z-link> what kinds of messages trigger notifications.",
-                },
-                {
-                    "z-link": (content_html) =>
-                        `<a class="banner__link" href="https://zulip.com/help/desktop-notifications#desktop-notifications" target="_blank" rel="noopener noreferrer">${content_html.join("")}</a>`,
-                },
-            ),
+            $t_html({
+                defaultMessage:
+                    "Zulip needs your permission to enable desktop notifications for important messages.",
+            }),
         ),
         buttons: [
             {
-                type: "primary",
+                variant: "solid",
                 intent: "brand",
                 label: "Enable notifications",
             },
             {
-                type: "quiet",
+                variant: "subtle",
                 intent: "brand",
                 label: "Ask me later",
             },
             {
-                type: "borderless",
+                variant: "text",
                 intent: "brand",
                 label: "Never ask on this computer",
             },
@@ -159,7 +159,7 @@ const alert_banners: Record<string, AlertBanner> = {
         label: "Your profile is missing required fields.",
         buttons: [
             {
-                type: "quiet",
+                variant: "subtle",
                 intent: "warning",
                 label: "Edit your profile",
             },
@@ -169,13 +169,27 @@ const alert_banners: Record<string, AlertBanner> = {
     },
     "insecure-desktop-app": {
         process: "insecure-desktop-app",
-        intent: "danger",
-        label: "You are using an old version of the Zulip desktop app with known security bugs.",
+        intent: "warning",
+        label: "Zulip Desktop is not updating automatically. Please upgrade for security updates and other improvements.",
         buttons: [
             {
-                type: "quiet",
-                intent: "danger",
+                variant: "subtle",
+                intent: "warning",
                 label: "Download the latest version",
+            },
+        ],
+        close_button: true,
+        custom_classes: "navbar-alert-banner",
+    },
+    "unsupported-browser": {
+        process: "unsupported-browser",
+        intent: "warning",
+        label: "Because you're using an unsupported or very old browser, Zulip may not work as expected.",
+        buttons: [
+            {
+                variant: "text",
+                intent: "warning",
+                label: "Learn more",
             },
         ],
         close_button: true,
@@ -187,7 +201,7 @@ const alert_banners: Record<string, AlertBanner> = {
         label: "Complete your organization profile, which is displayed on your organization's registration and login pages.",
         buttons: [
             {
-                type: "quiet",
+                variant: "subtle",
                 intent: "info",
                 label: "Edit profile",
             },
@@ -201,12 +215,12 @@ const alert_banners: Record<string, AlertBanner> = {
         label: "This Zulip server is running an old version and should be upgraded.",
         buttons: [
             {
-                type: "quiet",
+                variant: "subtle",
                 intent: "danger",
                 label: "Learn more",
             },
             {
-                type: "borderless",
+                variant: "text",
                 intent: "danger",
                 label: "Dismiss for a week",
             },
@@ -217,60 +231,60 @@ const alert_banners: Record<string, AlertBanner> = {
 };
 
 const sortButtons = (buttons: ActionButton[]): void => {
-    const sortOrder: Record<ActionButton["type"], number> = {
-        primary: 1,
-        quiet: 2,
-        borderless: 3,
+    const sortOrder: Record<ActionButton["variant"], number> = {
+        solid: 1,
+        subtle: 2,
+        text: 3,
     };
 
-    buttons.sort((a, b) => sortOrder[a.type] - sortOrder[b.type]);
+    buttons.sort((a, b) => sortOrder[a.variant] - sortOrder[b.variant]);
 };
 
 const update_buttons = (buttons: ActionButton[]): void => {
-    const primary_button = buttons.find((button) => button.type === "primary");
-    if (primary_button) {
-        $("#enable_primary_button").prop("checked", true);
-        $("#primary_button_text").val(primary_button.label);
-        if (primary_button.icon) {
-            $("#primary_button_select_icon").val(primary_button.icon);
-            $("#enable_primary_button_icon").prop("checked", true);
+    const solid_button = buttons.find((button) => button.variant === "solid");
+    if (solid_button) {
+        $("#enable_solid_button").prop("checked", true);
+        $("#solid_button_text").val(solid_button.label);
+        if (solid_button.icon) {
+            $("#solid_button_select_icon").val(solid_button.icon);
+            $("#enable_solid_button_icon").prop("checked", true);
         } else {
-            $("#disable_primary_button_icon").prop("checked", true);
+            $("#disable_solid_button_icon").prop("checked", true);
         }
     } else {
-        $("#disable_primary_button").prop("checked", true);
-        $("#primary_button_text").val("");
-        $("#disable_primary_button_icon").prop("checked", true);
+        $("#disable_solid_button").prop("checked", true);
+        $("#solid_button_text").val("");
+        $("#disable_solid_button_icon").prop("checked", true);
     }
-    const quiet_button = buttons.find((button) => button.type === "quiet");
-    if (quiet_button) {
-        $("#enable_quiet_button").prop("checked", true);
-        $("#quiet_button_text").val(quiet_button.label);
-        if (quiet_button.icon) {
-            $("#quiet_button_select_icon").val(quiet_button.icon);
-            $("#enable_quiet_button_icon").prop("checked", true);
+    const subtle_button = buttons.find((button) => button.variant === "subtle");
+    if (subtle_button) {
+        $("#enable_subtle_button").prop("checked", true);
+        $("#subtle_button_text").val(subtle_button.label);
+        if (subtle_button.icon) {
+            $("#subtle_button_select_icon").val(subtle_button.icon);
+            $("#enable_subtle_button_icon").prop("checked", true);
         } else {
-            $("#disable_quiet_button_icon").prop("checked", true);
+            $("#disable_subtle_button_icon").prop("checked", true);
         }
     } else {
-        $("#disable_quiet_button").prop("checked", true);
-        $("#quiet_button_text").val("");
-        $("#disable_quiet_button_icon").prop("checked", true);
+        $("#disable_subtle_button").prop("checked", true);
+        $("#subtle_button_text").val("");
+        $("#disable_subtle_button_icon").prop("checked", true);
     }
-    const borderless_button = buttons.find((button) => button.type === "borderless");
-    if (borderless_button) {
-        $("#enable_borderless_button").prop("checked", true);
-        $("#borderless_button_text").val(borderless_button.label);
-        if (borderless_button.icon) {
-            $("#borderless_button_select_icon").val(borderless_button.icon);
-            $("#enable_borderless_button_icon").prop("checked", true);
+    const text_button = buttons.find((button) => button.variant === "text");
+    if (text_button) {
+        $("#enable_text_button").prop("checked", true);
+        $("#text_button_text").val(text_button.label);
+        if (text_button.icon) {
+            $("#text_button_select_icon").val(text_button.icon);
+            $("#enable_text_button_icon").prop("checked", true);
         } else {
-            $("#disable_borderless_button_icon").prop("checked", true);
+            $("#disable_text_button_icon").prop("checked", true);
         }
     } else {
-        $("#disable_borderless_button").prop("checked", true);
-        $("#borderless_button_text").val("");
-        $("#disable_borderless_button_icon").prop("checked", true);
+        $("#disable_text_button").prop("checked", true);
+        $("#text_button_text").val("");
+        $("#disable_text_button_icon").prop("checked", true);
     }
 };
 
@@ -308,8 +322,8 @@ $(window).on("load", () => {
         }
     });
 
-    $("#button_text").on("input", function (this: HTMLElement) {
-        const button_text = $(this).val()?.toString() ?? "";
+    $<HTMLInputElement>("input#button_text").on("input", function () {
+        const button_text = this.value;
         $(".action-button-label").text(button_text);
     });
 
@@ -318,8 +332,8 @@ $(window).on("load", () => {
         $(".action-button-label").text($t({defaultMessage: "Button joy"}));
     });
 
-    $("#button_select_icon").on("change", function (this: HTMLElement) {
-        const icon_name = $(this).val()?.toString() ?? "";
+    $<HTMLSelectOneElement>("select:not([multiple])#button_select_icon").on("change", function () {
+        const icon_name = this.value;
         $(".action-button .zulip-icon, .icon-button .zulip-icon").attr(
             "class",
             (_index, className) =>
@@ -327,8 +341,8 @@ $(window).on("load", () => {
         );
     });
 
-    $(".select_background").on("change", function (this: HTMLElement) {
-        const background_var = $(this).val()?.toString() ?? "";
+    $<HTMLSelectOneElement>("select:not([multiple]).select_background").on("change", function () {
+        const background_var = this.value;
         $("body").css("background-color", `var(${background_var})`);
     });
 
@@ -336,7 +350,7 @@ $(window).on("load", () => {
     update_banner();
 
     // Populate banner type select options
-    const $banner_select = $("#banner_select_type");
+    const $banner_select = $<HTMLSelectOneElement>("select:not([multiple])#banner_select_type");
     for (const key of Object.keys(alert_banners)) {
         $banner_select.append($("<option>").val(key).text(key));
     }
@@ -346,31 +360,30 @@ $(window).on("load", () => {
         $banner_intent_select.append($("<option>").val(intent).text(intent));
     }
 
-    $("#showroom_component_banner_select_intent").on("change", function (this: HTMLElement) {
-        const selected_intent = $(this).val()?.toString();
-        if (selected_intent === undefined) {
-            return;
-        }
-        current_banner.intent =
-            component_intents.find((intent) => intent === selected_intent) ?? "neutral";
-        for (const button of current_banner.buttons) {
-            button.intent = current_banner.intent;
-        }
-        if (current_banner.process === "custom-banner") {
-            custom_normal_banner.intent = current_banner.intent;
-            for (const button of custom_normal_banner.buttons) {
-                button.intent = custom_normal_banner.intent;
+    $<HTMLSelectOneElement>("select:not([multiple])#showroom_component_banner_select_intent").on(
+        "change",
+        function () {
+            const selected_intent = this.value;
+            current_banner.intent =
+                component_intents.find((intent) => intent === selected_intent) ?? "neutral";
+            for (const button of current_banner.buttons) {
+                button.intent = current_banner.intent;
             }
-            $("#showroom_component_banner_default_wrapper").html(banner_html(custom_normal_banner));
-        }
-        $("#showroom_component_banner_navbar_alerts_wrapper").html(banner_html(current_banner));
-    });
+            if (current_banner.process === "custom-banner") {
+                custom_normal_banner.intent = current_banner.intent;
+                for (const button of custom_normal_banner.buttons) {
+                    button.intent = custom_normal_banner.intent;
+                }
+                $("#showroom_component_banner_default_wrapper").html(
+                    banner_html(custom_normal_banner),
+                );
+            }
+            $("#showroom_component_banner_navbar_alerts_wrapper").html(banner_html(current_banner));
+        },
+    );
 
-    $banner_select.on("change", function (this: HTMLElement) {
-        const banner_type = $(this).val()?.toString();
-        if (banner_type === undefined) {
-            return;
-        }
+    $banner_select.on("change", function () {
+        const banner_type = this.value;
         current_banner = alert_banners[banner_type]!;
         update_banner();
     });
@@ -388,8 +401,8 @@ $(window).on("load", () => {
         }
     });
 
-    $("#banner_label").on("input", function (this: HTMLElement) {
-        const banner_label = $(this).val()?.toString() ?? "";
+    $<HTMLInputElement>("input#banner_label").on("input", function () {
+        const banner_label = this.value;
         current_banner.label = banner_label;
         $("#showroom_component_banner_navbar_alerts_wrapper").html(banner_html(current_banner));
         if (current_banner.process === "custom-banner") {
@@ -398,28 +411,31 @@ $(window).on("load", () => {
         }
     });
 
-    $("input[name='primary-button-select']").on("change", (e) => {
-        if ($(e.target).attr("id") === "enable_primary_button") {
-            if (current_banner.buttons.some((button) => button.type === "primary")) {
+    $("input[name='solid-button-select']").on("change", (e) => {
+        if ($(e.target).attr("id") === "enable_solid_button") {
+            if (current_banner.buttons.some((button) => button.variant === "solid")) {
                 return;
             }
-            let label = $("#primary_button_text").val()?.toString();
-            if (!label) {
-                label = "Primary Button";
+            let label = $<HTMLInputElement>("input#solid_button_text").val();
+            assert(label !== undefined);
+            if (label === "") {
+                label = "Solid Button";
             }
-            const is_icon_enabled = $("#enable_primary_button_icon").prop("checked") === true;
+            const is_icon_enabled = $("#enable_solid_button_icon").prop("checked") === true;
             current_banner.buttons.push({
-                type: "primary",
+                variant: "solid",
                 intent: current_banner.intent,
                 label,
                 icon: is_icon_enabled
-                    ? $("#primary_button_select_icon").val()?.toString()
+                    ? $<HTMLSelectOneElement>(
+                          "select:not([multiple])#solid_button_select_icon",
+                      ).val()
                     : undefined,
             });
-            $("#primary_button_text").val(label);
+            $("#solid_button_text").val(label);
         } else {
             current_banner.buttons = current_banner.buttons.filter(
-                (button) => button.type !== "primary",
+                (button) => button.variant !== "solid",
             );
         }
         sortButtons(current_banner.buttons);
@@ -430,15 +446,17 @@ $(window).on("load", () => {
         }
     });
 
-    $("input[name='primary-button-icon-select']").on("change", (e) => {
-        const primary_button = current_banner.buttons.find((button) => button.type === "primary");
-        if (primary_button === undefined) {
+    $("input[name='solid-button-icon-select']").on("change", (e) => {
+        const solid_button = current_banner.buttons.find((button) => button.variant === "solid");
+        if (solid_button === undefined) {
             return;
         }
-        if ($(e.target).attr("id") === "enable_primary_button_icon") {
-            primary_button.icon = $("#primary_button_select_icon").val()?.toString() ?? "";
+        if ($(e.target).attr("id") === "enable_solid_button_icon") {
+            solid_button.icon =
+                $<HTMLSelectOneElement>("select:not([multiple])#solid_button_select_icon").val() ??
+                "";
         } else {
-            delete primary_button.icon;
+            delete solid_button.icon;
         }
         $("#showroom_component_banner_navbar_alerts_wrapper").html(banner_html(current_banner));
         if (current_banner.process === "custom-banner") {
@@ -447,58 +465,68 @@ $(window).on("load", () => {
         }
     });
 
-    $("#primary_button_select_icon").on("change", function (this: HTMLElement) {
-        const primary_button = current_banner.buttons.find((button) => button.type === "primary");
-        if (primary_button === undefined) {
-            return;
-        }
-        if (!primary_button.icon) {
-            return;
-        }
-        primary_button.icon = $(this).val()?.toString() ?? "";
-        $("#showroom_component_banner_navbar_alerts_wrapper").html(banner_html(current_banner));
-        if (current_banner.process === "custom-banner") {
-            custom_normal_banner.buttons = current_banner.buttons;
-            $("#showroom_component_banner_default_wrapper").html(banner_html(custom_normal_banner));
-        }
-    });
-
-    $("#primary_button_text").on("input", function (this: HTMLElement) {
-        const primary_button = current_banner.buttons.find((button) => button.type === "primary");
-        if (primary_button === undefined) {
-            return;
-        }
-        primary_button.label = $(this).val()?.toString() ?? "";
-        $("#showroom_component_banner_navbar_alerts_wrapper").html(banner_html(current_banner));
-        if (current_banner.process === "custom-banner") {
-            custom_normal_banner.buttons = current_banner.buttons;
-            $("#showroom_component_banner_default_wrapper").html(banner_html(custom_normal_banner));
-        }
-    });
-
-    $("input[name='quiet-button-select']").on("change", (e) => {
-        if ($(e.target).attr("id") === "enable_quiet_button") {
-            if (current_banner.buttons.some((button) => button.type === "quiet")) {
+    $<HTMLSelectOneElement>("select:not([multiple])#solid_button_select_icon").on(
+        "change",
+        function () {
+            const solid_button = current_banner.buttons.find(
+                (button) => button.variant === "solid",
+            );
+            if (solid_button === undefined) {
                 return;
             }
-            let label = $("#quiet_button_text").val()?.toString();
-            if (!label) {
-                label = "Quiet Button";
+            if (!solid_button.icon) {
+                return;
             }
-            const is_icon_enabled = $("#enable_quiet_button_icon").prop("checked") === true;
+            solid_button.icon = this.value;
+            $("#showroom_component_banner_navbar_alerts_wrapper").html(banner_html(current_banner));
+            if (current_banner.process === "custom-banner") {
+                custom_normal_banner.buttons = current_banner.buttons;
+                $("#showroom_component_banner_default_wrapper").html(
+                    banner_html(custom_normal_banner),
+                );
+            }
+        },
+    );
+
+    $<HTMLInputElement>("input#solid_button_text").on("input", function () {
+        const solid_button = current_banner.buttons.find((button) => button.variant === "solid");
+        if (solid_button === undefined) {
+            return;
+        }
+        solid_button.label = this.value;
+        $("#showroom_component_banner_navbar_alerts_wrapper").html(banner_html(current_banner));
+        if (current_banner.process === "custom-banner") {
+            custom_normal_banner.buttons = current_banner.buttons;
+            $("#showroom_component_banner_default_wrapper").html(banner_html(custom_normal_banner));
+        }
+    });
+
+    $("input[name='subtle-button-select']").on("change", (e) => {
+        if ($(e.target).attr("id") === "enable_subtle_button") {
+            if (current_banner.buttons.some((button) => button.variant === "subtle")) {
+                return;
+            }
+            let label = $<HTMLInputElement>("input#subtle_button_text").val();
+            assert(label !== undefined);
+            if (label === "") {
+                label = "Subtle Button";
+            }
+            const is_icon_enabled = $("#enable_subtle_button_icon").prop("checked") === true;
             current_banner.buttons.push({
-                type: "quiet",
+                variant: "subtle",
                 intent: current_banner.intent,
                 label,
                 icon: is_icon_enabled
-                    ? $("#quiet_button_select_icon").val()?.toString()
+                    ? $<HTMLSelectOneElement>(
+                          "select:not([multiple])#subtle_button_select_icon",
+                      ).val()
                     : undefined,
             });
-            $("#quiet_button_text").val(label);
+            $("#subtle_button_text").val(label);
             sortButtons(current_banner.buttons);
         } else {
             current_banner.buttons = current_banner.buttons.filter(
-                (button) => button.type !== "quiet",
+                (button) => button.variant !== "subtle",
             );
         }
         $("#showroom_component_banner_navbar_alerts_wrapper").html(banner_html(current_banner));
@@ -508,15 +536,17 @@ $(window).on("load", () => {
         }
     });
 
-    $("input[name='quiet-button-icon-select']").on("change", (e) => {
-        const quiet_button = current_banner.buttons.find((button) => button.type === "quiet");
-        if (quiet_button === undefined) {
+    $("input[name='subtle-button-icon-select']").on("change", (e) => {
+        const subtle_button = current_banner.buttons.find((button) => button.variant === "subtle");
+        if (subtle_button === undefined) {
             return;
         }
-        if ($(e.target).attr("id") === "enable_quiet_button_icon") {
-            quiet_button.icon = $("#quiet_button_select_icon").val()?.toString() ?? "";
+        if ($(e.target).attr("id") === "enable_subtle_button_icon") {
+            subtle_button.icon =
+                $<HTMLSelectOneElement>("select:not([multiple])#subtle_button_select_icon").val() ??
+                "";
         } else {
-            delete quiet_button.icon;
+            delete subtle_button.icon;
         }
         $("#showroom_component_banner_navbar_alerts_wrapper").html(banner_html(current_banner));
         if (current_banner.process === "custom-banner") {
@@ -525,58 +555,68 @@ $(window).on("load", () => {
         }
     });
 
-    $("#quiet_button_select_icon").on("change", function (this: HTMLElement) {
-        const quiet_button = current_banner.buttons.find((button) => button.type === "quiet");
-        if (quiet_button === undefined) {
-            return;
-        }
-        if (!quiet_button.icon) {
-            return;
-        }
-        quiet_button.icon = $(this).val()?.toString() ?? "";
-        $("#showroom_component_banner_navbar_alerts_wrapper").html(banner_html(current_banner));
-        if (current_banner.process === "custom-banner") {
-            custom_normal_banner.buttons = current_banner.buttons;
-            $("#showroom_component_banner_default_wrapper").html(banner_html(custom_normal_banner));
-        }
-    });
-
-    $("#quiet_button_text").on("input", function (this: HTMLElement) {
-        const quiet_button = current_banner.buttons.find((button) => button.type === "quiet");
-        if (quiet_button === undefined) {
-            return;
-        }
-        quiet_button.label = $(this).val()?.toString() ?? "";
-        $("#showroom_component_banner_navbar_alerts_wrapper").html(banner_html(current_banner));
-        if (current_banner.process === "custom-banner") {
-            custom_normal_banner.buttons = current_banner.buttons;
-            $("#showroom_component_banner_default_wrapper").html(banner_html(custom_normal_banner));
-        }
-    });
-
-    $("input[name='borderless-button-select']").on("change", function (this: HTMLElement) {
-        if ($(this).attr("id") === "enable_borderless_button") {
-            if (current_banner.buttons.some((button) => button.type === "borderless")) {
+    $<HTMLSelectOneElement>("select:not([multiple])#subtle_button_select_icon").on(
+        "change",
+        function () {
+            const subtle_button = current_banner.buttons.find(
+                (button) => button.variant === "subtle",
+            );
+            if (subtle_button === undefined) {
                 return;
             }
-            let label = $("#borderless_button_text").val()?.toString();
-            if (!label) {
-                label = "Borderless Button";
+            if (!subtle_button.icon) {
+                return;
             }
-            const is_icon_enabled = $("#enable_borderless_button_icon").prop("checked") === true;
+            subtle_button.icon = this.value;
+            $("#showroom_component_banner_navbar_alerts_wrapper").html(banner_html(current_banner));
+            if (current_banner.process === "custom-banner") {
+                custom_normal_banner.buttons = current_banner.buttons;
+                $("#showroom_component_banner_default_wrapper").html(
+                    banner_html(custom_normal_banner),
+                );
+            }
+        },
+    );
+
+    $<HTMLInputElement>("input#subtle_button_text").on("input", function () {
+        const subtle_button = current_banner.buttons.find((button) => button.variant === "subtle");
+        if (subtle_button === undefined) {
+            return;
+        }
+        subtle_button.label = this.value;
+        $("#showroom_component_banner_navbar_alerts_wrapper").html(banner_html(current_banner));
+        if (current_banner.process === "custom-banner") {
+            custom_normal_banner.buttons = current_banner.buttons;
+            $("#showroom_component_banner_default_wrapper").html(banner_html(custom_normal_banner));
+        }
+    });
+
+    $("input[name='text-button-select']").on("change", function (this: HTMLElement) {
+        if (this.id === "enable_text_button") {
+            if (current_banner.buttons.some((button) => button.variant === "text")) {
+                return;
+            }
+            let label = $<HTMLInputElement>("input#text_button_text").val();
+            assert(label !== undefined);
+            if (label === "") {
+                label = "Text Button";
+            }
+            const is_icon_enabled = $("#enable_text_button_icon").prop("checked") === true;
             current_banner.buttons.push({
-                type: "borderless",
+                variant: "text",
                 intent: current_banner.intent,
                 label,
                 icon: is_icon_enabled
-                    ? $("#borderless_button_select_icon").val()?.toString()
+                    ? $<HTMLSelectOneElement>(
+                          "select:not([multiple])#text_button_select_icon",
+                      ).val()
                     : undefined,
             });
-            $("#borderless_button_text").val(label);
+            $("#text_button_text").val(label);
             sortButtons(current_banner.buttons);
         } else {
             current_banner.buttons = current_banner.buttons.filter(
-                (button) => button.type !== "borderless",
+                (button) => button.variant !== "text",
             );
         }
         $("#showroom_component_banner_navbar_alerts_wrapper").html(banner_html(current_banner));
@@ -586,17 +626,17 @@ $(window).on("load", () => {
         }
     });
 
-    $("input[name='borderless-button-icon-select']").on("change", function (this: HTMLElement) {
-        const borderless_button = current_banner.buttons.find(
-            (button) => button.type === "borderless",
-        );
-        if (borderless_button === undefined) {
+    $("input[name='text-button-icon-select']").on("change", function () {
+        const text_button = current_banner.buttons.find((button) => button.variant === "text");
+        if (text_button === undefined) {
             return;
         }
-        if ($(this).attr("id") === "enable_borderless_button_icon") {
-            borderless_button.icon = $("#borderless_button_select_icon").val()?.toString() ?? "";
+        if (this.id === "enable_text_button_icon") {
+            text_button.icon =
+                $<HTMLSelectOneElement>("select:not([multiple])#text_button_select_icon").val() ??
+                "";
         } else {
-            delete borderless_button.icon;
+            delete text_button.icon;
         }
         $("#showroom_component_banner_navbar_alerts_wrapper").html(banner_html(current_banner));
         if (current_banner.process === "custom-banner") {
@@ -605,17 +645,33 @@ $(window).on("load", () => {
         }
     });
 
-    $("#borderless_button_select_icon").on("change", function (this: HTMLElement) {
-        const borderless_button = current_banner.buttons.find(
-            (button) => button.type === "borderless",
-        );
-        if (borderless_button === undefined) {
+    $<HTMLSelectOneElement>("select:not([multiple])#text_button_select_icon").on(
+        "change",
+        function () {
+            const text_button = current_banner.buttons.find((button) => button.variant === "text");
+            if (text_button === undefined) {
+                return;
+            }
+            if (!text_button.icon) {
+                return;
+            }
+            text_button.icon = this.value;
+            $("#showroom_component_banner_navbar_alerts_wrapper").html(banner_html(current_banner));
+            if (current_banner.process === "custom-banner") {
+                custom_normal_banner.buttons = current_banner.buttons;
+                $("#showroom_component_banner_default_wrapper").html(
+                    banner_html(custom_normal_banner),
+                );
+            }
+        },
+    );
+
+    $<HTMLInputElement>("input#text_button_text").on("input", function () {
+        const text_button = current_banner.buttons.find((button) => button.variant === "text");
+        if (text_button === undefined) {
             return;
         }
-        if (!borderless_button.icon) {
-            return;
-        }
-        borderless_button.icon = $(this).val()?.toString() ?? "";
+        text_button.label = this.value;
         $("#showroom_component_banner_navbar_alerts_wrapper").html(banner_html(current_banner));
         if (current_banner.process === "custom-banner") {
             custom_normal_banner.buttons = current_banner.buttons;
@@ -623,18 +679,8 @@ $(window).on("load", () => {
         }
     });
 
-    $("#borderless_button_text").on("input", function (this: HTMLElement) {
-        const borderless_button = current_banner.buttons.find(
-            (button) => button.type === "borderless",
-        );
-        if (borderless_button === undefined) {
-            return;
-        }
-        borderless_button.label = $(this).val()?.toString() ?? "";
-        $("#showroom_component_banner_navbar_alerts_wrapper").html(banner_html(current_banner));
-        if (current_banner.process === "custom-banner") {
-            custom_normal_banner.buttons = current_banner.buttons;
-            $("#showroom_component_banner_default_wrapper").html(banner_html(custom_normal_banner));
-        }
-    });
+    if (window.location.pathname === "/devtools/inputs/") {
+        const $filter_input_container = $<HTMLInputElement>(".showroom-filter-input-container");
+        $filter_input_container.html(render_filter_input());
+    }
 });

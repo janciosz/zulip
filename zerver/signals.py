@@ -1,4 +1,5 @@
 import zoneinfo
+from email.utils import format_datetime as email_format_datetime
 from typing import Any
 
 from django.conf import settings
@@ -11,6 +12,7 @@ from django.utils.translation import gettext as _
 from confirmation.models import one_click_unsubscribe_link
 from zerver.lib.queue import queue_json_publish_rollback_unsafe
 from zerver.lib.send_email import FromAddress
+from zerver.lib.timestamp import format_datetime_to_string
 from zerver.lib.timezone import canonicalize_timezone
 from zerver.models import UserProfile
 
@@ -93,11 +95,7 @@ def email_on_new_login(sender: Any, user: UserProfile, request: Any, **kwargs: A
         if user_tz == "":
             user_tz = timezone_get_current_timezone_name()
         local_time = timezone_now().astimezone(zoneinfo.ZoneInfo(canonicalize_timezone(user_tz)))
-        if user.twenty_four_hour_time:
-            hhmm_string = local_time.strftime("%H:%M")
-        else:
-            hhmm_string = local_time.strftime("%I:%M %p")
-        context["login_time"] = local_time.strftime(f"%A, %B %d, %Y at {hhmm_string} %Z")
+        context["login_time"] = format_datetime_to_string(local_time, user.twenty_four_hour_time)
         context["device_ip"] = request.META.get("REMOTE_ADDR") or _("Unknown IP address")
         context["device_os"] = get_device_os(user_agent) or _("an unknown operating system")
         context["device_browser"] = get_device_browser(user_agent) or _("An unknown browser")
@@ -109,6 +107,7 @@ def email_on_new_login(sender: Any, user: UserProfile, request: Any, **kwargs: A
             "from_name": FromAddress.security_email_from_name(user_profile=user),
             "from_address": FromAddress.NOREPLY,
             "context": context,
+            "date": email_format_datetime(local_time),
         }
         queue_json_publish_rollback_unsafe("email_senders", email_dict)
 
@@ -120,5 +119,5 @@ def clear_zoom_token_on_logout(
     # Loaded lazily so django.setup() succeeds before static asset generation
     from zerver.actions.video_calls import do_set_zoom_token
 
-    if user is not None and user.zoom_token is not None:
+    if user is not None and user.third_party_api_state.get("zoom") is not None:
         do_set_zoom_token(user, None)

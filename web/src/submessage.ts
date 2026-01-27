@@ -1,49 +1,19 @@
-import {z} from "zod";
+import * as z from "zod/mini";
 
 import * as blueslip from "./blueslip.ts";
 import * as channel from "./channel.ts";
 import type {MessageList} from "./message_list.ts";
 import * as message_store from "./message_store.ts";
 import type {Message} from "./message_store.ts";
-import type {PollWidgetOutboundData} from "./poll_widget.ts";
-import {todo_widget_extra_data_schema} from "./todo_widget.ts";
-import type {TodoWidgetOutboundData} from "./todo_widget.ts";
+import {any_widget_data_schema} from "./widget_schema.ts";
+import type {WidgetOutboundData} from "./widget_schema.ts";
 import * as widgetize from "./widgetize.ts";
 
 export type Submessage = z.infer<typeof message_store.submessage_schema>;
 
-export const zform_widget_extra_data_schema = z
-    .object({
-        choices: z.array(
-            z.object({
-                type: z.string(),
-                long_name: z.string(),
-                reply: z.string(),
-                short_name: z.string(),
-            }),
-        ),
-        heading: z.string(),
-        type: z.literal("choices"),
-    })
-    .nullable();
-
-const poll_widget_extra_data_schema = z
-    .object({
-        question: z.string().optional(),
-        options: z.array(z.string()).optional(),
-    })
-    .nullable();
-
 const widget_data_event_schema = z.object({
     sender_id: z.number(),
-    data: z.discriminatedUnion("widget_type", [
-        z.object({widget_type: z.literal("poll"), extra_data: poll_widget_extra_data_schema}),
-        z.object({widget_type: z.literal("zform"), extra_data: zform_widget_extra_data_schema}),
-        z.object({
-            widget_type: z.literal("todo"),
-            extra_data: todo_widget_extra_data_schema,
-        }),
-    ]),
+    data: any_widget_data_schema,
 });
 
 const inbound_data_event_schema = z.object({
@@ -56,18 +26,12 @@ const inbound_data_event_schema = z.object({
     ),
 });
 
-const submessages_event_schema = z
-    .tuple([widget_data_event_schema])
-    .rest(inbound_data_event_schema);
+const submessages_event_schema = z.tuple([widget_data_event_schema], inbound_data_event_schema);
 
 type SubmessageEvents = z.infer<typeof submessages_event_schema>;
 
 export function get_message_events(message: Message): SubmessageEvents | undefined {
     if (message.locally_echoed) {
-        return undefined;
-    }
-
-    if (!message.submessages) {
         return undefined;
     }
 
@@ -86,7 +50,7 @@ export function get_message_events(message: Message): SubmessageEvents | undefin
 }
 
 export function process_widget_rows_in_list(list: MessageList | undefined): void {
-    for (const message_id of widgetize.widget_event_handlers.keys()) {
+    for (const message_id of widgetize.get_message_ids()) {
         const $row = list?.get_row(message_id);
         if ($row && $row.length > 0) {
             process_submessages({message_id, $row});
@@ -130,23 +94,12 @@ export function do_process_submessages(in_opts: {$row: JQuery; message_id: numbe
 
     // Right now, our only use of submessages is widgets.
 
-    const data = widget_event.data;
-
-    if (data === undefined) {
-        return;
-    }
-
-    const widget_type = data.widget_type;
-
-    if (widget_type === undefined) {
-        return;
-    }
+    const any_data = widget_event.data;
 
     const post_to_server = make_server_callback(message_id);
 
     widgetize.activate({
-        widget_type,
-        extra_data: data.extra_data,
+        any_data,
         events: inbound_events,
         $row,
         message,
@@ -163,10 +116,6 @@ export function update_message(submsg: Submessage): void {
         // the original message, since the server doesn't
         // track that.
         return;
-    }
-
-    if (message.submessages === undefined) {
-        message.submessages = [];
     }
 
     const existing = message.submessages.find((sm) => sm.id === submsg.id);
@@ -211,14 +160,8 @@ export function handle_event(submsg: Submessage): void {
 
 export function make_server_callback(
     message_id: number,
-): (opts: {
-    msg_type: string;
-    data: string | PollWidgetOutboundData | TodoWidgetOutboundData;
-}) => void {
-    return function (opts: {
-        msg_type: string;
-        data: string | PollWidgetOutboundData | TodoWidgetOutboundData;
-    }) {
+): (opts: {msg_type: string; data: WidgetOutboundData}) => void {
+    return function (opts: {msg_type: string; data: WidgetOutboundData}) {
         const url = "/json/submessage";
 
         void channel.post({

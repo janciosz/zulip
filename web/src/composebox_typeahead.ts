@@ -2,8 +2,6 @@ import $ from "jquery";
 import _ from "lodash";
 import assert from "minimalistic-assert";
 
-import * as typeahead from "../shared/src/typeahead.ts";
-import type {Emoji, EmojiSuggestion} from "../shared/src/typeahead.ts";
 import render_topic_typeahead_hint from "../templates/topic_typeahead_hint.hbs";
 
 import {MAX_ITEMS, Typeahead} from "./bootstrap_typeahead.ts";
@@ -31,8 +29,12 @@ import * as stream_data from "./stream_data.ts";
 import type {StreamPillData} from "./stream_pill.ts";
 import * as stream_topic_history from "./stream_topic_history.ts";
 import * as stream_topic_history_util from "./stream_topic_history_util.ts";
+import type * as sub_store from "./sub_store.ts";
 import * as timerender from "./timerender.ts";
+import * as tippyjs from "./tippyjs.ts";
 import * as topic_link_util from "./topic_link_util.ts";
+import type {Emoji, EmojiSuggestion} from "./typeahead.ts";
+import * as typeahead from "./typeahead.ts";
 import * as typeahead_helper from "./typeahead_helper.ts";
 import type {UserOrMentionPillData} from "./typeahead_helper.ts";
 import type {UserGroupPillData} from "./user_group_pill.ts";
@@ -43,16 +45,19 @@ import type {UserPillData} from "./user_pill.ts";
 import {user_settings} from "./user_settings.ts";
 import * as util from "./util.ts";
 
+/* Maximum channel name length + link syntax (#**>**) + some topic characters */
+const MAX_LOOKBACK_FOR_TYPEAHEAD_COMPLETION = 60 + 6 + 20;
+
 // **********************************
 // AN IMPORTANT NOTE ABOUT TYPEAHEADS
 // **********************************
 // They do not do any HTML escaping, at all.
 // And your input to them is rendered as though it were HTML by
-// the default highlighter.
+// the default `item_html`.
 //
 // So if you are not using trusted input, you MUST use a
-// highlighter that escapes (i.e. one that calls
-// typeahead_helper.highlight_with_escaping).
+// custom `item_html` that escapes (i.e. one that calls
+// Handlebars.Utils.escapeExpression).
 
 // ---------------- TYPE DECLARATIONS ----------------
 // There are many types of suggestions that can show
@@ -79,9 +84,17 @@ export type LanguageSuggestion = {
     type: "syntax";
 };
 
-type TopicSuggestion = {
+export type TopicSuggestion = {
     topic: string;
+    topic_display_name: string;
     type: "topic_list";
+    is_empty_string_topic: boolean;
+    // is_channel_link will be used when we want to only render the stream as an
+    // option in the topic typeahead while having #**stream_name> as the token.
+    is_channel_link: boolean;
+    used_syntax_prefix: string;
+    stream_data: StreamPillData;
+    is_new_topic: boolean;
 };
 
 type TimeJumpSuggestion = {
@@ -112,14 +125,26 @@ export function rewire_max_num_items(value: typeof max_num_items): void {
     max_num_items = value;
 }
 
+export let max_group_size_for_dm = 20;
+
+export function rewire_max_group_size_for_dm(value: typeof max_group_size_for_dm): void {
+    max_group_size_for_dm = value;
+}
+
 export let emoji_collection: Emoji[] = [];
 
 // This has mostly been replaced with `type` fields on
 // the typeahead items, but is still used for the stream>topic
-// flow and for `get_header_html`. It would be great if we could
+// flow and for `get_footer_html`. It would be great if we could
 // get rid of it altogether.
 let completing: string | null;
 let token: string;
+
+export let private_message_recipient_typeahead: Typeahead<
+    UserGroupPillData | user_pill.UserPillData
+>;
+
+export let stream_message_topic_typeahead: Typeahead<string>;
 
 export function get_or_set_token_for_testing(val?: string): string {
     if (val !== undefined) {
@@ -163,7 +188,7 @@ export function update_emoji_data(initial_emojis: EmojiDict[]): void {
 }
 
 export function topics_seen_for(stream_id?: number): string[] {
-    if (!stream_id) {
+    if (!stream_id || stream_data.is_empty_topic_only_channel(stream_id)) {
         return [];
     }
 
@@ -208,7 +233,8 @@ function get_topic_matcher(query: string): (topic: string) => boolean {
     query = typeahead.clean_query_lowercase(query);
 
     return function (topic: string): boolean {
-        return typeahead.query_matches_string_in_order(query, topic, " ");
+        const topic_display_name = util.get_final_topic_display_name(topic);
+        return typeahead.query_matches_string_in_order(query, topic_display_name, " ");
     };
 }
 
@@ -335,7 +361,7 @@ function handle_keydown(
             target_sel = `#${CSS.escape(target_id)}`;
         }
 
-        const on_topic = target_sel === "input#stream_message_recipient_topic";
+        const on_topic = target_sel === "#stream_message_recipient_topic";
         const on_pm = target_sel === "#private_message_recipient";
         const on_compose = target_sel === "#compose-textarea";
 
@@ -363,7 +389,7 @@ function handle_keydown(
                     e.preventDefault();
                     if (
                         compose_validate.validate_message_length($("#send_message_form")) &&
-                        !$(".message-send-controls").hasClass("disabled-message-send-controls")
+                        !$("#compose-send-button").hasClass("disabled-message-send-controls")
                     ) {
                         on_enter_send();
                     }
@@ -413,7 +439,7 @@ export function tokenize_compose_str(s: string): string {
 
     // We limit how far back to scan to limit potential weird behavior
     // in very long messages, and simplify performance analysis.
-    let min_i = s.length - 40;
+    let min_i = s.length - MAX_LOOKBACK_FOR_TYPEAHEAD_COMPLETION;
     if (min_i < 0) {
         min_i = 0;
     }
@@ -450,22 +476,6 @@ export function tokenize_compose_str(s: string): string {
                     return s.slice(i);
                 }
                 break;
-            case ">":
-                // topic_jump
-                //
-                // If you hit `>` immediately after completing the typeahead for mentioning a stream,
-                // this will reposition the user from.  If | is the cursor, implements:
-                //
-                // `#**stream name** >|` => `#**stream name>|`.
-                if (
-                    s.slice(Math.max(0, i - 2), i) === "**" ||
-                    s.slice(Math.max(0, i - 3), i) === "** "
-                ) {
-                    // return any string as long as its not ''.
-                    return ">topic_jump";
-                }
-                // maybe topic_list; let's let the stream_topic_regex decide later.
-                return ">topic_list";
         }
     }
 
@@ -603,9 +613,9 @@ export function get_pm_people(query: string): (UserGroupPillData | UserPillData)
         filter_pills: true,
         stream_id: compose_state.stream_id(),
         topic: compose_state.topic(),
-        filter_groups_for_guests: true,
+        filter_groups_for_dm: true,
     };
-    const suggestions = get_person_suggestions(query, opts);
+    const suggestions = get_person_suggestions(query, opts, true);
     const current_user_ids = compose_pm_pill.get_user_ids();
     const my_user_id = people.my_current_user_id();
     // We know these aren't mentions because `want_broadcast` was `false`.
@@ -633,50 +643,69 @@ type PersonSuggestionOpts = {
     filter_pills: boolean;
     stream_id: number | undefined;
     topic: string | undefined;
-    filter_groups_for_guests?: boolean;
+    filter_groups_for_dm?: boolean;
     filter_groups_for_mention?: boolean;
 };
+
+function filter_persons<T>(
+    all_persons: User[],
+    filter_pills: boolean,
+    want_broadcast: boolean,
+    filterer: (person_items: UserPillData[], broadcast_items: UserOrMentionPillData[]) => T[],
+): T[] {
+    let persons;
+
+    if (filter_pills) {
+        persons = compose_pm_pill.filter_taken_users(all_persons);
+    } else {
+        persons = all_persons;
+    }
+
+    // Exclude muted users from typeaheads.
+    persons = muted_users.filter_muted_users(persons);
+    const person_items: UserPillData[] = persons.map((person) => ({
+        type: "user",
+        user: person,
+    }));
+
+    let broadcast_items: UserOrMentionPillData[] = [];
+
+    if (want_broadcast) {
+        broadcast_items = broadcast_mentions().map((mention) => ({
+            type: "broadcast" as const,
+            user: mention,
+        }));
+    }
+
+    return filterer(person_items, broadcast_items);
+}
 
 export function get_person_suggestions(
     query: string,
     opts: PersonSuggestionOpts,
+    exclude_non_welcome_bots = false,
 ): (UserOrMentionPillData | UserGroupPillData)[] {
     query = typeahead.clean_query_lowercase(query);
-
-    function filter_persons(all_persons: User[]): UserOrMentionPillData[] {
-        let persons;
-
-        if (opts.filter_pills) {
-            persons = compose_pm_pill.filter_taken_users(all_persons);
-        } else {
-            persons = all_persons;
-        }
-        // Exclude muted users from typeaheads.
-        persons = muted_users.filter_muted_users(persons);
-        let person_items: UserOrMentionPillData[] = persons.map((person) => ({
-            type: "user",
-            user: person,
-        }));
-
-        if (opts.want_broadcast) {
-            person_items = [
-                ...person_items,
-                ...broadcast_mentions().map((mention) => ({
-                    type: "broadcast" as const,
-                    user: mention,
-                })),
-            ];
-        }
-
-        return person_items.filter((item) => typeahead_helper.query_matches_person(query, item));
-    }
 
     let groups: UserGroup[];
     if (opts.filter_groups_for_mention) {
         groups = user_groups.get_user_groups_allowed_to_mention();
-    } else if (opts.filter_groups_for_guests && !settings_data.user_can_access_all_other_users()) {
-        groups = user_groups.get_realm_user_groups().filter((group) => {
-            const group_members = group.members;
+    } else if (opts.filter_groups_for_dm) {
+        const can_access_all_users = settings_data.user_can_access_all_other_users();
+        groups = user_groups.get_all_realm_user_groups().filter((group) => {
+            if (user_groups.is_group_larger_than(group, max_group_size_for_dm)) {
+                // We do not want user trying to DM more than 20 users
+                // together.
+                return false;
+            }
+
+            if (can_access_all_users) {
+                return true;
+            }
+
+            const group_members = user_groups.get_recursive_group_members(group);
+            // If user cannot access all other users we only show groups,
+            // all of whose members can be accessed by the user.
             for (const user_id of group_members) {
                 const person = people.maybe_get_user_by_id(user_id, true);
                 if (person === undefined || person.is_inaccessible_user) {
@@ -686,7 +715,7 @@ export function get_person_suggestions(
             return true;
         });
     } else {
-        groups = user_groups.get_realm_user_groups();
+        groups = user_groups.get_all_realm_user_groups();
     }
 
     const group_pill_data: UserGroupPillData[] = groups.map((group) => ({
@@ -697,6 +726,26 @@ export function get_person_suggestions(
     const filtered_groups = group_pill_data.filter((item) =>
         typeahead_helper.query_matches_group_name(query, item),
     );
+
+    const user = people.get_from_unique_full_name(query);
+    if (user !== undefined) {
+        const person: UserOrMentionPillData[] = [
+            {
+                type: "user",
+                user,
+            },
+        ];
+
+        // We have found an exact user match for the query and return early
+        return typeahead_helper.sort_recipients({
+            users: person,
+            query,
+            current_stream_id: opts.stream_id,
+            current_topic: opts.topic,
+            groups: filtered_groups,
+            max_num_items,
+        });
+    }
 
     /*
         Let's say you're on a big realm and type
@@ -722,14 +771,47 @@ export function get_person_suggestions(
     */
     const cutoff_length = max_num_items;
 
-    const filtered_message_persons = filter_persons(people.get_active_message_people());
+    const filterer = function (
+        person_items: UserPillData[],
+        broadcast_items: UserOrMentionPillData[],
+    ): UserOrMentionPillData[] {
+        const suggestion_items: UserOrMentionPillData[] = [...person_items, ...broadcast_items];
+        const should_remove_diacritics = people.should_remove_diacritics_for_query(
+            query.toLowerCase(),
+        );
+
+        return suggestion_items.filter((item) =>
+            typeahead_helper.query_matches_person(query, item, should_remove_diacritics),
+        );
+    };
+
+    const filtered_message_persons = filter_persons(
+        people.get_active_message_people(),
+        opts.filter_pills,
+        opts.want_broadcast,
+        filterer,
+    );
 
     let filtered_persons: UserOrMentionPillData[];
 
     if (filtered_message_persons.length >= cutoff_length) {
         filtered_persons = filtered_message_persons;
     } else {
-        filtered_persons = filter_persons(people.get_realm_users());
+        if (exclude_non_welcome_bots) {
+            filtered_persons = filter_persons(
+                people.get_realm_users_and_welcome_bot(),
+                opts.filter_pills,
+                opts.want_broadcast,
+                filterer,
+            );
+        } else {
+            filtered_persons = filter_persons(
+                people.get_realm_users_and_system_bots(),
+                opts.filter_pills,
+                opts.want_broadcast,
+                filterer,
+            );
+        }
     }
 
     return typeahead_helper.sort_recipients({
@@ -804,8 +886,13 @@ export function get_candidates(
     const syntax_token = current_token.slice(0, 3);
     if (ALLOWED_MARKDOWN_FEATURES.syntax && (syntax_token === "```" || syntax_token === "~~~")) {
         // Only autocomplete if user starts typing a language after ```
-        // unless the fence was added via the code formatting button.
-        if (current_token.length === 3 && !compose_ui.code_formatting_button_triggered) {
+        // unless the fence was added via the code formatting button or
+        // the typeahead is already visible.
+        if (
+            current_token.length === 3 &&
+            !compose_ui.code_formatting_button_triggered &&
+            !compose_ui.compose_textarea_typeahead?.shown
+        ) {
             return [];
         }
 
@@ -822,11 +909,12 @@ export function get_candidates(
         }
         completing = "syntax";
         token = current_token;
-        // If the code formatting button was triggered, we want to show a blank option
-        // to improve the discoverability of the possibility of specifying a language.
-        const language_list = compose_ui.code_formatting_button_triggered
-            ? ["", ...realm_playground.get_pygments_typeahead_list_for_composebox()]
-            : realm_playground.get_pygments_typeahead_list_for_composebox();
+
+        const default_language = realm.realm_default_code_block_language;
+        const language_list = realm_playground.get_pygments_typeahead_list_for_composebox();
+        if (default_language) {
+            language_list.unshift(default_language);
+        }
         compose_ui.set_code_formatting_button_triggered(false);
         const matcher = get_language_matcher(token);
         const matches = language_list.filter((item) => matcher(item));
@@ -906,7 +994,9 @@ export function get_candidates(
         // Stream regex modified from marked.js
         // Matches '#**stream name** >' at the end of a split.
         const stream_regex = /#\*\*([^*>]+)\*\*\s?>$/;
-        const should_jump_inside_typeahead = stream_regex.test(split[0]);
+        const fallback_stream_regex = /\[#([^*>]+)]\(#[^)]*\)\s>$/;
+        const should_jump_inside_typeahead =
+            stream_regex.test(split[0]) || fallback_stream_regex.test(split[0]);
         if (should_jump_inside_typeahead) {
             completing = "topic_jump";
             token = ">";
@@ -921,32 +1011,108 @@ export function get_candidates(
 
         // Matches '#**stream name>some text' at the end of a split.
         const stream_topic_regex = /#\*\*([^*>]+)>([^*\n]*)$/;
-        const should_begin_typeahead = stream_topic_regex.test(split[0]);
+        // Matches '#>some text', which is a shortcut to
+        // link to topics in the channel currently composing to.
+        // `>` is enclosed in a capture group to use the below
+        // code path for both syntaxes.
+        const shortcut_regex = /#(>)([^*\n]*)$/;
+        // Matches '[#channel](url)>some text' at the end of a split.
+        const fallback_stream_topic_regex = /(\[#)([^*>]+)]\(#[^)]*\)>([^*\n]*)$/;
+        const fallback_tokens = fallback_stream_topic_regex.exec(split[0]);
+        const stream_topic_tokens = stream_topic_regex.exec(split[0]);
+        const topic_shortcut_tokens = shortcut_regex.exec(split[0]);
+        const tokens = stream_topic_tokens ?? topic_shortcut_tokens ?? fallback_tokens;
+        const should_begin_typeahead = tokens !== null;
         if (should_begin_typeahead) {
             completing = "topic_list";
-            const tokens = stream_topic_regex.exec(split[0]);
-            assert(tokens !== null);
-            if (tokens[1]) {
-                const stream_name = tokens[1];
-                token = tokens[2] ?? "";
-
-                // Don't autocomplete if there is a space following '>'
-                if (token.startsWith(" ")) {
-                    return [];
+            let sub: sub_store.StreamSubscription | undefined;
+            let used_syntax_prefix = "#**";
+            if (tokens[1] === ">") {
+                // The shortcut syntax is used.
+                const stream_id = compose_state.stream_id();
+                if (stream_id !== undefined) {
+                    sub = stream_data.get_sub_by_id(stream_id);
                 }
+                used_syntax_prefix = "#>";
+            } else {
+                let stream_name;
+                if (tokens[1] === "[#") {
+                    assert(tokens[2] !== undefined);
+                    stream_name = topic_link_util.html_unescape_invalid_stream_topic_characters(
+                        tokens[2],
+                    );
+                    used_syntax_prefix = "[#";
+                } else {
+                    stream_name = tokens[1];
+                }
+                assert(stream_name !== undefined);
+                sub = stream_data.get_sub_by_name(stream_name);
+            }
 
-                const stream_id = stream_data.get_stream_id(stream_name);
-                const topic_list = topics_seen_for(stream_id);
-                if (should_show_custom_query(token, topic_list)) {
+            if (used_syntax_prefix === "[#") {
+                token = tokens[3] ?? "";
+            } else {
+                token = tokens[2] ?? "";
+            }
+
+            // Don't autocomplete if there is a space following '>'
+            if (token.startsWith(" ")) {
+                return [];
+            }
+            // If we aren't composing to a channel, `sub` would be undefined.
+            if (sub !== undefined) {
+                // We always show topic suggestions after the user types a stream, and let them
+                // pick between just showing the stream (the first option, when nothing follows ">")
+                // or adding a topic.
+                const topic_list = topics_seen_for(sub.stream_id);
+
+                // Topic name doesn't match any of the existing topics.
+                const is_new_topic = should_show_custom_query(token, topic_list);
+                if (is_new_topic) {
                     topic_list.push(token);
                 }
                 const matcher = get_topic_matcher(token);
                 const matches = topic_list.filter((item) => matcher(item));
                 const matches_list: TopicSuggestion[] = matches.map((topic) => ({
                     topic,
+                    topic_display_name: util.get_final_topic_display_name(topic),
+                    is_empty_string_topic: topic === "",
                     type: "topic_list",
+                    is_channel_link: false,
+                    used_syntax_prefix,
+                    stream_data: {
+                        ...sub,
+                        type: "stream",
+                        // The channel description is only rendered for the channel mention
+                        // itself, not topic rows, so we leave this blank.
+                        rendered_description: "",
+                    },
+                    is_new_topic: topic === token && is_new_topic,
                 }));
-                return typeahead_helper.sorter(token, matches_list, (x) => x.topic);
+                const topic_suggestion_candidates = typeahead_helper.sorter(
+                    token,
+                    matches_list,
+                    (x) => x.topic_display_name,
+                );
+
+                // Add link to channel if and only if nothing is typed after '>'
+                if (token.length === 0) {
+                    topic_suggestion_candidates.unshift({
+                        topic: sub.name,
+                        topic_display_name: sub.name,
+                        is_empty_string_topic: false,
+                        type: "topic_list",
+                        is_channel_link: true,
+                        used_syntax_prefix,
+                        stream_data: {
+                            ...sub,
+                            type: "stream",
+                            rendered_description: "",
+                        },
+                        is_new_topic: false,
+                    });
+                }
+                return topic_suggestion_candidates;
             }
         }
     }
@@ -968,10 +1134,12 @@ export function get_candidates(
 
         completing = "stream";
         token = current_token;
-        const candidate_list: StreamPillData[] = stream_data.get_unsorted_subs().map((sub) => ({
-            ...sub,
-            type: "stream",
-        }));
+        const candidate_list: StreamPillData[] = stream_data
+            .get_unsorted_subs_with_content_access()
+            .map((sub) => ({
+                ...sub,
+                type: "stream",
+            }));
         const matcher = get_stream_matcher(token);
         const matches = candidate_list.filter((item) => matcher(item));
         return typeahead_helper.sort_streams(matches, token);
@@ -992,7 +1160,7 @@ export function get_candidates(
     return [];
 }
 
-export function content_highlighter_html(item: TypeaheadSuggestion): string | undefined {
+export function content_item_html(item: TypeaheadSuggestion): string | undefined {
     switch (item.type) {
         case "emoji":
             return typeahead_helper.render_emoji(item);
@@ -1008,11 +1176,20 @@ export function content_highlighter_html(item: TypeaheadSuggestion): string | un
         case "stream":
             return typeahead_helper.render_stream(item);
         case "syntax":
-            return typeahead_helper.render_typeahead_item({primary: item.language});
+            return typeahead_helper.render_typeahead_item({
+                primary: item.language,
+                is_default_language:
+                    item.language !== "" &&
+                    item.language === realm.realm_default_code_block_language,
+            });
         case "topic_jump":
             return typeahead_helper.render_typeahead_item({primary: item.message});
-        case "topic_list":
-            return typeahead_helper.render_typeahead_item({primary: item.topic});
+        case "topic_list": {
+            if (item.is_channel_link) {
+                return typeahead_helper.render_stream(item.stream_data);
+            }
+            return typeahead_helper.render_stream_topic(item);
+        }
         case "time_jump":
             return typeahead_helper.render_typeahead_item({primary: item.message});
         default:
@@ -1050,6 +1227,7 @@ export function content_typeahead_selected(
             message: "",
         };
     }
+
     switch (item.type) {
         case "emoji":
             // leading and trailing spaces are required for emoji,
@@ -1080,6 +1258,11 @@ export function content_typeahead_selected(
                 let user_group_mention_text = is_silent ? "@_*" : "@*";
                 user_group_mention_text += item.name + "* ";
                 beginning += user_group_mention_text;
+                void compose_validate.warn_if_mentioning_unsubscribed_group(
+                    item,
+                    $textbox,
+                    is_silent ?? false,
+                );
                 // We could theoretically warn folks if they are
                 // mentioning a user group that literally has zero
                 // members where we are posting to, but we don't have
@@ -1093,7 +1276,7 @@ export function content_typeahead_selected(
                     is_silent,
                 );
                 if (!is_silent && item.type !== "broadcast") {
-                    compose_validate.warn_if_mentioning_unsubscribed_user(item, $textbox);
+                    void compose_validate.warn_if_mentioning_unsubscribed_user(item, $textbox);
                     mention_text = compose_validate.convert_mentions_to_silent_in_direct_messages(
                         mention_text,
                         item.user.full_name,
@@ -1112,31 +1295,32 @@ export function content_typeahead_selected(
                 highlight.end = highlight.start + item.placeholder.length;
             }
             break;
-        case "stream":
+        case "stream": {
             beginning = beginning.slice(0, -token.length - 1);
             if (beginning.endsWith("#*")) {
                 beginning = beginning.slice(0, -2);
             }
-            if (event && event.key === ">") {
-                // Normally, one accepts typeahead with `Tab` or `Enter`, but when completing
-                // stream typeahead, we allow `>`, the delimiter for stream+topic mentions,
-                // as a completion that automatically sets up stream+topic typeahead for you.
 
-                // Even if the stream name produces a broken link, we'll go with the #** syntax
-                // here since we are dealing with it along with the topic name later.
-                beginning += "#**" + item.name + ">";
-            } else {
+            const sub = stream_data.get_sub_by_name(item.name);
+            const is_empty_topic_only_channel =
+                sub && stream_data.is_empty_topic_only_channel(sub.stream_id);
+            const is_greater_than_key_pressed = event?.type === "keydown" && event.key === ">";
+
+            // For empty topic only channel, skip showing topic typeahead and
+            // insert direct channel link.
+            if (is_empty_topic_only_channel && !is_greater_than_key_pressed) {
+                beginning += topic_link_util.get_stream_link_syntax(item.name);
+            } else if (topic_link_util.will_produce_broken_stream_topic_link(item.name)) {
                 // for stream links, we use markdown link syntax if the #**stream** syntax
                 // will generate a broken url.
-                if (topic_link_util.will_produce_broken_stream_topic_link(item.name)) {
-                    // use markdown link syntax
-                    beginning += topic_link_util.get_fallback_markdown_link(item.name);
-                } else {
-                    beginning += "#**" + item.name + "** ";
-                }
+                beginning += topic_link_util.get_fallback_markdown_link(item.name) + ">";
+            } else {
+                beginning += "#**" + item.name + ">";
             }
-            compose_validate.warn_if_private_stream_is_linked(item, $textbox);
+
+            void compose_validate.warn_if_private_stream_is_linked(item, $textbox);
             break;
+        }
         case "syntax": {
             // Isolate the end index of the triple backticks/tildes, including
             // possibly a space afterward
@@ -1166,23 +1350,40 @@ export function content_typeahead_selected(
             const index = beginning.lastIndexOf("**");
             if (index !== -1) {
                 beginning = beginning.slice(0, index) + ">";
+            } else {
+                // fallback stream link was generated
+                beginning = beginning.slice(0, -2) + ">";
             }
             break;
         }
         case "topic_list": {
+            // If we use "Escape" we would want `#**design>this is a design topic` to be
+            // resolved to `#**design** this is a design topic`
+            if (event?.key === "Escape") {
+                const topic_start_index = beginning.lastIndexOf(">");
+                const topic = beginning.slice(topic_start_index + 1);
+                beginning = beginning.slice(0, topic_start_index) + "** " + topic;
+                break;
+            }
+
             // Stream + topic mention typeahead; close the stream+topic mention syntax with
             // the topic and the final ** or replace it with markdown link syntax if topic name
             // will cause encoding issues.
             // "beginning" contains all the text before the cursor, so we use lastIndexOf to
             // avoid any other stream+topic mentions in the message.
-            const syntax_start_index = beginning.lastIndexOf("#**");
-            beginning =
-                beginning.slice(0, syntax_start_index) +
-                topic_link_util.get_stream_topic_link_syntax(
-                    beginning.slice(syntax_start_index),
+            const syntax_text = item.used_syntax_prefix;
+            const syntax_start_index = beginning.lastIndexOf(syntax_text);
+            let replacement_text;
+            if (item.is_channel_link) {
+                // The user opted to select only the stream and not specify a topic.
+                replacement_text = topic_link_util.get_stream_link_syntax(item.stream_data.name);
+            } else {
+                replacement_text = topic_link_util.get_stream_topic_link_syntax(
+                    item.stream_data.name,
                     item.topic,
-                ) +
-                " ";
+                );
+            }
+            beginning = beginning.slice(0, syntax_start_index) + replacement_text + " ";
             break;
         }
         case "time_jump": {
@@ -1212,7 +1413,6 @@ export function content_typeahead_selected(
             return beginning + rest;
         }
     }
-
     // Keep the cursor after the newly inserted text / selecting the
     // placeholder text, as Bootstrap will call $textbox.change() to
     // overwrite the text in the textbox.
@@ -1257,12 +1457,29 @@ export function initialize_topic_edit_typeahead(
     };
     return new Typeahead(bootstrap_typeahead_input, {
         dropup,
-        highlighter_html(item: string): string {
-            return typeahead_helper.render_typeahead_item({primary: item});
+        item_html(item: string): string {
+            const is_empty_string_topic = item === "";
+            const topic_display_name = util.get_final_topic_display_name(item);
+            return typeahead_helper.render_typeahead_item({
+                primary: topic_display_name,
+                is_empty_string_topic,
+            });
+        },
+        matcher(item: string, query: string): boolean {
+            const matcher = get_topic_matcher(query);
+            return matcher(item);
         },
         sorter(items: string[], query: string): string[] {
-            const sorted = typeahead_helper.sorter(query, items, (x) => x);
-            if (sorted.length > 0 && !sorted.includes(query)) {
+            const stream_id = stream_data.get_stream_id(stream_name);
+            const sorted = typeahead_helper.sorter(query, items, (x) =>
+                util.get_final_topic_display_name(x),
+            );
+            if (
+                stream_id &&
+                stream_data.can_create_new_topics_in_stream(stream_id) &&
+                sorted.length > 0 &&
+                !sorted.includes(query)
+            ) {
                 sorted.unshift(query);
             }
             return sorted;
@@ -1272,31 +1489,51 @@ export function initialize_topic_edit_typeahead(
             return topics_seen_for(stream_id);
         },
         items: max_num_items,
+        getCustomItemClassname() {
+            return "topic-edit-typeahead";
+        },
+        showOnClick: false,
     });
 }
 
-function get_header_html(): string | false {
+function get_footer_html(): string | false {
     let tip_text = "";
     switch (completing) {
-        case "stream":
-            tip_text = $t({defaultMessage: "Press > for list of topics"});
-            break;
         case "silent_mention":
-            tip_text = $t({defaultMessage: "Silent mentions do not trigger notifications."});
+            tip_text = $t({defaultMessage: "This silent mention won't trigger notifications."});
             break;
-        case "syntax":
-            if (realm.realm_default_code_block_language !== "") {
-                tip_text = $t(
-                    {defaultMessage: "Default is {language}. Use 'text' to disable highlighting."},
-                    {language: realm.realm_default_code_block_language},
-                );
-                break;
-            }
-            return false;
         default:
             return false;
     }
     return `<em>${_.escape(tip_text)}</em>`;
+}
+
+function set_recipient_from_typeahead(item: UserGroupPillData | UserPillData): void {
+    if (item.type === "user_group") {
+        const user_group = user_groups.get_user_group_from_id(item.id);
+        const group_members = user_groups.get_recursive_group_members(user_group);
+        for (const user_id of group_members) {
+            const user = people.get_by_user_id(user_id);
+            // filter out inactive users, inserted users and current user
+            // from pill insertion
+            const inserted_users = user_pill.get_user_ids(compose_pm_pill.widget);
+            const current_user = people.is_my_user_id(user.user_id);
+            if (
+                people.is_person_active(user_id) &&
+                !inserted_users.includes(user.user_id) &&
+                !current_user
+            ) {
+                compose_pm_pill.set_from_typeahead(user);
+            }
+        }
+        // clear input pill in the event no pills were added
+        const pill_widget = compose_pm_pill.widget;
+        if (pill_widget.clear_text !== undefined) {
+            pill_widget.clear_text();
+        }
+    } else {
+        compose_pm_pill.set_from_typeahead(item.user);
+    }
 }
 
 export function initialize_compose_typeahead($element: JQuery<HTMLTextAreaElement>): void {
@@ -1314,7 +1551,7 @@ export function initialize_compose_typeahead($element: JQuery<HTMLTextAreaElemen
             // O(n) behavior in the number of users in the organization
             // inside the typeahead library.
             source: get_candidates,
-            highlighter_html: content_highlighter_html,
+            item_html: content_item_html,
             matcher() {
                 return true;
             },
@@ -1323,11 +1560,56 @@ export function initialize_compose_typeahead($element: JQuery<HTMLTextAreaElemen
             },
             updater: content_typeahead_selected,
             stopAdvance: true, // Do not advance to the next field on a Tab or Enter
+            select_on_escape_condition: () => completing === "topic_list",
             automated: compose_automated_selection,
+            option_label(_matching_items, item): string | false {
+                if (item.type === "topic_list") {
+                    if (item.is_channel_link) {
+                        return `<em>${$t({defaultMessage: "(link to channel)"})}</em>`;
+                    }
+
+                    if (item.is_new_topic) {
+                        return `<em>${$t({defaultMessage: "New"})}</em>`;
+                    }
+                } else if (item.type === "syntax") {
+                    if (
+                        item.language !== "" &&
+                        item.language === realm.realm_default_code_block_language
+                    ) {
+                        return `<em>${$t({defaultMessage: "(default)"})}</em>`;
+                    } else if (item.language === "text") {
+                        return `<em>${$t({defaultMessage: "(no highlighting)"})}</em>`;
+                    }
+                }
+                return false;
+            },
             trigger_selection: compose_trigger_selection,
-            header_html: get_header_html,
+            footer_html: get_footer_html,
+            hideAfterSelect() {
+                // After selecting a stream, we immediately show topic options,
+                // so we don't want to hide the typeahead.
+                return completing !== "stream";
+            },
+            getCustomItemClassname(item) {
+                // Inject this class for non stream items in the typeahead menu to remove extra
+                // gap between the stream name, chevron and the the topic name.
+                return item.type === "topic_list" && !item.is_channel_link
+                    ? "topic-typeahead-link"
+                    : "";
+            },
+            clear_typeahead_tooltip() {
+                tippyjs.typeahead_status_emoji_tooltip?.hide();
+            },
         }),
     );
+}
+
+function get_footer_html_for_topic_typeahead(stream_id: number | undefined): string {
+    let can_create_new_topics_in_stream = true;
+    if (stream_id !== undefined) {
+        can_create_new_topics_in_stream = stream_data.can_create_new_topics_in_stream(stream_id);
+    }
+    return render_topic_typeahead_hint({can_create_new_topics_in_stream});
 }
 
 export function initialize({
@@ -1347,20 +1629,43 @@ export function initialize({
         $element: $("input#stream_message_recipient_topic"),
         type: "input",
     };
-    new Typeahead(stream_message_typeahead_input, {
+    stream_message_topic_typeahead = new Typeahead(stream_message_typeahead_input, {
+        dropup: true,
         source(): string[] {
             return topics_seen_for(compose_state.stream_id());
         },
         items: max_num_items,
-        highlighter_html(item: string): string {
-            return typeahead_helper.render_typeahead_item({primary: item});
+        item_html(item: string): string {
+            const is_empty_string_topic = item === "";
+            const topic_display_name = util.get_final_topic_display_name(item);
+            return typeahead_helper.render_typeahead_item({
+                primary: topic_display_name,
+                is_empty_string_topic,
+            });
+        },
+        matcher(item: string, query: string): boolean {
+            const matcher = get_topic_matcher(query);
+            return matcher(item);
         },
         sorter(items: string[], query: string): string[] {
-            const sorted = typeahead_helper.sorter(query, items, (x) => x);
-            if (sorted.length > 0 && !sorted.includes(query)) {
+            const sorted = typeahead_helper.sorter(query, items, (x) =>
+                util.get_final_topic_display_name(x),
+            );
+            const stream_id = compose_state.stream_id();
+            if (
+                stream_id &&
+                stream_data.can_create_new_topics_in_stream(stream_id) &&
+                sorted.length > 0 &&
+                !sorted.includes(query)
+            ) {
                 sorted.unshift(query);
             }
             return sorted;
+        },
+        updater(item: string, _query: string): string {
+            $("textarea#compose-textarea").trigger("focus");
+            $nextFocus = undefined;
+            return item;
         },
         option_label(matching_items: string[], item: string): string | false {
             if (!matching_items.includes(item)) {
@@ -1368,18 +1673,18 @@ export function initialize({
             }
             return false;
         },
-        header_html: render_topic_typeahead_hint,
+        footer_html: () => get_footer_html_for_topic_typeahead(compose_state.stream_id()),
     });
 
     const private_message_typeahead_input: TypeaheadInputElement = {
         $element: $("#private_message_recipient"),
         type: "contenteditable",
     };
-    new Typeahead(private_message_typeahead_input, {
+    private_message_recipient_typeahead = new Typeahead(private_message_typeahead_input, {
         source: get_pm_people,
         items: max_num_items,
         dropup: true,
-        highlighter_html(item: UserGroupPillData | UserPillData) {
+        item_html(item: UserGroupPillData | UserPillData) {
             return typeahead_helper.render_person_or_user_group(item);
         },
         matcher(): boolean {
@@ -1389,29 +1694,7 @@ export function initialize({
             return items;
         },
         updater(item: UserGroupPillData | UserPillData): undefined {
-            if (item.type === "user_group") {
-                for (const user_id of item.members) {
-                    const user = people.get_by_user_id(user_id);
-                    // filter out inactive users, inserted users and current user
-                    // from pill insertion
-                    const inserted_users = user_pill.get_user_ids(compose_pm_pill.widget);
-                    const current_user = people.is_current_user(user.email);
-                    if (
-                        people.is_person_active(user_id) &&
-                        !inserted_users.includes(user.user_id) &&
-                        !current_user
-                    ) {
-                        compose_pm_pill.set_from_typeahead(user);
-                    }
-                }
-                // clear input pill in the event no pills were added
-                const pill_widget = compose_pm_pill.widget;
-                if (pill_widget.clear_text !== undefined) {
-                    pill_widget.clear_text();
-                }
-            } else {
-                compose_pm_pill.set_from_typeahead(item.user);
-            }
+            set_recipient_from_typeahead(item);
         },
         stopAdvance: true, // Do not advance to the next field on a Tab or Enter
     });

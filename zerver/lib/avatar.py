@@ -114,16 +114,25 @@ def get_avatar_field(
         hash_key = user_avatar_base_path_from_ids(user_id, avatar_version, realm_id)
         return get_avatar_url(hash_key, medium=medium)
 
-    return get_gravatar_url(email=email, avatar_version=avatar_version, medium=medium)
+    return get_gravatar_url(
+        email=email,
+        avatar_version=avatar_version,
+        realm_id=realm_id,
+        medium=medium,
+    )
 
 
-def get_gravatar_url(email: str, avatar_version: int, medium: bool = False) -> str:
-    url = _get_unversioned_gravatar_url(email, medium)
+def get_gravatar_url(email: str, avatar_version: int, realm_id: int, medium: bool = False) -> str:
+    url = _get_unversioned_gravatar_url(email, medium, realm_id)
     return append_url_query_string(url, f"version={avatar_version:d}")
 
 
-def _get_unversioned_gravatar_url(email: str, medium: bool) -> str:
-    if settings.ENABLE_GRAVATAR:
+def _get_unversioned_gravatar_url(email: str, medium: bool, realm_id: int) -> str:
+    use_gravatar = settings.ENABLE_GRAVATAR
+    if realm_id in settings.GRAVATAR_REALM_OVERRIDE:
+        use_gravatar = settings.GRAVATAR_REALM_OVERRIDE[realm_id]
+
+    if use_gravatar:
         gravitar_query_suffix = f"&s={MEDIUM_AVATAR_SIZE}" if medium else ""
         hash_key = gravatar_hash(email)
         return f"https://secure.gravatar.com/avatar/{hash_key}?d=identicon{gravitar_query_suffix}"
@@ -133,7 +142,12 @@ def _get_unversioned_gravatar_url(email: str, medium: bool) -> str:
         return staticfiles_storage.url("images/default-avatar.png")
 
 
-def absolute_avatar_url(user_profile: UserProfile) -> str:
+def absolute_avatar_url(
+    user_profile: UserProfile,
+    # Pass `realm_url` to avoid a DB query when `user_profile.realm` isn't
+    # already loaded but the caller has realm available from another source.
+    realm_url: str | None = None,
+) -> str:
     """
     Absolute URLs are used to simplify logic for applications that
     won't be served by browsers, such as rendering GCM notifications.
@@ -141,7 +155,9 @@ def absolute_avatar_url(user_profile: UserProfile) -> str:
     avatar = avatar_url(user_profile)
     # avatar_url can return None if client_gravatar=True, however here we use the default value of False
     assert avatar is not None
-    return urljoin(user_profile.realm.url, avatar)
+    if realm_url is None:
+        realm_url = user_profile.realm.url
+    return urljoin(realm_url, avatar)
 
 
 def is_avatar_new(ldap_avatar: bytes, user_profile: UserProfile) -> bool:

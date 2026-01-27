@@ -1,15 +1,13 @@
 import logging
 import os
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from glob import glob
 
-import bmemcached
 import magic
 from django.conf import settings
-from django.core.cache import cache
-from django.db import connection
 
 from zerver.lib.avatar_hash import user_avatar_path
 from zerver.lib.mime_types import guess_type
+from zerver.lib.parallel import run_parallel
 from zerver.lib.thumbnail import BadImageError
 from zerver.lib.upload import upload_emoji_image, write_avatar_images
 from zerver.lib.upload.s3 import S3UploadBackend, upload_content_to_s3
@@ -51,20 +49,7 @@ def _transfer_avatar_to_s3(user: UserProfile) -> None:
 
 
 def transfer_avatars_to_s3(processes: int) -> None:
-    users = list(UserProfile.objects.all())
-    if processes == 1:
-        for user in users:
-            _transfer_avatar_to_s3(user)
-    else:  # nocoverage
-        connection.close()
-        _cache = cache._cache  # type: ignore[attr-defined] # not in stubs
-        assert isinstance(_cache, bmemcached.Client)
-        _cache.disconnect_all()
-        with ProcessPoolExecutor(max_workers=processes) as executor:
-            for future in as_completed(
-                executor.submit(_transfer_avatar_to_s3, user) for user in users
-            ):
-                future.result()
+    run_parallel(_transfer_avatar_to_s3, UserProfile.objects.all(), processes)
 
 
 def _transfer_message_files_to_s3(attachment: Attachment) -> None:
@@ -83,30 +68,45 @@ def _transfer_message_files_to_s3(attachment: Attachment) -> None:
                 storage_class=settings.S3_UPLOADS_STORAGE_CLASS,
             )
             logging.info("Uploaded message file in path %s", file_path)
+        thumbnail_dir = os.path.join(settings.LOCAL_FILES_DIR, "thumbnail", attachment.path_id)
+        if os.path.isdir(thumbnail_dir):
+            thumbnails = 0
+            for thumbnail_path in glob(os.path.join(thumbnail_dir, "*")):
+                with open(thumbnail_path, "rb") as f:
+                    # This relies on the thumbnails having guessable
+                    # content-type from their path, in order to avoid
+                    # having to fetch the ImageAttachment inside the
+                    # ProcessPoolExecutor.  We also have no clean way
+                    # to prefetch those rows via select_related in the
+                    # outer query, as they match on `path_id`, which
+                    # is not supported as a foreign key.
+                    guessed_type = guess_type(thumbnail_path)[0]
+                    upload_content_to_s3(
+                        s3backend.uploads_bucket,
+                        os.path.join(
+                            "thumbnail", attachment.path_id, os.path.basename(thumbnail_path)
+                        ),
+                        guessed_type,
+                        None,
+                        f.read(),
+                        storage_class=settings.S3_UPLOADS_STORAGE_CLASS,
+                    )
+                thumbnails += 1
+            logging.info(
+                "Uploaded %d thumbnails into %s",
+                thumbnails,
+                os.path.join("thumbnail", attachment.path_id),
+            )
     except FileNotFoundError:  # nocoverage
         pass
 
 
 def transfer_message_files_to_s3(processes: int) -> None:
-    attachments = list(Attachment.objects.all())
-    if processes == 1:
-        for attachment in attachments:
-            _transfer_message_files_to_s3(attachment)
-    else:  # nocoverage
-        connection.close()
-        _cache = cache._cache  # type: ignore[attr-defined] # not in stubs
-        assert isinstance(_cache, bmemcached.Client)
-        _cache.disconnect_all()
-        with ProcessPoolExecutor(max_workers=processes) as executor:
-            for future in as_completed(
-                executor.submit(_transfer_message_files_to_s3, attachment)
-                for attachment in attachments
-            ):
-                future.result()
+    run_parallel(_transfer_message_files_to_s3, Attachment.objects.all(), processes)
 
 
 def _transfer_emoji_to_s3(realm_emoji: RealmEmoji) -> None:
-    if not realm_emoji.file_name or not realm_emoji.author:
+    if not realm_emoji.file_name:
         return  # nocoverage
     emoji_path = RealmEmoji.PATH_ID_TEMPLATE.format(
         realm_id=realm_emoji.realm.id,
@@ -134,17 +134,4 @@ def _transfer_emoji_to_s3(realm_emoji: RealmEmoji) -> None:
 
 
 def transfer_emoji_to_s3(processes: int) -> None:
-    realm_emojis = list(RealmEmoji.objects.filter())
-    if processes == 1:
-        for realm_emoji in realm_emojis:
-            _transfer_emoji_to_s3(realm_emoji)
-    else:  # nocoverage
-        connection.close()
-        _cache = cache._cache  # type: ignore[attr-defined] # not in stubs
-        assert isinstance(_cache, bmemcached.Client)
-        _cache.disconnect_all()
-        with ProcessPoolExecutor(max_workers=processes) as executor:
-            for future in as_completed(
-                executor.submit(_transfer_emoji_to_s3, realm_emoji) for realm_emoji in realm_emojis
-            ):
-                future.result()
+    run_parallel(_transfer_emoji_to_s3, RealmEmoji.objects.filter(), processes)

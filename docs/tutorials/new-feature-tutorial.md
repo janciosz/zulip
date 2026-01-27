@@ -68,7 +68,7 @@ organization in Zulip). The following files are involved in the process:
 
 - `zerver/openapi/zulip.yaml`: OpenAPI definitions for the Zulip REST API.
 - `api_docs/changelog.md`: documentation listing all changes to the Zulip Server API.
-- `help/...`: end user facing documentation (Help Center) for the application.
+- `help/...`: end user facing documentation (help center) for the application.
 
 ### Adding a field to the database
 
@@ -577,7 +577,7 @@ In frontend, we have split the `property_types` into three objects:
 Once you've determined whether the new setting belongs, the next step
 is to find the right subsection of that page to put the setting
 in. For example in this case of `mandatory_topics` it will lie in
-"Other settings" (`other_settings`) subsection.
+"Compose settings" (`org-compose-settings`) subsection.
 
 _If you're not sure in which section your feature belongs, it's
 better to discuss it in

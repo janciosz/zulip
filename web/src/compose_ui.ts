@@ -4,24 +4,25 @@
 import autosize from "autosize";
 import $ from "jquery";
 import _ from "lodash";
+import assert from "minimalistic-assert";
 import {
     insertTextIntoField,
     replaceFieldText,
     setFieldText,
     wrapFieldSelection,
 } from "text-field-edit";
-import {z} from "zod";
+import * as z from "zod/mini";
 
 import type {Typeahead} from "./bootstrap_typeahead.ts";
 import * as bulleted_numbered_list_util from "./bulleted_numbered_list_util.ts";
 import * as channel from "./channel.ts";
 import * as common from "./common.ts";
+import * as compose_state from "./compose_state.ts";
 import type {TypeaheadSuggestion} from "./composebox_typeahead.ts";
 import {$t, $t_html} from "./i18n.ts";
 import * as loading from "./loading.ts";
 import * as markdown from "./markdown.ts";
 import * as people from "./people.ts";
-import * as popover_menus from "./popover_menus.ts";
 import {postprocess_content} from "./postprocess_content.ts";
 import * as rendered_markdown from "./rendered_markdown.ts";
 import * as rtl from "./rtl.ts";
@@ -34,6 +35,7 @@ export const DEFAULT_COMPOSE_PLACEHOLDER = $t({defaultMessage: "Compose your mes
 
 export type ComposeTriggeredOptions = {
     trigger: string;
+    defer_focus?: boolean | undefined;
 } & (
     | {
           message_type: "stream";
@@ -42,7 +44,7 @@ export type ComposeTriggeredOptions = {
       }
     | {
           message_type: "private";
-          private_message_recipient: string;
+          private_message_recipient_ids: number[];
       }
 );
 export type ComposePlaceholderOptions =
@@ -149,16 +151,72 @@ export function rewire_insert_and_scroll_into_view(
     insert_and_scroll_into_view = value;
 }
 
+export function maybe_show_scrolling_formatting_buttons(container_selector: string): void {
+    const button_container = document.querySelector(container_selector);
+    const button_bar = document.querySelector(
+        `${container_selector} .compose-control-buttons-container`,
+    );
+
+    if (!button_container || !button_bar) {
+        return;
+    }
+
+    const button_container_width = button_container?.clientWidth;
+    const button_bar_width = button_bar?.scrollWidth;
+    const button_bar_scroll_left = button_bar?.scrollLeft;
+
+    const button_bar_max_left_scroll = button_bar_width - button_container_width;
+
+    assert(
+        typeof button_container_width === "number" &&
+            typeof button_bar_width === "number" &&
+            typeof button_bar_scroll_left === "number",
+    );
+
+    // Set these values as data attributes for ready access by
+    // other scrolling logic
+    button_container.setAttribute("data-button-container-width", button_container_width.toString());
+    button_container.setAttribute("data-button-bar-width", button_bar_width.toString());
+    button_container.setAttribute(
+        "data-button-bar-max-left-scroll",
+        button_bar_max_left_scroll.toString(),
+    );
+
+    button_container.classList.remove("can-scroll-forward", "can-scroll-backward");
+
+    if (button_container_width < button_bar_width) {
+        // It's possible that the buttons may be scrolled prior
+        // to the viewport being resized
+        if (button_bar_scroll_left < button_bar_max_left_scroll) {
+            button_container?.classList.add("can-scroll-forward");
+        }
+
+        if (button_bar_scroll_left > 0) {
+            button_container?.classList.add("can-scroll-backward");
+        }
+    }
+}
+
 function get_focus_area(opts: ComposeTriggeredOptions): string {
     // Set focus to "Topic" when narrowed to a stream+topic
     // and "Start new conversation" button clicked.
-    if (opts.message_type === "stream" && opts.stream_id && !opts.topic) {
+    if (
+        opts.message_type === "stream" &&
+        opts.stream_id &&
+        !opts.topic &&
+        !stream_data.can_use_empty_topic(opts.stream_id)
+    ) {
         return "input#stream_message_recipient_topic";
     } else if (
         (opts.message_type === "stream" && opts.stream_id !== undefined) ||
-        (opts.message_type === "private" && opts.private_message_recipient)
+        (opts.message_type === "private" && opts.private_message_recipient_ids.length > 0)
     ) {
-        if (opts.trigger === "clear topic button") {
+        if (
+            opts.trigger === "clear topic button" ||
+            opts.trigger === "compose_hotkey" ||
+            opts.trigger === "inbox_nofocus" ||
+            opts.trigger === "zoomed new topic"
+        ) {
             return "input#stream_message_recipient_topic";
         }
         return "textarea#compose-textarea";
@@ -376,16 +434,32 @@ export function compute_placeholder_text(opts: ComposePlaceholderOptions): strin
             }
         }
 
-        if (stream_name && opts.topic) {
+        // The following block of code will do nothing if the channel is
+        // not selected as the placeholder in that case will be "Compose your message here".
+        let topic_display_name: string | undefined;
+        if (opts.topic !== "") {
+            topic_display_name = opts.topic;
+        } else if (
+            stream_data.can_use_empty_topic(opts.stream_id) &&
+            !$("input#stream_message_recipient_topic").is(":focus")
+        ) {
+            topic_display_name = util.get_final_topic_display_name(opts.topic);
+        }
+
+        if (stream_name && topic_display_name !== undefined) {
             return $t(
                 {defaultMessage: "Message #{channel_name} > {topic_name}"},
-                {channel_name: stream_name, topic_name: opts.topic},
+                {channel_name: stream_name, topic_name: topic_display_name},
             );
         } else if (stream_name) {
             return $t({defaultMessage: "Message #{channel_name}"}, {channel_name: stream_name});
         }
     } else if (opts.direct_message_user_ids.length > 0) {
-        const users = people.get_users_from_ids(opts.direct_message_user_ids);
+        const user_ids = opts.direct_message_user_ids;
+        if (people.is_direct_message_conversation_with_self(user_ids)) {
+            return $t({defaultMessage: "Write yourself a note"});
+        }
+        const users = people.get_users_from_ids(user_ids);
         const recipient_parts = users.map((user) => {
             if (people.should_add_guest_user_indicator(user.user_id)) {
                 return $t({defaultMessage: "{name} (guest)"}, {name: user.full_name});
@@ -480,6 +554,31 @@ export function make_compose_box_original_size(): void {
     $("textarea#compose-textarea").trigger("focus");
 }
 
+export function handle_scrolling_formatting_buttons(event: JQuery.ScrollEvent): void {
+    event.stopPropagation();
+    const $button_bar = $(event.currentTarget);
+    const $button_container = $button_bar.closest(".compose-scrolling-buttons-container");
+    const button_bar_max_left_scroll = Number(
+        $button_container.attr("data-button-bar-max-left-scroll"),
+    );
+    const button_bar_left_scroll = $button_bar.scrollLeft();
+
+    // If we're within 4px of the start or end of the formatting buttons,
+    // go ahead and hide the respective scrolling button
+    const hide_scroll_button_threshold_px = 4;
+
+    $button_container.addClass("can-scroll-forward can-scroll-backward");
+
+    assert(typeof button_bar_left_scroll === "number");
+
+    if (button_bar_left_scroll >= button_bar_max_left_scroll - hide_scroll_button_threshold_px) {
+        $button_container.removeClass("can-scroll-forward");
+    }
+    if (button_bar_left_scroll <= hide_scroll_button_threshold_px) {
+        $button_container.removeClass("can-scroll-backward");
+    }
+}
+
 export function handle_keydown(
     event: JQuery.KeyboardEventBase,
     $textarea: JQuery<HTMLTextAreaElement>,
@@ -499,6 +598,8 @@ export function handle_keydown(
         type = "italic";
     } else if (key === "l" && event.shiftKey) {
         type = "link";
+    } else if (key === "c" && event.shiftKey) {
+        type = "code";
     }
 
     // detect Cmd and Ctrl key
@@ -520,6 +621,46 @@ export function handle_keyup(
     }
     // Set the rtl class if the text has an rtl direction, remove it otherwise
     rtl.set_rtl_class_for_textarea($textarea);
+}
+
+/**
+ * True if the cursor in `$textarea` for the current line sits between an opening run
+ * of backticks (`, ```, ...) and its still‑missing matching closer
+ * where the cursor is placed.
+ */
+export function cursor_inside_inline_code_span($textarea: JQuery<HTMLTextAreaElement>): boolean {
+    const text_area_element = $textarea[0];
+    if (!text_area_element) {
+        return false;
+    }
+    // jQuery.val() can be string | number | string[] | undefined.
+    const val = $textarea.val();
+    assert(typeof val === "string");
+    const caret = text_area_element.selectionStart;
+
+    const last_newline = val.lastIndexOf("\n", caret - 1);
+    const line_start = last_newline === -1 ? 0 : last_newline + 1;
+    const current_line_prefix = val.slice(line_start, caret);
+
+    let open_backtick_count = 0;
+    for (let i = 0; i < current_line_prefix.length; i += 1) {
+        if (current_line_prefix[i] === "`") {
+            let consecutive_count = 1;
+            while (i + 1 < current_line_prefix.length && current_line_prefix[i + 1] === "`") {
+                consecutive_count += 1;
+                i += 1;
+            }
+
+            // A code span can be opened with any number of consecutive backticks,
+            // and can only be closed with the same number of consecutive backticks.
+            if (open_backtick_count === 0) {
+                open_backtick_count = consecutive_count;
+            } else if (consecutive_count === open_backtick_count) {
+                open_backtick_count = 0;
+            }
+        }
+    }
+    return open_backtick_count > 0;
 }
 
 export function cursor_inside_code_block($textarea: JQuery<HTMLTextAreaElement>): boolean {
@@ -1107,6 +1248,7 @@ export let format_text = (
             break;
         }
         case "code": {
+            // Ctrl + Shift + C: Toggle code syntax on selection.
             const inline_code_syntax = "`";
             let block_code_syntax_start = "```\n";
             let block_code_syntax_end = "\n```";
@@ -1215,22 +1357,15 @@ export function show_compose_spinner(): void {
     $(".compose-submit-button").addClass("compose-button-disabled");
 }
 
-export function get_compose_click_target(element: HTMLElement): Element {
-    const compose_control_buttons_popover = popover_menus.get_compose_control_buttons_popover();
-    if (
-        compose_control_buttons_popover &&
-        $(compose_control_buttons_popover.popper).has(element).length > 0
-    ) {
-        return compose_control_buttons_popover.reference;
-    }
-    return element;
-}
-
 export function render_and_show_preview(
+    $preview_container: JQuery,
     $preview_spinner: JQuery,
     $preview_content_box: JQuery,
     content: string,
 ): void {
+    const preview_render_count = compose_state.get_preview_render_count() + 1;
+    compose_state.set_preview_render_count(preview_render_count);
+
     function show_preview(rendered_content: string, raw_content?: string): void {
         // content is passed to check for status messages ("/me ...")
         // and will be undefined in case of errors
@@ -1271,6 +1406,16 @@ export function render_and_show_preview(
             url: "/json/messages/render",
             data: {content},
             success(response_data) {
+                if (
+                    preview_render_count !== compose_state.get_preview_render_count() ||
+                    !$preview_container.hasClass("preview_mode")
+                ) {
+                    // The user is no longer in preview mode or the compose
+                    // input has already been updated with new raw Markdown
+                    // since this rendering request was sent off to the server, so
+                    // there's nothing to do.
+                    return;
+                }
                 const data = message_render_response_schema.parse(response_data);
                 if (markdown.contains_backend_only_syntax(content)) {
                     loading.destroy_indicator($preview_spinner);

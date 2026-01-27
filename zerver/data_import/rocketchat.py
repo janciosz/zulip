@@ -1,8 +1,7 @@
 import logging
 import os
-import random
-import secrets
 import uuid
+from collections import defaultdict
 from typing import Any
 
 import bson
@@ -11,6 +10,7 @@ from django.forms.models import model_to_dict
 
 from zerver.data_import.import_util import (
     SubscriberHandler,
+    UploadRecordData,
     ZerverFieldsT,
     build_attachment,
     build_direct_message_group,
@@ -25,6 +25,7 @@ from zerver.data_import.import_util import (
     build_user_profile,
     build_zerver_realm,
     create_converted_data_files,
+    get_attachment_path_and_content,
     make_subscriber_map,
     make_user_messages,
 )
@@ -46,7 +47,7 @@ def make_realm(
     created_at = float(rc_instance["_createdAt"].timestamp())
 
     zerver_realm = build_zerver_realm(realm_id, realm_subdomain, created_at, "Rocket.Chat")
-    realm = build_realm(zerver_realm, realm_id, domain_name)
+    realm = build_realm(zerver_realm, realm_id, domain_name, import_source="rocketchat")
 
     # We may override these later.
     realm["zerver_defaultstream"] = []
@@ -148,7 +149,7 @@ def truncate_name(name: str, name_id: int, max_length: int = 60) -> str:
 
 def get_stream_name(rc_channel: dict[str, Any]) -> str:
     if rc_channel.get("teamMain"):
-        stream_name = f'[TEAM] {rc_channel["name"]}'
+        stream_name = f"[TEAM] {rc_channel['name']}"
     else:
         stream_name = rc_channel["name"]
 
@@ -157,12 +158,18 @@ def get_stream_name(rc_channel: dict[str, Any]) -> str:
     return stream_name
 
 
+ROCKETCHAT_DEFAULT_ANNOUNCEMENTS_CHANNEL_NAME = "general"
+
+
 def convert_channel_data(
+    realm: ZerverFieldsT,
     room_id_to_room_map: dict[str, dict[str, Any]],
     team_id_to_team_map: dict[str, dict[str, Any]],
     stream_id_mapper: IdMapper[str],
     realm_id: int,
 ) -> list[ZerverFieldsT]:
+    zerver_realm = realm["zerver_realm"]
+
     streams = []
 
     for rc_room_id, channel_dict in room_id_to_room_map.items():
@@ -196,6 +203,11 @@ def convert_channel_data(
             invite_only=invite_only,
             stream_post_policy=stream_post_policy,
         )
+
+        if stream_name == ROCKETCHAT_DEFAULT_ANNOUNCEMENTS_CHANNEL_NAME:
+            zerver_realm[0]["new_stream_announcements_stream"] = stream["id"]
+            zerver_realm[0]["zulip_update_announcements_stream"] = stream["id"]
+
         streams.append(stream)
 
     return streams
@@ -230,9 +242,6 @@ def convert_stream_subscription_data(
             users = stream_members_map[stream["id"]]
         else:
             users = set()
-            # Set the stream without any subscribers
-            # as deactivated.
-            stream["deactivated"] = True
         subscriber_handler.set_info(users=users, stream_id=stream["id"])
 
 
@@ -277,21 +286,18 @@ def build_custom_emoji(
     emoji_records: list[ZerverFieldsT] = []
 
     # Map emoji file_id to emoji file data
-    emoji_file_data = {}
+    emoji_file_data = defaultdict(list)
+    object_id_to_filename = {}
     for emoji_file in custom_emoji_data["file"]:
-        emoji_file_data[emoji_file["_id"]] = {"filename": emoji_file["filename"], "chunks": []}
+        if isinstance(emoji_file["_id"], bson.objectid.ObjectId):  # nocoverage
+            object_id_to_filename[str(emoji_file["_id"])] = emoji_file["filename"]
     for emoji_chunk in custom_emoji_data["chunk"]:
-        emoji_file_data[emoji_chunk["files_id"]]["chunks"].append(emoji_chunk["data"])
+        file_id = str(emoji_chunk["files_id"])
+        emoji_file_data[object_id_to_filename.get(file_id, file_id)].append(emoji_chunk["data"])
 
-    # Build custom emoji
     for rc_emoji in custom_emoji_data["emoji"]:
-        # Subject to change with changes in database
-        emoji_file_id = f'{rc_emoji["name"]}.{rc_emoji["extension"]}'
-
-        emoji_file_info = emoji_file_data[emoji_file_id]
-
-        emoji_filename = emoji_file_info["filename"]
-        emoji_data = b"".join(emoji_file_info["chunks"])
+        emoji_filename = f"{rc_emoji['name']}.{rc_emoji['extension']}"
+        emoji_data = b"".join(emoji_file_data[emoji_filename])
 
         target_sub_path = RealmEmoji.PATH_ID_TEMPLATE.format(
             realm_id=realm_id,
@@ -308,8 +314,8 @@ def build_custom_emoji(
 
         for alias in emoji_aliases:
             emoji_record = dict(
-                path=target_path,
-                s3_path=target_path,
+                path=target_sub_path,
+                s3_path=target_sub_path,
                 file_name=emoji_filename,
                 realm_id=realm_id,
                 name=alias,
@@ -375,9 +381,8 @@ def process_message_attachment(
     realm_id: int,
     message_id: int,
     user_id: int,
-    user_handler: UserHandler,
     zerver_attachment: list[ZerverFieldsT],
-    uploads_list: list[ZerverFieldsT],
+    uploads_list: list[UploadRecordData],
     upload_id_to_upload_data_map: dict[str, dict[str, Any]],
     output_dir: str,
 ) -> tuple[str, bool]:
@@ -391,7 +396,7 @@ def process_message_attachment(
 
     upload_file_data = upload_id_to_upload_data_map[upload["_id"]]
     file_name = upload["name"]
-    file_ext = f'.{upload["type"].split("/")[-1]}'
+    file_ext = f".{upload['type'].split('/')[-1]}"
 
     has_image = False
     if file_ext.lower() in IMAGE_EXTENSIONS:
@@ -407,23 +412,18 @@ def process_message_attachment(
         logging.info("Replacing too long attachment name with random uuid: %s", file_name)
         sanitized_name = uuid.uuid4().hex
 
-    s3_path = "/".join(
-        [
-            str(realm_id),
-            format(random.randint(0, 255), "x"),
-            secrets.token_urlsafe(18),
-            sanitized_name,
-        ]
+    attachment_data = get_attachment_path_and_content(
+        link_name=file_name, filename=file_name, realm_id=realm_id
     )
 
     # Build the attachment from chunks and save it to s3_path.
-    file_out_path = os.path.join(output_dir, "uploads", s3_path)
+    file_out_path = os.path.join(output_dir, "uploads", attachment_data.path_id)
     os.makedirs(os.path.dirname(file_out_path), exist_ok=True)
     with open(file_out_path, "wb") as upload_file:
         upload_file.write(b"".join(upload_file_data["chunk"]))
 
     attachment_content = (
-        f'{upload_file_data.get("description", "")}\n\n[{file_name}](/user_uploads/{s3_path})'
+        f"{upload_file_data.get('description', '')}\n\n{attachment_data.markdown_link}"
     )
 
     fileinfo = {
@@ -432,24 +432,24 @@ def process_message_attachment(
         "created": float(upload_file_data["_updatedAt"].timestamp()),
     }
 
-    upload = dict(
-        path=s3_path,
-        realm_id=realm_id,
-        content_type=upload["type"],
-        user_profile_id=user_id,
-        last_modified=fileinfo["created"],
-        user_profile_email=user_handler.get_user(user_id=user_id)["email"],
-        s3_path=s3_path,
-        size=fileinfo["size"],
+    uploads_list.append(
+        UploadRecordData(
+            content_type=upload["type"],
+            last_modified=fileinfo["created"],
+            path=attachment_data.path_id,
+            realm_id=realm_id,
+            s3_path=attachment_data.path_id,
+            size=fileinfo["size"],
+            user_profile_id=user_id,
+        )
     )
-    uploads_list.append(upload)
 
     build_attachment(
         realm_id=realm_id,
         message_ids={message_id},
         user_id=user_id,
         fileinfo=fileinfo,
-        s3_path=s3_path,
+        s3_path=attachment_data.path_id,
         zerver_attachment=zerver_attachment,
     )
 
@@ -465,7 +465,7 @@ def process_raw_message_batch(
     output_dir: str,
     zerver_realmemoji: list[ZerverFieldsT],
     total_reactions: list[ZerverFieldsT],
-    uploads_list: list[ZerverFieldsT],
+    uploads_list: list[UploadRecordData],
     zerver_attachment: list[ZerverFieldsT],
     upload_id_to_upload_data_map: dict[str, dict[str, Any]],
 ) -> None:
@@ -517,6 +517,7 @@ def process_raw_message_batch(
         has_attachment = False
         has_image = False
         has_link = raw_message["has_link"]
+        is_channel_message = raw_message["is_channel_message"]
 
         if "file" in raw_message:
             has_attachment = True
@@ -527,7 +528,6 @@ def process_raw_message_batch(
                 realm_id=realm_id,
                 message_id=message_id,
                 user_id=sender_user_id,
-                user_handler=user_handler,
                 uploads_list=uploads_list,
                 zerver_attachment=zerver_attachment,
                 upload_id_to_upload_data_map=upload_id_to_upload_data_map,
@@ -547,9 +547,11 @@ def process_raw_message_batch(
             rendered_content=rendered_content,
             topic_name=topic_name,
             user_id=sender_user_id,
+            is_channel_message=is_channel_message,
             has_image=has_image,
             has_link=has_link,
             has_attachment=has_attachment,
+            is_direct_message_type=is_pm_data,
         )
         zerver_message.append(message)
         build_reactions(
@@ -621,7 +623,7 @@ def process_messages(
     direct_message_group_id_to_direct_message_group_map: dict[str, dict[str, Any]],
     zerver_realmemoji: list[ZerverFieldsT],
     total_reactions: list[ZerverFieldsT],
-    uploads_list: list[ZerverFieldsT],
+    uploads_list: list[UploadRecordData],
     zerver_attachment: list[ZerverFieldsT],
     upload_id_to_upload_data_map: dict[str, dict[str, Any]],
     output_dir: str,
@@ -676,6 +678,7 @@ def process_messages(
         if is_pm_data:
             # Message is in a 1:1 or group direct message.
             rc_channel_id = message["rid"]
+            message_dict["is_channel_message"] = False
             if rc_channel_id in direct_message_group_id_to_direct_message_group_map:
                 direct_message_group_id = direct_message_group_id_mapper.get(rc_channel_id)
                 message_dict["recipient_id"] = direct_message_group_id_to_recipient_id[
@@ -695,11 +698,13 @@ def process_messages(
                     message_dict["recipient_id"] = user_id_to_recipient_id[zulip_member_id]
         elif message["rid"] in dsc_id_to_dsc_map:
             # Message is in a discussion
+            message_dict["is_channel_message"] = True
             dsc_channel = dsc_id_to_dsc_map[message["rid"]]
             parent_channel_id = dsc_channel["prid"]
             stream_id = stream_id_mapper.get(parent_channel_id)
             message_dict["recipient_id"] = stream_id_to_recipient_id[stream_id]
         else:
+            message_dict["is_channel_message"] = True
             stream_id = stream_id_mapper.get(message["rid"])
             message_dict["recipient_id"] = stream_id_to_recipient_id[stream_id]
 
@@ -903,7 +908,7 @@ def categorize_channels_and_map_with_id(
         if channel.get("prid"):
             dsc_id_to_dsc_map[channel["_id"]] = channel
         elif channel["t"] == "d":
-            if len(channel["uids"]) > 2:
+            if len(channel["uids"]) > 2 or settings.PREFER_DIRECT_MESSAGE_GROUP:
                 direct_message_group_members = frozenset(channel["uids"])
                 logging.info("Direct message group channel found. UIDs: %r", channel["uids"])
 
@@ -1127,6 +1132,7 @@ def do_convert_data(rocketchat_data_dir: str, output_dir: str) -> None:
     )
 
     zerver_stream = convert_channel_data(
+        realm=realm,
         room_id_to_room_map=room_id_to_room_map,
         team_id_to_team_map=team_id_to_team_map,
         stream_id_mapper=stream_id_mapper,
@@ -1216,7 +1222,7 @@ def do_convert_data(rocketchat_data_dir: str, output_dir: str) -> None:
     rocketchat_message_data = []
 
     total_reactions: list[ZerverFieldsT] = []
-    uploads_list: list[ZerverFieldsT] = []
+    uploads_list: list[UploadRecordData] = []
     zerver_attachment: list[ZerverFieldsT] = []
 
     rocketchat_upload_data = rocketchat_data_to_dict(rocketchat_data_dir, ["upload"])["upload"]

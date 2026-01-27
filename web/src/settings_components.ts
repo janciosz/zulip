@@ -2,23 +2,22 @@ import $ from "jquery";
 import _ from "lodash";
 import assert from "minimalistic-assert";
 import * as tippy from "tippy.js";
-import {z} from "zod";
+import * as z from "zod/mini";
 
 import render_compose_banner from "../templates/compose_banner/compose_banner.hbs";
 
 import * as blueslip from "./blueslip.ts";
+import * as buttons from "./buttons.ts";
 import * as compose_banner from "./compose_banner.ts";
-import type {DropdownWidget} from "./dropdown_widget.ts";
+import type {DropdownWidget, Option} from "./dropdown_widget.ts";
 import * as group_permission_settings from "./group_permission_settings.ts";
-import type {GroupSettingName} from "./group_permission_settings.ts";
+import type {
+    AssignedGroupPermission,
+    GroupGroupSettingName,
+    RealmGroupSettingNameSupportingAnonymousGroups,
+} from "./group_permission_settings.ts";
 import * as group_setting_pill from "./group_setting_pill.ts";
-import {$t} from "./i18n.ts";
-import {
-    LEGACY_FONT_SIZE_PX,
-    LEGACY_LINE_HEIGHT_PERCENT,
-    NON_COMPACT_MODE_FONT_SIZE_PX,
-    NON_COMPACT_MODE_LINE_HEIGHT_PERCENT,
-} from "./information_density.ts";
+import {$t, get_language_list_columns} from "./i18n.ts";
 import * as people from "./people.ts";
 import {
     realm_default_settings_schema,
@@ -30,7 +29,7 @@ import * as settings_data from "./settings_data.ts";
 import type {CustomProfileField, GroupSettingValue} from "./state_data.ts";
 import {current_user, realm, realm_schema} from "./state_data.ts";
 import * as stream_data from "./stream_data.ts";
-import * as stream_settings_containers from "./stream_settings_containers.ts";
+import * as stream_topic_history from "./stream_topic_history.ts";
 import {
     type StreamPermissionGroupSetting,
     stream_permission_group_settings_schema,
@@ -40,6 +39,7 @@ import {stream_subscription_schema} from "./sub_store.ts";
 import type {GroupSettingPillContainer} from "./typeahead_helper.ts";
 import {group_setting_value_schema} from "./types.ts";
 import type {HTMLSelectOneElement} from "./types.ts";
+import * as ui_util from "./ui_util.ts";
 import * as user_group_pill from "./user_group_pill.ts";
 import * as user_groups from "./user_groups.ts";
 import type {UserGroup} from "./user_groups.ts";
@@ -111,14 +111,14 @@ export function get_realm_time_limits_in_minutes(property: MessageTimeLimitSetti
 
 type RealmSetting = typeof realm;
 export const realm_setting_property_schema = z.union([
-    realm_schema.keyof(),
+    z.keyof(realm_schema),
     z.literal("realm_org_join_restrictions"),
 ]);
 type RealmSettingProperty = z.infer<typeof realm_setting_property_schema>;
 
 type RealmUserSettingDefaultType = typeof realm_user_settings_defaults;
 export const realm_user_settings_default_properties_schema = z.union([
-    realm_default_settings_schema.keyof(),
+    z.keyof(realm_default_settings_schema),
     z.literal("email_notification_batching_period_edit_minutes"),
 ]);
 type RealmUserSettingDefaultProperties = z.infer<
@@ -126,8 +126,8 @@ type RealmUserSettingDefaultProperties = z.infer<
 >;
 
 export const stream_settings_property_schema = z.union([
-    stream_subscription_schema.keyof(),
-    z.enum(["stream_privacy", "is_default_stream"]),
+    z.keyof(stream_subscription_schema),
+    z.enum(["channel_privacy", "is_default_stream"]),
 ]);
 type StreamSettingProperty = z.infer<typeof stream_settings_property_schema>;
 
@@ -156,7 +156,7 @@ export function get_stream_settings_property_value(
     property_name: StreamSettingProperty,
     sub: StreamSubscription,
 ): valueof<StreamSubscription> {
-    if (property_name === "stream_privacy") {
+    if (property_name === "channel_privacy") {
         return stream_data.get_stream_privacy_policy(sub.stream_id);
     }
     if (property_name === "is_default_stream") {
@@ -201,7 +201,7 @@ export function get_realm_default_setting_property_value(
 export function realm_authentication_methods_to_boolean_dict(): Record<string, boolean> {
     return Object.fromEntries(
         Object.entries(realm.realm_authentication_methods)
-            .sort()
+            .toSorted()
             .map(([auth_method_name, auth_method_info]) => [
                 auth_method_name,
                 auth_method_info.enabled,
@@ -241,10 +241,10 @@ export function get_subsection_property_elements($subsection: JQuery): HTMLEleme
     return [...$subsection.find(".prop-element")];
 }
 
-export const simple_dropdown_realm_settings_schema = realm_schema.pick({
-    realm_invite_to_stream_policy: true,
-    realm_wildcard_mention_policy: true,
+export const simple_dropdown_realm_settings_schema = z.pick(realm_schema, {
     realm_org_type: true,
+    realm_message_edit_history_visibility_policy: true,
+    realm_topics_policy: true,
 });
 export type SimpleDropdownRealmSettings = z.infer<typeof simple_dropdown_realm_settings_schema>;
 
@@ -306,6 +306,19 @@ function get_jitsi_server_url_setting_value(
     return JSON.stringify($custom_input_elem.val());
 }
 
+export function update_custom_time_limit_minute_text($input: JQuery<HTMLInputElement>): void {
+    const $minutes_text = $input.parent().find(".time-unit-text");
+    const count = Number.parseInt($input.val()!, 10);
+    $minutes_text.text(
+        $t(
+            {
+                defaultMessage: "{count, plural, one {minute} other {minutes}}",
+            },
+            {count},
+        ),
+    );
+}
+
 export function update_custom_value_input(property_name: MessageTimeLimitSetting): void {
     const $dropdown_elem = $(`#id_${CSS.escape(property_name)}`);
     const custom_input_elem_id = $dropdown_elem
@@ -315,11 +328,11 @@ export function update_custom_value_input(property_name: MessageTimeLimitSetting
 
     const show_custom_limit_input = $dropdown_elem.val() === "custom_period";
     change_element_block_display_property(custom_input_elem_id, show_custom_limit_input);
-    if (show_custom_limit_input) {
-        $(`#${CSS.escape(custom_input_elem_id)}`).val(
-            get_realm_time_limits_in_minutes(property_name),
-        );
+    if (!show_custom_limit_input) {
+        return;
     }
+    $(`#${CSS.escape(custom_input_elem_id)}`).val(get_realm_time_limits_in_minutes(property_name));
+    update_custom_time_limit_minute_text($(`#${CSS.escape(custom_input_elem_id)}`));
 }
 
 export function get_time_limit_dropdown_setting_value(
@@ -376,13 +389,13 @@ function get_message_retention_setting_value(
         .parent()
         .find<HTMLInputElement>(".message-retention-setting-custom-input")
         .val()!;
-    if (custom_input_val.length === 0) {
-        return settings_config.retain_message_forever;
-    }
     return util.check_time_input(custom_input_val);
 }
 
-export const select_field_data_schema = z.record(z.object({text: z.string(), order: z.string()}));
+export const select_field_data_schema = z.record(
+    z.string(),
+    z.object({text: z.string(), order: z.string()}),
+);
 export type SelectFieldData = z.output<typeof select_field_data_schema>;
 
 function read_select_field_data_from_form(
@@ -429,12 +442,26 @@ export const external_account_field_schema = z.object({
 
 export type ExternalAccountFieldData = z.output<typeof external_account_field_schema>;
 
-function read_external_account_field_data($profile_field_form: JQuery): ExternalAccountFieldData {
-    const field_data: ExternalAccountFieldData = {
-        subtype: $profile_field_form
-            .find<HTMLSelectOneElement>("select:not([multiple])[name=external_acc_field_type]")
-            .val()!,
-    };
+function read_external_account_field_data(
+    $profile_field_form: JQuery,
+    old_field_data: ExternalAccountFieldData | undefined,
+): ExternalAccountFieldData {
+    let field_data: ExternalAccountFieldData;
+    // Use dropdown widget value in "create field form".
+    if (old_field_data === undefined) {
+        const widget = get_widget_for_dropdown_list_settings("external_accounts_type");
+        assert(widget !== null);
+        const value = widget.value();
+        assert(typeof value === "string");
+        field_data = {
+            subtype: value,
+        };
+    } // Use existing subtype in "edit field form".
+    else {
+        field_data = {
+            subtype: old_field_data.subtype,
+        };
+    }
     if (field_data.subtype === "custom") {
         field_data.url_pattern = $profile_field_form
             .find<HTMLInputElement>("input[name=url_pattern]")
@@ -456,7 +483,10 @@ export function read_field_data_from_form(
     if (field_type_id === field_types.SELECT.id) {
         return read_select_field_data_from_form($profile_field_form, old_field_data);
     } else if (field_type_id === field_types.EXTERNAL_ACCOUNT.id) {
-        return read_external_account_field_data($profile_field_form);
+        const parsed_old_field_data = old_field_data
+            ? external_account_field_schema.parse(old_field_data)
+            : undefined;
+        return read_external_account_field_data($profile_field_form, parsed_old_field_data);
     }
     return undefined;
 }
@@ -478,12 +508,17 @@ function get_field_data_input_value($input_elem: JQuery): string | undefined {
 }
 
 const dropdown_widget_map = new Map<string, DropdownWidget | null>([
+    ["realm_moderation_request_channel_id", null],
     ["realm_new_stream_announcements_stream_id", null],
     ["realm_signup_announcements_stream_id", null],
     ["realm_zulip_update_announcements_stream_id", null],
     ["realm_default_code_block_language", null],
+    ["realm_default_language", null],
     ["realm_can_access_all_users_group", null],
     ["realm_can_create_web_public_channel_group", null],
+    ["folder_id", null],
+    ["channel_privacy", null],
+    ["external_accounts_type", null],
 ]);
 
 export function get_widget_for_dropdown_list_settings(
@@ -545,50 +580,59 @@ export function change_save_button_state($element: JQuery, state: string): void 
     }
 
     const $save_button = $element.find(".save-button");
-    const $textEl = $save_button.find(".save-discard-widget-button-text");
-
-    if (state !== "saving") {
-        $save_button.removeClass("saving");
-    }
+    const $textEl = $save_button.find(".action-button-label");
 
     if (state === "discarded") {
-        let hide_delay = 0;
-        if ($save_button.attr("data-status") === "saved") {
-            // Keep saved button displayed a little longer.
-            hide_delay = 500;
+        if (
+            // When the save button is in the "saving" or "saved" state,
+            // we don't want the realm sync settings logic to hide the
+            // save discard widget before the success callback could show the
+            // "saved" state in the button.  Moreover, the visibility of the
+            // save discard widget will be handled by either the "succeeded"
+            // or the "failed" state after the request is complete.
+            $save_button.attr("data-status") === "saved" ||
+            $save_button.attr("data-status") === "saving"
+        ) {
+            return;
         }
-        show_hide_element($element, false, hide_delay, () => {
+        show_hide_element($element, false, 0, () => {
             enable_or_disable_save_button($element.closest(".settings-subsection-parent"));
         });
         return;
     }
 
-    let button_text;
+    if (state === "succeeded" && $save_button.attr("data-status") === "unsaved") {
+        // We don't show the "saved" state if the save button is in the "unsaved"
+        // state, as that would indicate that user has made some other changes
+        // during the saving process.
+        return;
+    }
+
+    if (state !== "saving") {
+        buttons.hide_button_loading_indicator($save_button);
+    }
+
+    let button_text = $t({defaultMessage: "Save changes"});
     let data_status;
     let is_show;
     switch (state) {
         case "unsaved":
-            button_text = $t({defaultMessage: "Save changes"});
             data_status = "unsaved";
             is_show = true;
 
             $element.find(".discard-button").show();
             break;
-        case "saved":
-            button_text = $t({defaultMessage: "Save changes"});
-            data_status = "";
-            is_show = false;
-            break;
         case "saving":
-            button_text = $t({defaultMessage: "Saving"});
+            // We don't change the button text on the saving
+            // state to avoid changing the button size while
+            // we show the loading indicator.
             data_status = "saving";
             is_show = true;
 
             $element.find(".discard-button").hide();
-            $save_button.addClass("saving");
+            buttons.show_button_loading_indicator($save_button);
             break;
         case "failed":
-            button_text = $t({defaultMessage: "Save changes"});
             data_status = "failed";
             is_show = true;
             break;
@@ -599,8 +643,23 @@ export function change_save_button_state($element: JQuery, state: string): void 
             break;
     }
 
-    assert(button_text !== undefined);
-    $textEl.text(button_text);
+    requestAnimationFrame(() => {
+        // We need to use requestAnimationFrame to ensure that the
+        // button text and style are updated in the same frame.
+        $textEl.text(button_text);
+        if (state === "succeeded") {
+            buttons.modify_action_button_style($save_button, {
+                variant: "text",
+                intent: "success",
+            });
+        } else {
+            buttons.modify_action_button_style($save_button, {
+                variant: "solid",
+                intent: "brand",
+            });
+        }
+    });
+
     assert(data_status !== undefined);
     $save_button.attr("data-status", data_status);
     if (state === "unsaved") {
@@ -684,7 +743,7 @@ export let get_input_element_value = (
         case "field-data-setting":
             return get_field_data_input_value($input_elem);
         case "language-setting":
-            return $input_elem.find(".language_selection_button span").attr("data-language-code");
+            return $input_elem.attr("data-language-code");
         case "auth-methods":
             return JSON.stringify(get_auth_method_list_data());
         case "group-setting-type": {
@@ -693,6 +752,9 @@ export let get_input_element_value = (
             assert(pill_widget !== null);
             return get_group_setting_widget_value(pill_widget);
         }
+        case "info-density-setting":
+            assert(input_elem instanceof HTMLInputElement);
+            return Number.parseInt($(input_elem).val()!, 10);
         default:
             return undefined;
     }
@@ -794,24 +856,35 @@ export function check_realm_settings_property_changed(elem: HTMLElement): boolea
         case "realm_authentication_methods":
             proposed_val = get_input_element_value(elem, "auth-methods");
             break;
+        case "realm_moderation_request_channel_id":
         case "realm_new_stream_announcements_stream_id":
         case "realm_signup_announcements_stream_id":
         case "realm_zulip_update_announcements_stream_id":
         case "realm_default_code_block_language":
+        case "realm_default_language":
         case "realm_can_access_all_users_group":
         case "realm_can_create_web_public_channel_group":
             proposed_val = get_dropdown_list_widget_setting_value($elem);
             break;
         case "realm_can_add_custom_emoji_group":
+        case "realm_can_add_subscribers_group":
+        case "realm_can_create_bots_group":
         case "realm_can_create_groups":
         case "realm_can_create_public_channel_group":
         case "realm_can_create_private_channel_group":
+        case "realm_can_create_write_only_bots_group":
         case "realm_can_delete_any_message_group":
         case "realm_can_delete_own_message_group":
         case "realm_can_invite_users_group":
         case "realm_can_manage_all_groups":
+        case "realm_can_manage_billing_group":
+        case "realm_can_mention_many_users_group":
         case "realm_can_move_messages_between_channels_group":
         case "realm_can_move_messages_between_topics_group":
+        case "realm_can_resolve_topics_group":
+        case "realm_can_set_delete_message_policy_group":
+        case "realm_can_set_topics_policy_group":
+        case "realm_can_summarize_topics_group":
         case "realm_create_multiuse_invite_group":
         case "realm_direct_message_initiator_group":
         case "realm_direct_message_permission_group": {
@@ -835,11 +908,6 @@ export function check_realm_settings_property_changed(elem: HTMLElement): boolea
         case "realm_jitsi_server_url":
             assert(elem instanceof HTMLSelectElement);
             proposed_val = get_jitsi_server_url_setting_value($(elem), false);
-            break;
-        case "realm_default_language":
-            proposed_val = $(
-                "#org-notifications .language_selection_widget .language_selection_button span",
-            ).attr("data-language-code");
             break;
         default:
             if (current_val !== undefined) {
@@ -873,8 +941,11 @@ export function check_stream_settings_property_changed(
             assert(elem instanceof HTMLSelectElement);
             proposed_val = get_message_retention_setting_value($(elem), false);
             break;
-        case "stream_privacy":
-            proposed_val = get_input_element_value(elem, "radio-group");
+        case "channel_privacy":
+            proposed_val = get_dropdown_list_widget_setting_value($(elem));
+            break;
+        case "folder_id":
+            proposed_val = get_channel_folder_value_from_dropdown_widget($(elem));
             break;
         default:
             if (current_val !== undefined) {
@@ -911,10 +982,9 @@ export function get_group_setting_widget_value(
         return direct_subgroups[0];
     }
 
-    return {
-        direct_subgroups,
-        direct_members,
-    };
+    direct_subgroups.sort();
+    direct_members.sort();
+    return {direct_subgroups, direct_members};
 }
 
 export function check_group_property_changed(elem: HTMLElement, group: UserGroup): boolean {
@@ -963,6 +1033,7 @@ export function check_realm_default_settings_property_changed(elem: HTMLElement)
     const current_val = get_realm_default_setting_property_value(property_name);
     let proposed_val;
     switch (property_name) {
+        case "color_scheme":
         case "emojiset":
         case "user_list_style":
             proposed_val = get_input_element_value(elem, "radio-group");
@@ -970,6 +1041,11 @@ export function check_realm_default_settings_property_changed(elem: HTMLElement)
         case "email_notifications_batching_period_seconds":
             assert(elem instanceof HTMLSelectElement);
             proposed_val = get_time_limit_setting_value($(elem), false);
+            break;
+        case "web_font_size_px":
+        case "web_line_height_percent":
+            assert(elem instanceof HTMLInputElement);
+            proposed_val = Number.parseInt($(elem).val()!, 10);
             break;
         default:
             if (current_val !== undefined) {
@@ -1048,16 +1124,25 @@ export function populate_data_for_realm_settings_request(
                 const realm_group_settings = new Set([
                     "can_access_all_users_group",
                     "can_add_custom_emoji_group",
+                    "can_add_subscribers_group",
+                    "can_create_bots_group",
                     "can_create_groups",
                     "can_create_private_channel_group",
                     "can_create_public_channel_group",
                     "can_create_web_public_channel_group",
+                    "can_create_write_only_bots_group",
                     "can_manage_all_groups",
+                    "can_manage_billing_group",
                     "can_delete_any_message_group",
                     "can_delete_own_message_group",
                     "can_invite_users_group",
+                    "can_mention_many_users_group",
                     "can_move_messages_between_channels_group",
                     "can_move_messages_between_topics_group",
+                    "can_resolve_topics_group",
+                    "can_set_delete_message_policy_group",
+                    "can_set_topics_policy_group",
+                    "can_summarize_topics_group",
                     "create_multiuse_invite_group",
                     "direct_message_initiator_group",
                     "direct_message_permission_group",
@@ -1094,7 +1179,7 @@ export function populate_data_for_stream_settings_request(
             const input_value = get_input_element_value(input_elem);
             if (input_value !== undefined && input_value !== null) {
                 const property_name = extract_property_name($input_elem);
-                if (property_name === "stream_privacy") {
+                if (property_name === "channel_privacy") {
                     assert(typeof input_value === "string");
                     data = {
                         ...data,
@@ -1112,6 +1197,17 @@ export function populate_data_for_stream_settings_request(
                         new: input_value,
                         old: old_value,
                     });
+                    continue;
+                }
+
+                if (property_name === "folder_id") {
+                    const folder_id = get_channel_folder_value_from_dropdown_widget($input_elem);
+                    data[property_name] = JSON.stringify(folder_id);
+                    continue;
+                }
+
+                if (property_name === "history_public_to_subscribers") {
+                    data[property_name] = JSON.stringify(input_value);
                     continue;
                 }
 
@@ -1180,15 +1276,6 @@ export function populate_data_for_default_realm_settings_request(
                 const property_name: string = extract_property_name($input_elem, true);
                 assert(typeof input_value !== "object");
                 data[property_name] = input_value;
-
-                if (property_name === "dense_mode") {
-                    data.web_font_size_px = input_value
-                        ? LEGACY_FONT_SIZE_PX
-                        : NON_COMPACT_MODE_FONT_SIZE_PX;
-                    data.web_line_height_percent = input_value
-                        ? LEGACY_LINE_HEIGHT_PERCENT
-                        : NON_COMPACT_MODE_LINE_HEIGHT_PERCENT;
-                }
             }
         }
     }
@@ -1200,11 +1287,11 @@ function switching_to_private(properties_elements: HTMLElement[]): boolean {
     for (const elem of properties_elements) {
         const $elem = $(elem);
         const property_name = extract_property_name($elem);
-        if (property_name !== "stream_privacy") {
+        if (property_name !== "channel_privacy") {
             continue;
         }
-        const proposed_val = get_input_element_value(elem, "radio-group");
-        return proposed_val === "invite-only-public-history" || proposed_val === "invite-only";
+        const proposed_val = get_input_element_value(elem);
+        return proposed_val === "invite-only";
     }
     return false;
 }
@@ -1251,24 +1338,24 @@ export function save_discard_stream_settings_widget_status_handler(
         !sub.subscribed &&
         switching_to_private(properties_elements)
     ) {
-        if ($("#stream_permission_settings .stream_privacy_warning").length > 0) {
+        if ($("#stream_settings .stream_privacy_warning").length > 0) {
             return;
         }
         const context = {
             banner_type: compose_banner.WARNING,
             banner_text: $t({
                 defaultMessage:
-                    "Only subscribers can access or join private channels, so you will lose access to this channel if you convert it to a private channel while not subscribed to it.",
+                    "You will lose access to content in this channel if you make it private. To keep access, subscribe or grant yourself permission to do so under Advanced configurations.",
             }),
             button_text: $t({defaultMessage: "Subscribe"}),
             classname: "stream_privacy_warning",
             stream_id: sub.stream_id,
         };
-        $("#stream_permission_settings .stream-permissions-warning-banner").append(
+        $("#stream_settings .stream-permissions-warning-banner").append(
             $(render_compose_banner(context)),
         );
     } else {
-        $("#stream_permission_settings .stream-permissions-warning-banner").empty();
+        $("#stream_settings .stream-permissions-warning-banner").empty();
     }
 }
 
@@ -1329,10 +1416,7 @@ function should_disable_save_button_for_jitsi_server_url_setting(): boolean {
     );
     const $custom_input_elem = $<HTMLInputElement>("input#id_realm_jitsi_server_url_custom_input");
 
-    return (
-        $dropdown_elem.val()!.toString() === "custom" &&
-        !util.is_valid_url($custom_input_elem.val()!, true)
-    );
+    return $dropdown_elem.val() === "custom" && !util.is_valid_url($custom_input_elem.val()!, true);
 }
 
 function should_disable_save_button_for_time_limit_settings(
@@ -1415,46 +1499,81 @@ function should_disable_save_button_for_group_settings(settings: string[]): bool
     return false;
 }
 
+function should_disable_save_button_for_stream_settings(stream_id: number): boolean {
+    // Disable save button if "Only general chat topic allowed" option is selected
+    // for `topics_policy` and there are topics other than the general chat in the
+    // current channel.
+    const topics_policy_value = $("#id_topics_policy").val();
+    if (
+        topics_policy_value ===
+            settings_config.get_stream_topics_policy_values().empty_topic_only.code &&
+        stream_topic_history.stream_has_locally_available_named_topics(stream_id)
+    ) {
+        $("#settings-topics-already-exist-error").show();
+        return true;
+    }
+    $("#settings-topics-already-exist-error").hide();
+    return false;
+}
+
 function enable_or_disable_save_button($subsection_elem: JQuery): void {
+    const $save_button = $subsection_elem.find(".save-button");
+
+    if ($subsection_elem.closest(".channel-permissions").length > 0) {
+        const $settings_container = $subsection_elem.closest(".subscription_settings");
+        const stream_id_string = $settings_container.attr("data-stream-id");
+        assert(stream_id_string !== undefined);
+        const stream_id = Number.parseInt(stream_id_string, 10);
+        if (should_disable_save_button_for_stream_settings(stream_id)) {
+            $save_button.prop("disabled", true);
+            return;
+        }
+    }
+
     const time_limit_settings = [...$subsection_elem.find(".time-limit-setting")];
-
-    let disable_save_button = false;
-    if (time_limit_settings.length > 0) {
-        disable_save_button =
-            should_disable_save_button_for_time_limit_settings(time_limit_settings);
-    } else if ($subsection_elem.attr("id") === "org-other-settings") {
-        disable_save_button = should_disable_save_button_for_jitsi_server_url_setting();
-        const $button_wrapper = $subsection_elem.find<tippy.PopperElement>(
-            ".subsection-changes-save",
-        );
-        const tippy_instance = util.the($button_wrapper)._tippy;
-        if (disable_save_button) {
-            // avoid duplication of tippy
-            if (!tippy_instance) {
-                const opts: Partial<tippy.Props> = {placement: "top"};
-                initialize_disable_button_hint_popover(
-                    $button_wrapper,
-                    $t({defaultMessage: "Cannot save invalid Jitsi server URL."}),
-                    opts,
-                );
-            }
-        } else {
-            if (tippy_instance) {
-                tippy_instance.destroy();
-            }
+    if (
+        time_limit_settings.length > 0 &&
+        should_disable_save_button_for_time_limit_settings(time_limit_settings)
+    ) {
+        if (
+            $subsection_elem.attr("id") === "org-message-retention" ||
+            $subsection_elem.closest(".advanced-configurations-container").length > 0
+        ) {
+            ui_util.disable_element_and_add_tooltip(
+                $save_button,
+                $t({
+                    defaultMessage: "Cannot save invalid message retention period.",
+                }),
+            );
+            return;
         }
+        $save_button.prop("disabled", true);
+        return;
     }
 
-    if (!disable_save_button) {
-        const group_settings = [...$subsection_elem.find(".pill-container")].map((elem) =>
-            extract_property_name($(elem)),
+    if (
+        $subsection_elem.attr("id") === "org-compose-settings" &&
+        should_disable_save_button_for_jitsi_server_url_setting()
+    ) {
+        ui_util.disable_element_and_add_tooltip(
+            $save_button,
+            $t({defaultMessage: "Cannot save invalid Jitsi server URL."}),
         );
-        if (group_settings.length > 0) {
-            disable_save_button = should_disable_save_button_for_group_settings(group_settings);
-        }
+        return;
     }
 
-    $subsection_elem.find(".subsection-changes-save button").prop("disabled", disable_save_button);
+    const group_settings = [...$subsection_elem.find(".pill-container.prop-element")].map((elem) =>
+        extract_property_name($(elem)),
+    );
+    if (
+        group_settings.length > 0 &&
+        should_disable_save_button_for_group_settings(group_settings)
+    ) {
+        $save_button.prop("disabled", true);
+        return;
+    }
+
+    ui_util.enable_element_and_remove_tooltip($save_button);
 }
 
 export function initialize_disable_button_hint_popover(
@@ -1480,10 +1599,16 @@ export function initialize_disable_button_hint_popover(
 export function enable_opening_typeahead_on_clicking_label($container: JQuery): void {
     const $group_setting_labels = $container.find(".group-setting-label");
     $group_setting_labels.on("click", (e) => {
+        if ($(e.target).is("a.help_link_widget, a.help_link_widget i")) {
+            // Clicking on the "?" icon should just open the link and there is
+            // no need to open the typeahead or focus the input, so we return.
+            return;
+        }
+
         // Click opens the typeahead.
-        $(e.target).siblings(".pill-container").find(".input").expectOne().trigger("click");
+        $(e.currentTarget).siblings(".pill-container").find(".input").expectOne().trigger("click");
         // Focus puts the cursor into the input.
-        $(e.target).siblings(".pill-container").find(".input").expectOne().trigger("focus");
+        $(e.currentTarget).siblings(".pill-container").find(".input").expectOne().trigger("focus");
     });
 }
 
@@ -1492,32 +1617,54 @@ export function disable_opening_typeahead_on_clicking_label($container: JQuery):
     $group_setting_labels.off("click");
 }
 
-export function disable_group_permission_setting($container: JQuery): void {
-    $container.find(".input").prop("contenteditable", false);
-    $container.closest(".input-group").addClass("group_setting_disabled");
-    disable_opening_typeahead_on_clicking_label($container.closest(".input-group"));
+export function disable_group_permission_setting($containers: JQuery): void {
+    $containers.find(".input").prop("contenteditable", false);
+    $containers.closest(".input-group").addClass("group_setting_disabled");
+    disable_opening_typeahead_on_clicking_label($containers.closest(".input-group"));
+}
+
+export function enable_group_permission_setting($containers: JQuery): void {
+    $containers.find(".input").prop("contenteditable", true);
+    $containers.closest(".input-group").removeClass("group_setting_disabled");
+    enable_opening_typeahead_on_clicking_label($containers.closest(".input-group"));
 }
 
 export const group_setting_widget_map = new Map<string, GroupSettingPillContainer | null>([
     ["can_add_members_group", null],
+    ["can_add_subscribers_group", null],
     ["can_administer_channel_group", null],
+    ["can_create_topic_group", null],
     ["can_join_group", null],
     ["can_leave_group", null],
     ["can_manage_group", null],
     ["can_mention_group", null],
+    ["can_delete_any_message_group", null],
+    ["can_delete_own_message_group", null],
+    ["can_move_messages_out_of_channel_group", null],
+    ["can_move_messages_within_channel_group", null],
     ["can_remove_members_group", null],
     ["can_remove_subscribers_group", null],
+    ["can_resolve_topics_group", null],
     ["can_send_message_group", null],
     ["realm_can_add_custom_emoji_group", null],
+    ["realm_can_add_subscribers_group", null],
+    ["realm_can_create_bots_group", null],
     ["realm_can_create_groups", null],
     ["realm_can_create_public_channel_group", null],
     ["realm_can_create_private_channel_group", null],
+    ["realm_can_create_write_only_bots_group", null],
     ["realm_can_delete_any_message_group", null],
     ["realm_can_delete_own_message_group", null],
     ["realm_can_invite_users_group", null],
     ["realm_can_manage_all_groups", null],
+    ["realm_can_manage_billing_group", null],
+    ["realm_can_mention_many_users_group", null],
     ["realm_can_move_messages_between_channels_group", null],
     ["realm_can_move_messages_between_topics_group", null],
+    ["realm_can_resolve_topics_group", null],
+    ["realm_can_set_delete_message_policy_group", null],
+    ["realm_can_set_topics_policy_group", null],
+    ["realm_can_summarize_topics_group", null],
     ["realm_create_multiuse_invite_group", null],
     ["realm_direct_message_initiator_group", null],
     ["realm_direct_message_permission_group", null],
@@ -1538,25 +1685,25 @@ export function set_group_setting_widget_value(
     pill_widget: GroupSettingPillContainer,
     property_value: GroupSettingValue,
 ): void {
-    pill_widget.clear();
+    pill_widget.clear(true);
 
     if (typeof property_value === "number") {
         const user_group = user_groups.get_user_group_from_id(property_value);
         if (user_group.name === "role:nobody") {
             return;
         }
-        user_group_pill.append_user_group(user_group, pill_widget);
+        user_group_pill.append_user_group(user_group, pill_widget, false);
     } else {
         for (const setting_sub_group_id of property_value.direct_subgroups) {
             const user_group = user_groups.get_user_group_from_id(setting_sub_group_id);
             if (user_group.name === "role:nobody") {
                 continue;
             }
-            user_group_pill.append_user_group(user_group, pill_widget);
+            user_group_pill.append_user_group(user_group, pill_widget, false);
         }
         for (const setting_user_id of property_value.direct_members) {
             const user = people.get_user_by_id_assert_valid(setting_user_id);
-            user_pill.append_user(user, pill_widget);
+            user_pill.append_user(user, pill_widget, false);
         }
     }
 }
@@ -1567,7 +1714,7 @@ export function create_group_setting_widget({
     group,
 }: {
     $pill_container: JQuery;
-    setting_name: GroupSettingName;
+    setting_name: GroupGroupSettingName;
     group?: UserGroup;
 }): GroupSettingPillContainer {
     const pill_widget = group_setting_pill.create_pills($pill_container, setting_name, "group");
@@ -1617,30 +1764,13 @@ export function create_group_setting_widget({
     return pill_widget;
 }
 
-export const realm_group_setting_name_schema = z.enum([
-    "can_add_custom_emoji_group",
-    "can_create_groups",
-    "can_create_public_channel_group",
-    "can_create_private_channel_group",
-    "can_delete_any_message_group",
-    "can_delete_own_message_group",
-    "can_invite_users_group",
-    "can_manage_all_groups",
-    "can_move_messages_between_channels_group",
-    "can_move_messages_between_topics_group",
-    "create_multiuse_invite_group",
-    "direct_message_initiator_group",
-    "direct_message_permission_group",
-]);
-export type RealmGroupSettingName = z.infer<typeof realm_group_setting_name_schema>;
-
 export function create_realm_group_setting_widget({
     $pill_container,
     setting_name,
     pill_update_callback,
 }: {
     $pill_container: JQuery;
-    setting_name: RealmGroupSettingName;
+    setting_name: RealmGroupSettingNameSupportingAnonymousGroups;
     pill_update_callback?: () => void;
 }): void {
     const pill_widget = group_setting_pill.create_pills($pill_container, setting_name, "realm");
@@ -1658,7 +1788,7 @@ export function create_realm_group_setting_widget({
     set_group_setting_widget_value(
         pill_widget,
         group_setting_value_schema.parse(
-            realm[realm_schema.keyof().parse("realm_" + setting_name)],
+            realm[z.keyof(realm_schema).parse("realm_" + setting_name)],
         ),
     );
 
@@ -1689,10 +1819,12 @@ export function create_stream_group_setting_widget({
     $pill_container,
     setting_name,
     sub,
+    pill_update_callback,
 }: {
     $pill_container: JQuery;
     setting_name: StreamPermissionGroupSetting;
     sub?: StreamSubscription;
+    pill_update_callback?: () => void;
 }): GroupSettingPillContainer {
     const pill_widget = group_setting_pill.create_pills($pill_container, setting_name, "stream");
     const opts: {
@@ -1712,16 +1844,24 @@ export function create_stream_group_setting_widget({
 
     if (sub !== undefined) {
         set_group_setting_widget_value(pill_widget, sub[setting_name]);
-        const $edit_container = stream_settings_containers.get_edit_container(sub);
-        const $subsection = $edit_container.find(".advanced-configurations-container");
+        const $subsection = $pill_container.closest(".settings-subsection-parent");
 
         pill_widget.onTextInputHook(() => {
+            if (pill_update_callback !== undefined) {
+                pill_update_callback();
+            }
             save_discard_stream_settings_widget_status_handler($subsection, sub);
         });
         pill_widget.onPillCreate(() => {
+            if (pill_update_callback !== undefined) {
+                pill_update_callback();
+            }
             save_discard_stream_settings_widget_status_handler($subsection, sub);
         });
         pill_widget.onPillRemove(() => {
+            if (pill_update_callback !== undefined) {
+                pill_update_callback();
+            }
             save_discard_stream_settings_widget_status_handler($subsection, sub);
         });
     } else {
@@ -1729,7 +1869,7 @@ export function create_stream_group_setting_widget({
             setting_name,
             "stream",
         )!.default_group_name;
-        if (default_group_name === "stream_creator_or_nobody") {
+        if (default_group_name === "channel_creator") {
             set_group_setting_widget_value(pill_widget, {
                 direct_members: [current_user.user_id],
                 direct_subgroups: [],
@@ -1771,4 +1911,198 @@ export function set_custom_time_inputs_visibility(
     } else {
         $time_select_elem.parent().find(".custom-time-input-container").hide();
     }
+}
+
+export function get_group_assigned_realm_permissions(group: UserGroup): {
+    subsection_key: string;
+    subsection_heading: string;
+    assigned_permissions: AssignedGroupPermission[];
+}[] {
+    const group_assigned_realm_permissions = [];
+    for (const {
+        subsection_heading,
+        subsection_key,
+        settings,
+    } of settings_config.realm_group_permission_settings) {
+        const assigned_permission_objects = [];
+        for (const setting_name of settings) {
+            const setting_value = realm[z.keyof(realm_schema).parse("realm_" + setting_name)];
+            const can_edit = settings_config.owner_editable_realm_group_permission_settings.has(
+                setting_name,
+            )
+                ? current_user.is_owner
+                : current_user.is_admin;
+            const assigned_permission_object =
+                group_permission_settings.get_assigned_permission_object(
+                    group_setting_value_schema.parse(setting_value),
+                    setting_name,
+                    group.id,
+                    can_edit,
+                    "realm",
+                );
+            if (assigned_permission_object !== undefined) {
+                assigned_permission_objects.push(assigned_permission_object);
+            }
+        }
+        group_assigned_realm_permissions.push({
+            subsection_heading,
+            subsection_key,
+            assigned_permissions: assigned_permission_objects,
+        });
+    }
+    return group_assigned_realm_permissions;
+}
+
+export function get_group_assigned_stream_permissions(group: UserGroup): {
+    stream: StreamSubscription;
+    assigned_permissions: AssignedGroupPermission[];
+    id_prefix: string;
+}[] {
+    const subs = stream_data.get_unsorted_subs();
+    const group_assigned_stream_permissions = [];
+    for (const sub of subs) {
+        const assigned_permission_objects = [];
+        const can_edit_settings_with_metadata_access =
+            stream_data.can_change_permissions_requiring_metadata_access(sub);
+        const can_edit_settings_with_content_access =
+            stream_data.can_change_permissions_requiring_content_access(sub);
+        for (const setting_name of settings_config.stream_group_permission_settings) {
+            const setting_value = sub[z.keyof(stream_subscription_schema).parse(setting_name)];
+            let can_edit_settings = can_edit_settings_with_metadata_access;
+            if (
+                settings_config.stream_group_permission_settings_requiring_content_access.includes(
+                    setting_name,
+                )
+            ) {
+                can_edit_settings = can_edit_settings_with_content_access;
+            }
+            const assigned_permission_object =
+                group_permission_settings.get_assigned_permission_object(
+                    group_setting_value_schema.parse(setting_value),
+                    setting_name,
+                    group.id,
+                    can_edit_settings,
+                    "stream",
+                );
+            if (assigned_permission_object !== undefined) {
+                assigned_permission_objects.push(assigned_permission_object);
+            }
+        }
+
+        if (assigned_permission_objects.length > 0) {
+            group_assigned_stream_permissions.push({
+                stream: sub,
+                assigned_permissions: assigned_permission_objects,
+                id_prefix: "id_group_permission_" + sub.stream_id.toString() + "_",
+            });
+        }
+    }
+
+    return group_assigned_stream_permissions;
+}
+
+export function get_group_assigned_user_group_permissions(group: UserGroup): {
+    group_id: number;
+    group_name: string;
+    assigned_permissions: AssignedGroupPermission[];
+    id_prefix: string;
+}[] {
+    const groups = user_groups.get_realm_user_groups();
+    const group_assigned_user_group_permissions = [];
+    for (const user_group of groups) {
+        const can_edit_settings = settings_data.can_manage_user_group(user_group.id);
+        const assigned_permission_objects = [];
+        for (const setting_name of settings_config.group_permission_settings) {
+            const setting_value =
+                user_group[z.keyof(user_groups.user_group_schema).parse(setting_name)];
+            const assigned_permission_object =
+                group_permission_settings.get_assigned_permission_object(
+                    group_setting_value_schema.parse(setting_value),
+                    setting_name,
+                    group.id,
+                    can_edit_settings,
+                    "group",
+                );
+            if (assigned_permission_object !== undefined) {
+                assigned_permission_objects.push(assigned_permission_object);
+            }
+        }
+
+        if (assigned_permission_objects.length > 0) {
+            group_assigned_user_group_permissions.push({
+                group_id: user_group.id,
+                group_name: user_groups.get_display_group_name(user_group.name),
+                id_prefix: "id_group_permission_" + user_group.id.toString() + "_",
+                assigned_permissions: assigned_permission_objects,
+            });
+        }
+    }
+
+    return group_assigned_user_group_permissions;
+}
+
+export function set_channel_folder_dropdown_value(sub: StreamSubscription): void {
+    if (sub.folder_id === null) {
+        set_dropdown_list_widget_setting_value("folder_id", settings_config.no_folder_selected);
+        return;
+    }
+    set_dropdown_list_widget_setting_value("folder_id", sub.folder_id);
+}
+
+export function get_channel_folder_value_from_dropdown_widget($elem: JQuery): number | null {
+    const value = get_dropdown_list_widget_setting_value($elem);
+    assert(typeof value === "number");
+    if (value === settings_config.no_folder_selected) {
+        return null;
+    }
+    return value;
+}
+
+export const language_options = (): Option[] => {
+    const languages = get_language_list_columns(realm.realm_default_language).toSorted((a, b) =>
+        util.strcmp(a.name_with_percent, b.name_with_percent),
+    );
+    return languages.map((language) => ({
+        name: language.name_with_percent,
+        unique_id: language.code,
+    }));
+};
+
+export function resize_textareas_in_section($section: JQuery): void {
+    const $subsections = $section.find(".settings-subsection-parent");
+    if ($subsections.length === 0) {
+        return;
+    }
+
+    $subsections.each(function () {
+        resize_textareas_in_subsection($(this));
+    });
+}
+
+export let resize_textareas_in_subsection = ($subsection: JQuery): void => {
+    const $textareas = $subsection.find("textarea");
+
+    if ($textareas.length === 0) {
+        return;
+    }
+
+    $textareas.each(function () {
+        const $el = $<HTMLTextAreaElement>(this);
+
+        const min_rows = 2;
+        const max_rows = 5;
+        $el.attr("rows", min_rows);
+        const scrollheight = util.the($el).scrollHeight;
+        const line_height = Number.parseFloat($el.css("line-height"));
+        const needed_rows = Math.ceil(scrollheight / line_height) - 1;
+
+        const new_rows = Math.min(Math.max(needed_rows, min_rows), max_rows);
+        $el.attr("rows", new_rows);
+    });
+};
+
+export function rewire_resize_textareas_in_subsection(
+    value: typeof resize_textareas_in_subsection,
+): void {
+    resize_textareas_in_subsection = value;
 }

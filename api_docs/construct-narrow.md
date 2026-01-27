@@ -42,7 +42,7 @@ Zulip API.
 
 Note that many narrows, including all that lack a `channel` or `channels`
 operator, search the current user's personal message history. See
-[searching shared history](/help/search-for-messages#searching-shared-history)
+[searching shared history](/help/search-for-messages#search-shared-history)
 for details.
 
 Clients should note that the `is:unread` filter takes advantage of the
@@ -57,6 +57,14 @@ for the `"topic"` operator in the narrow, it is interpreted
 as an empty string.
 
 ## Changes
+
+* In Zulip 12.0 (feature level 446), add the `mentions` operator,
+  matching messages that contain a direct personal mention of the
+  specified user.
+
+* In Zulip 10.0 (feature level 366), support was added for a new
+  `is:muted` operator combination, matching messages in topics and
+  channels that the user has [muted](/help/mute-a-topic).
 
 * Before Zulip 10.0 (feature level 334), empty string was not a valid
   topic name for channel messages.

@@ -54,10 +54,17 @@ exports.test_streams = {
         is_web_public: false,
         message_retention_days: null,
         stream_post_policy: 1,
+        topics_policy: "inherit",
         can_administer_channel_group: 2,
+        can_create_topic_group: 2,
+        can_delete_any_message_group: 2,
+        can_delete_own_message_group: 2,
+        can_move_messages_out_of_channel_group: 2,
+        can_move_messages_within_channel_group: 2,
         can_send_message_group: 2,
         can_remove_subscribers_group: 2,
         is_recently_active: true,
+        subscriber_count: 10,
     },
     test: {
         is_archived: false,
@@ -74,10 +81,17 @@ exports.test_streams = {
         is_announcement_only: false,
         message_retention_days: null,
         stream_post_policy: 1,
+        topics_policy: "inherit",
         can_administer_channel_group: 2,
+        can_create_topic_group: 2,
+        can_delete_any_message_group: 2,
+        can_delete_own_message_group: 2,
+        can_move_messages_out_of_channel_group: 2,
+        can_move_messages_within_channel_group: 2,
         can_send_message_group: 2,
         can_remove_subscribers_group: 2,
         is_recently_active: true,
+        subscriber_count: 2,
     },
 };
 
@@ -137,6 +151,62 @@ exports.fixtures = {
         upload_space_used: 90000,
     },
 
+    channel_folder__add: {
+        type: "channel_folder",
+        op: "add",
+        channel_folder: {
+            id: 1,
+            name: "Frontend",
+            description: "Channels for frontend discussions",
+            rendered_description: "<p>Channels for frontend discussions</p>",
+            date_created: 1681662420,
+            creator_id: 10,
+            is_archived: false,
+        },
+    },
+
+    channel_folder__reorder: {
+        type: "channel_folder",
+        op: "reorder",
+        order: [2, 3, 1],
+    },
+
+    channel_folder__update: {
+        type: "channel_folder",
+        op: "update",
+        channel_folder_id: 1,
+        data: {
+            name: "New frontend",
+            description: "Channels for new frontend discussions",
+            rendered_description: "<p>Channels for new frontend discussions</p>",
+            is_archived: true,
+        },
+    },
+
+    channel_typing_edit_message__start: {
+        type: "typing_edit_message",
+        op: "start",
+        sender_id: typing_person1.user_id,
+        message_id: 128,
+        recipient: {
+            type: "channel",
+            channel_id: exports.stream_typing_in_id,
+            topic: exports.topic_typing_in,
+        },
+    },
+
+    channel_typing_edit_message__stop: {
+        type: "typing_edit_message",
+        op: "stop",
+        sender_id: typing_person1.user_id,
+        message_id: 128,
+        recipient: {
+            type: "channel",
+            channel_id: exports.stream_typing_in_id,
+            topic: exports.topic_typing_in,
+        },
+    },
+
     custom_profile_fields: {
         type: "custom_profile_fields",
         fields: [
@@ -187,6 +257,28 @@ exports.fixtures = {
         type: "invites_changed",
     },
 
+    message_edit_typing__start: {
+        type: "typing_edit_message",
+        op: "start",
+        sender_id: typing_person1.user_id,
+        message_id: 128,
+        recipient: {
+            type: "direct",
+            user_ids: [typing_person2.user_id],
+        },
+    },
+
+    message_edit_typing__stop: {
+        type: "typing_edit_message",
+        op: "stop",
+        sender_id: typing_person1.user_id,
+        message_id: 128,
+        recipient: {
+            type: "direct",
+            user_ids: [typing_person2.user_id],
+        },
+    },
+
     muted_users: {
         type: "muted_users",
         muted_users: [
@@ -199,6 +291,29 @@ exports.fixtures = {
                 timestamp: fake_now,
             },
         ],
+    },
+
+    navigation_view__add: {
+        type: "navigation_view",
+        op: "add",
+        navigation_view: {
+            fragment: "narrow/is/alerted",
+            is_pinned: true,
+            name: "Watched phrases",
+        },
+    },
+
+    navigation_view__remove: {
+        type: "navigation_view",
+        op: "remove",
+        fragment: "narrow/is/alerted",
+    },
+
+    navigation_view__update: {
+        type: "navigation_view",
+        op: "update",
+        fragment: "narrow/is/alerted",
+        data: {is_pinned: false},
     },
 
     onboarding_steps: {
@@ -217,17 +332,12 @@ exports.fixtures = {
 
     presence: {
         type: "presence",
-        email: "alice@example.com",
-        user_id: 42,
-        presence: {
-            electron: {
-                status: "active",
-                timestamp: fake_now,
-                client: "electron",
-                pushable: false,
+        presences: {
+            42: {
+                active_timestamp: fake_now,
+                idle_timestamp: fake_now,
             },
         },
-        server_timestamp: fake_now,
     },
 
     reaction__add: {
@@ -266,13 +376,6 @@ exports.fixtures = {
         realm_id: 2,
     },
 
-    realm__update__bot_creation_policy: {
-        type: "realm",
-        op: "update",
-        property: "bot_creation_policy",
-        value: 1,
-    },
-
     realm__update__default_code_block_language: {
         type: "realm",
         op: "update",
@@ -308,11 +411,11 @@ exports.fixtures = {
         value: false,
     },
 
-    realm__update__invite_to_stream_policy: {
+    realm__update__moderation_request_channel_id: {
         type: "realm",
         op: "update",
-        property: "invite_to_stream_policy",
-        value: 2,
+        property: "moderation_request_channel_id",
+        value: 43,
     },
 
     realm__update__name: {
@@ -369,13 +472,17 @@ exports.fixtures = {
                 Google: {enabled: true, available: true},
             },
             can_add_custom_emoji_group: 3,
+            can_add_subscribers_group: 3,
+            can_create_bots_group: 3,
             can_create_public_channel_group: 3,
             can_invite_users_group: 3,
             can_move_messages_between_topics_group: 3,
+            can_resolve_topics_group: 1,
             direct_message_permission_group: 3,
             plan_type: 3,
             upload_quota_mib: 50000,
             max_file_upload_size_mib: 1024,
+            topics_policy: "disable_empty_topic",
         },
     },
 
@@ -415,7 +522,7 @@ exports.fixtures = {
         bot: {
             email: "the-bot@example.com",
             user_id: 42,
-            avatar_url: "/some/path/to/avatar",
+            avatar_url: "/avatar/42",
             api_key: "SOME_KEY",
             full_name: "The Bot",
             bot_type: 1,
@@ -442,6 +549,24 @@ exports.fixtures = {
         bot: {
             user_id: 4321,
             full_name: "The Bot Has A New Name",
+        },
+    },
+
+    realm_bot__update_is_active: {
+        type: "realm_bot",
+        op: "update",
+        bot: {
+            user_id: 4321,
+            is_active: false,
+        },
+    },
+
+    realm_bot__update_owner: {
+        type: "realm_bot",
+        op: "update",
+        bot: {
+            user_id: 4321,
+            owner_id: test_user.user_id,
         },
     },
 
@@ -525,12 +650,11 @@ exports.fixtures = {
         op: "add",
         person: {
             ...test_user,
-            avatar_url: "/some/path/to/avatar",
+            avatar_url: `/avatar/${test_user.user_id}`,
             avatar_version: 1,
             is_admin: false,
             is_active: true,
             is_owner: false,
-            is_billing_admin: false,
             role: 400,
             is_bot: false,
             is_guest: false,
@@ -546,12 +670,11 @@ exports.fixtures = {
         op: "add",
         person: {
             ...test_user,
-            avatar_url: "/some/path/to/avatar",
+            avatar_url: `/avatar/${test_user.user_id}`,
             avatar_version: 1,
             is_admin: false,
             is_active: true,
             is_owner: false,
-            is_billing_admin: false,
             role: 400,
             is_bot: true,
             is_guest: false,
@@ -601,6 +724,29 @@ exports.fixtures = {
         value: false,
     },
 
+    reminders__add: {
+        type: "reminders",
+        op: "add",
+        reminders: [
+            {
+                reminder_id: 17,
+                type: "private",
+                to: [6],
+                content: "Hello there!",
+                rendered_content: "<p>Hello there!</p>",
+                scheduled_delivery_timestamp: 1681662420,
+                failed: false,
+                reminder_target_message_id: 213,
+            },
+        ],
+    },
+
+    reminders__remove: {
+        type: "reminders",
+        op: "remove",
+        reminder_id: 17,
+    },
+
     restart: {
         type: "restart",
         zulip_version: "9.0-dev-753-gced3e85da9",
@@ -624,6 +770,17 @@ exports.fixtures = {
         type: "saved_snippets",
         op: "remove",
         saved_snippet_id: 1,
+    },
+
+    saved_snippets__update: {
+        type: "saved_snippets",
+        op: "update",
+        saved_snippet: {
+            id: 1,
+            title: "Example 2",
+            content: "Welcome to the organization.",
+            date_created: 1681662420,
+        },
     },
 
     scheduled_messages__add: {
@@ -682,14 +839,13 @@ exports.fixtures = {
         op: "delete",
         streams: [
             {
-                ...streams.devel,
-                stream_weekly_traffic: null,
+                stream_id: streams.devel.stream_id,
             },
             {
-                ...streams.test,
-                stream_weekly_traffic: null,
+                stream_id: streams.test.stream_id,
             },
         ],
+        stream_ids: [streams.devel.stream_id, streams.test.stream_id],
     },
 
     stream__update: {
@@ -706,8 +862,8 @@ exports.fixtures = {
         op: "start",
         message_type: "stream",
         sender: typing_person1,
-        stream_id: this.stream_typing_in_id,
-        topic: this.topic_typing_in,
+        stream_id: exports.stream_typing_in_id,
+        topic: exports.topic_typing_in,
     },
 
     stream_typing__stop: {
@@ -715,8 +871,8 @@ exports.fixtures = {
         op: "stop",
         message_type: "stream",
         sender: typing_person1,
-        stream_id: this.stream_typing_in_id,
-        topic: this.topic_typing_in,
+        stream_id: exports.stream_typing_in_id,
+        topic: exports.topic_typing_in,
     },
 
     submessage: {
@@ -874,8 +1030,8 @@ exports.fixtures = {
     user_group__remove_members: {
         type: "user_group",
         op: "remove_members",
-        group_id: 3,
-        user_ids: [99, 100],
+        group_id: 1,
+        user_ids: [1, 2],
     },
 
     user_group__remove_subgroups: {
@@ -888,10 +1044,11 @@ exports.fixtures = {
     user_group__update: {
         type: "user_group",
         op: "update",
-        group_id: 3,
+        group_id: 1,
         data: {
             name: "Frontend",
             description: "All Frontend people",
+            can_manage_group: 2,
         },
     },
 
@@ -936,13 +1093,6 @@ exports.fixtures = {
         op: "update",
         property: "demote_inactive_streams",
         value: 2,
-    },
-
-    user_settings__dense_mode: {
-        type: "user_settings",
-        op: "update",
-        property: "dense_mode",
-        value: true,
     },
 
     user_settings__display_emoji_reaction_users: {
@@ -1118,6 +1268,27 @@ exports.fixtures = {
         op: "update",
         property: "web_home_view",
         value: "recent_topics",
+    },
+
+    user_settings__web_inbox_show_channel_folders: {
+        type: "user_settings",
+        op: "update",
+        property: "web_inbox_show_channel_folders",
+        value: false,
+    },
+
+    user_settings__web_left_sidebar_show_channel_folders: {
+        type: "user_settings",
+        op: "update",
+        property: "web_left_sidebar_show_channel_folders",
+        value: false,
+    },
+
+    user_settings__web_left_sidebar_unreads_count_summary: {
+        type: "user_settings",
+        op: "update",
+        property: "web_left_sidebar_unreads_count_summary",
+        value: false,
     },
 
     user_settings__web_line_height_percent: {

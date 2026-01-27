@@ -1,12 +1,13 @@
 import $ from "jquery";
 import assert from "minimalistic-assert";
-import {z} from "zod";
+import * as z from "zod/mini";
 
 import render_message_reaction from "../templates/message_reaction.hbs";
 import render_message_reactions from "../templates/message_reactions.hbs";
 
 import * as blueslip from "./blueslip.ts";
 import * as channel from "./channel.ts";
+import type {RawLocalMessage} from "./echo.ts";
 import * as emoji from "./emoji.ts";
 import type {EmojiRenderingDetails} from "./emoji.ts";
 import {$t} from "./i18n.ts";
@@ -21,7 +22,7 @@ import {user_settings} from "./user_settings.ts";
 
 const waiting_for_server_request_ids = new Set<string>();
 
-type ReactionEvent = {
+export type ReactionEvent = {
     message_id: number;
     user_id: number;
     reaction_type: "zulip_extra_emoji" | "realm_emoji" | "unicode_emoji";
@@ -394,7 +395,7 @@ export let insert_new_reaction = (
                 message_reactions: [context],
             },
         };
-        const $msg_reaction_section = render_message_reactions(reaction_section_context);
+        const $msg_reaction_section = $(render_message_reactions(reaction_section_context));
         $rows.find(".messagebox-content").append($msg_reaction_section);
     } else {
         const $new_reaction = $(render_message_reaction(context));
@@ -468,9 +469,11 @@ export let remove_reaction_from_view = (
     }
 
     if (reaction_count === 0) {
-        // If this user was the only one reacting for this emoji, we simply
-        // remove the reaction and exit.
-        $reaction.remove();
+        // If this user was the only one reacting for this emoji, we
+        // remove the entire `message_reaction` template outer
+        // container, and then update vote text in case we now have
+        // few enough reactions to display names again.
+        $reaction.parent(".message_reaction_container").remove();
         update_vote_text_on_message(message);
         return;
     }
@@ -516,7 +519,9 @@ export function get_message_reactions(message: Message): MessageCleanReaction[] 
     return [...message.clean_reactions.values()];
 }
 
-export function generate_clean_reactions(message: RawMessage): Map<string, MessageCleanReaction> {
+export function generate_clean_reactions(
+    message: RawMessage | RawLocalMessage,
+): Map<string, MessageCleanReaction> {
     /*
       generate_clean_reactions processes the raw message.reactions object,
       which will contain one object for each individual reaction, even

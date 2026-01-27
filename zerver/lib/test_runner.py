@@ -99,8 +99,7 @@ class RemoteTestResult(django_runner.RemoteTestResult):
 
     def addInstrumentation(self, test: unittest.TestCase, data: dict[str, Any]) -> None:
         # Some elements of data['info'] cannot be serialized.
-        if "info" in data:
-            del data["info"]
+        data.pop("info", None)
 
         self.events.append(("addInstrumentation", self.test_index, data))
 
@@ -303,8 +302,7 @@ class Runner(DiscoverRunner):
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         with open(filepath, "w") as f:
             if self.parallel > 1:
-                for index in range(self.parallel):
-                    f.write(get_database_id(index + 1) + "\n")
+                f.writelines(get_database_id(index + 1) + "\n" for index in range(self.parallel))
             else:
                 f.write(get_database_id() + "\n")
 

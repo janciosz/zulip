@@ -459,6 +459,7 @@ run_test("insert_remove", ({mock_template}) => {
     assert.ok(removed);
     assert.equal(color_removed, "YELLOW");
     assert.ok(prev_pill_focused);
+    color_removed = undefined;
 
     prev_pill_focused = false;
     assert.deepEqual(widget.items(), [items.blue, items.red]);
@@ -472,12 +473,29 @@ run_test("insert_remove", ({mock_template}) => {
 
     $container.set_find_results(".pill:focus", $focus_pill_stub);
 
+    const red_pill = pills.find((pill) => pill.item.color_name === "RED");
+    // Disabled pill should not be removed.
+    red_pill.disabled = true;
+
     key_handler = $container.get_on_handler("keydown", ".pill");
     key_handler({
         key: "Backspace",
         preventDefault: noop,
     });
 
+    assert.equal(color_removed, undefined);
+    assert.ok(prev_pill_focused);
+
+    // We should be able to remove the pill after marking it as not
+    // disabled.
+    red_pill.disabled = false;
+    prev_pill_focused = false;
+    assert.deepEqual(widget.items(), [items.blue, items.red]);
+
+    key_handler({
+        key: "Backspace",
+        preventDefault: noop,
+    });
     assert.equal(color_removed, "RED");
     assert.ok(prev_pill_focused);
 });
@@ -679,4 +697,94 @@ run_test("onTextInputHook", () => {
     input_handler();
 
     assert.ok(hookCalled);
+});
+
+run_test("getPillByPredicate", ({mock_template}) => {
+    mock_template("input_pill.hbs", true, (data, html) => {
+        assert.equal(typeof data.display_value, "string");
+        return html;
+    });
+
+    const info = set_up();
+
+    const widget = input_pill.create(info.config);
+    widget.appendValue("blue,red,yellow");
+
+    // Test finding pill by color name
+    const found_blue_pill = widget.getPillByPredicate((item) => item.color_name === "BLUE");
+    assert.ok(found_blue_pill);
+    assert.equal(found_blue_pill.item.color_name, "BLUE");
+    assert.equal(found_blue_pill.item.description, "color of the sky");
+
+    const found_red_pill = widget.getPillByPredicate((item) => item.color_name === "RED");
+    assert.ok(found_red_pill);
+    assert.equal(found_red_pill.item.color_name, "RED");
+    assert.equal(found_red_pill.item.description, "color of stop signs");
+
+    // Test with non-existent item returns undefined
+    const nonexistent_pill = widget.getPillByPredicate((item) => item.color_name === "GREEN");
+    assert.equal(nonexistent_pill, undefined);
+
+    // Test finding pill by different property (description)
+    const found_by_description = widget.getPillByPredicate(
+        (item) => item.description === "color of the sky",
+    );
+    assert.ok(found_by_description);
+    assert.equal(found_by_description.item.color_name, "BLUE");
+});
+
+run_test("updatePill", ({mock_template}) => {
+    mock_template("input_pill.hbs", true, (data, html) => {
+        assert.equal(typeof data.display_value, "string");
+        $(html)[0] = `<pill-stub ${data.display_value}>`;
+        $(html).length = 1;
+        return html;
+    });
+
+    const info = set_up();
+
+    const widget = input_pill.create(info.config);
+    widget.appendValue("blue,red");
+
+    const pills = widget._get_pills_for_testing();
+    assert.equal(pills.length, 2);
+
+    const blue_pill = pills[0];
+    assert.equal(blue_pill.item.color_name, "BLUE");
+    assert.equal(blue_pill.item.description, "color of the sky");
+
+    // Update the blue pill with new data
+    const updated_blue_data = {
+        color_name: "DARK BLUE",
+        description: "color of the deep ocean",
+        type: "color",
+    };
+
+    let element_replaced = false;
+    blue_pill.$element.replaceWith = ($new_elem) => {
+        element_replaced = true;
+        assert.equal($new_elem[0], "<pill-stub DARK BLUE>");
+    };
+
+    widget.updatePill(blue_pill.$element[0], updated_blue_data);
+
+    // Verify the pill element was replaced with new HTML
+    assert.ok(element_replaced);
+    // Verify that pill.$element was updated by updatePill
+    assert.equal(blue_pill.$element[0], "<pill-stub DARK BLUE>");
+    // Verify the pill's internal data was updated
+    assert.equal(blue_pill.item.color_name, "DARK BLUE");
+    assert.equal(blue_pill.item.description, "color of the deep ocean");
+
+    // Verify other pill is unchanged
+    const red_pill = pills[1];
+    assert.equal(red_pill.item.color_name, "RED");
+    assert.equal(red_pill.item.description, "color of stop signs");
+
+    // Test updating non-existent pill element - should be a no-op
+    const fake_element = {};
+    widget.updatePill(fake_element, updated_blue_data);
+    // Blue pill data should remain unchanged
+    assert.equal(blue_pill.item.color_name, "DARK BLUE");
+    assert.equal(blue_pill.item.description, "color of the deep ocean");
 });

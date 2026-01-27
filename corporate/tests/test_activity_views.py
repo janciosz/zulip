@@ -6,7 +6,9 @@ from django.utils.timezone import now as timezone_now
 
 from corporate.lib.activity import get_remote_server_audit_logs
 from corporate.lib.stripe import add_months
-from corporate.models import Customer, CustomerPlan, LicenseLedger
+from corporate.models.customers import Customer
+from corporate.models.licenses import LicenseLedger
+from corporate.models.plans import CustomerPlan
 from zerver.lib.test_classes import ZulipTestCase
 from zerver.models import Client, UserActivity, UserProfile
 from zerver.models.realm_audit_logs import AuditLogEventType
@@ -124,7 +126,7 @@ class ActivityTest(ZulipTestCase):
         query = "/json/messages/flags"
         last_visit = timezone_now()
         count = 150
-        for activity_user_profile in UserProfile.objects.all():
+        for activity_user_profile in UserProfile.objects.all().iterator():
             UserActivity.objects.get_or_create(
                 user_profile=activity_user_profile,
                 client=client,
@@ -200,13 +202,18 @@ class ActivityTest(ZulipTestCase):
             result = self.client_get("/activity/integrations")
             self.assertEqual(result.status_code, 200)
 
-        with self.assert_database_query_count(7):
+        with self.assert_database_query_count(13):
             result = self.client_get("/realm_activity/zulip/")
             self.assertEqual(result.status_code, 200)
 
         iago = self.example_user("iago")
         with self.assert_database_query_count(6):
             result = self.client_get(f"/user_activity/{iago.id}/")
+            self.assertEqual(result.status_code, 200)
+
+        webhook_bot = self.example_user("webhook_bot")
+        with self.assert_database_query_count(6):
+            result = self.client_get(f"/user_activity/{webhook_bot.id}/")
             self.assertEqual(result.status_code, 200)
 
         with self.assert_database_query_count(8):
@@ -325,7 +332,7 @@ class ActivityTest(ZulipTestCase):
                     realm_date_created=datetime(2023, 12, 1, tzinfo=timezone.utc),
                 )
 
-        # Remote server on legacy plan
+        # Remote server on complimentary access plan
         server = RemoteZulipServer.objects.get(hostname="zulip-1.example.com")
         customer = Customer.objects.create(remote_server=server)
         add_plan(customer, tier=CustomerPlan.TIER_SELF_HOSTED_LEGACY)

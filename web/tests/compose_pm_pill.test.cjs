@@ -2,6 +2,7 @@
 
 const assert = require("node:assert/strict");
 
+const {make_realm} = require("./lib/example_realm.cjs");
 const {mock_esm, zrequire} = require("./lib/namespace.cjs");
 const {run_test} = require("./lib/test.cjs");
 const $ = require("./lib/zjquery.cjs");
@@ -12,13 +13,13 @@ const people = zrequire("people");
 const compose_pm_pill = zrequire("compose_pm_pill");
 const {set_realm} = zrequire("state_data");
 
-set_realm({});
+set_realm(make_realm());
 
 let pills = {
     pill: {},
 };
 
-run_test("pills", ({override, override_rewire}) => {
+run_test("pills", ({override}) => {
     const me = {
         email: "me@example.com",
         user_id: 30,
@@ -81,49 +82,18 @@ run_test("pills", ({override, override_rewire}) => {
     let appendValue_called;
     pills.appendValue = function (value) {
         appendValue_called = true;
-        assert.equal(value, "othello@example.com");
+        assert.equal(value, othello.user_id.toString());
         this.appendValidatedData(othello);
     };
 
-    let get_by_email_called = false;
-    override_rewire(people, "get_by_email", (user_email) => {
-        get_by_email_called = true;
-        switch (user_email) {
-            case iago.email:
-                return iago;
-            case othello.email:
-                return othello;
-            /* istanbul ignore next */
-            default:
-                throw new Error(`Unknown user email ${user_email}`);
-        }
-    });
-
-    let get_by_user_id_called = false;
-    override_rewire(people, "get_by_user_id", (id) => {
-        get_by_user_id_called = true;
-        switch (id) {
-            case othello.user_id:
-                return othello;
-            case hamlet.user_id:
-                return hamlet;
-            /* istanbul ignore next */
-            default:
-                throw new Error(`Unknown user ID ${id}`);
-        }
-    });
-
     function test_create_item(handler) {
         (function test_rejection_path() {
-            const item = handler(othello.email, pills.items());
-            assert.ok(get_by_email_called);
+            const item = handler(othello.user_id, pills.items());
             assert.equal(item, undefined);
         })();
 
         (function test_success_path() {
-            get_by_email_called = false;
-            const res = handler(iago.email, pills.items());
-            assert.ok(get_by_email_called);
+            const res = handler(iago.user_id, pills.items());
             assert.equal(typeof res, "object");
             assert.equal(res.user_id, iago.user_id);
             assert.equal(res.full_name, iago.full_name);
@@ -131,9 +101,7 @@ run_test("pills", ({override, override_rewire}) => {
 
         (function test_deactivated_pill() {
             people.deactivate(iago);
-            get_by_email_called = false;
-            const res = handler(iago.email, pills.items());
-            assert.ok(get_by_email_called);
+            const res = handler(iago.user_id, pills.items());
             assert.equal(typeof res, "object");
             assert.equal(res.user_id, iago.user_id);
             assert.equal(res.full_name, iago.full_name);
@@ -193,7 +161,6 @@ run_test("pills", ({override, override_rewire}) => {
     compose_pm_pill.set_from_emails("othello@example.com");
     assert.ok(compose_pm_pill.widget);
 
-    assert.ok(get_by_user_id_called);
     assert.ok(pills_cleared);
     assert.ok(appendValue_called);
     assert.ok(text_cleared);
@@ -203,6 +170,10 @@ run_test("pills", ({override, override_rewire}) => {
 
     user_ids = compose_pm_pill.get_user_ids();
     assert.deepEqual(user_ids, [othello.user_id]);
+
+    compose_pm_pill.set_from_user_ids([hamlet.user_id], true);
+    user_ids = compose_pm_pill.get_user_ids();
+    assert.deepEqual(user_ids, [hamlet.user_id]);
 });
 
 run_test("has_unconverted_data", ({override}) => {
@@ -221,8 +192,105 @@ run_test("has_unconverted_data", ({override}) => {
 
     override(compose_pm_pill.widget, "items", () => [{user_id: 99}, {email: "random@mit.edu"}]);
 
-    // One of our items only knows email (as in a bridge-with-zephyr
+    // One of our items only knows email (as in a bridge
     // scenario where we might not have registered the user yet), so
     // we have some unconverted data.
     assert.equal(compose_pm_pill.has_unconverted_data(), true);
+});
+
+run_test("update_user_pill_active_status", ({override_rewire}) => {
+    const othello = {
+        user_id: 1,
+        email: "othello@example.com",
+        full_name: "Othello",
+        is_active: true,
+        is_bot: false,
+    };
+
+    const inaccessible_user = {
+        user_id: 2,
+        email: "iago@zulip.com",
+        full_name: "Iago",
+        is_active: false,
+        is_inaccessible_user: true,
+        is_bot: false,
+    };
+
+    // Test with uninitialized widget - should return early without error
+    override_rewire(compose_pm_pill, "widget", undefined);
+    // No assertions needed - we're just checking it doesn't throw
+    compose_pm_pill.update_user_pill_active_status(othello, false);
+
+    // Set up test data for normal widget tests
+    const pills_data = [
+        {
+            item: {user_id: othello.user_id, full_name: othello.full_name},
+            $element: {0: {id: "pill_1"}},
+        },
+        {
+            item: {user_id: inaccessible_user.user_id, full_name: inaccessible_user.full_name},
+            $element: {0: {id: "pill_2"}},
+        },
+    ];
+
+    let pill_updated = false;
+
+    const widget = {
+        getPillByPredicate(predicate) {
+            return pills_data.find((p) => predicate(p.item));
+        },
+        updatePill(element, item) {
+            const pill = pills_data.find((p) => p.$element[0] === element);
+            pill.item = item;
+            pill_updated = true;
+        },
+    };
+    override_rewire(compose_pm_pill, "widget", widget);
+
+    // Test deactivating a user - should set deactivated to true
+    compose_pm_pill.update_user_pill_active_status(othello, false);
+
+    assert.deepEqual(pills_data[0].item, {
+        user_id: othello.user_id,
+        full_name: othello.full_name,
+        deactivated: true,
+    });
+    assert.ok(pill_updated);
+
+    // Reset for next test
+    pill_updated = false;
+
+    // Test reactivating a user - should set deactivated to false
+    compose_pm_pill.update_user_pill_active_status(othello, true);
+
+    assert.deepEqual(pills_data[0].item, {
+        user_id: othello.user_id,
+        full_name: othello.full_name,
+        deactivated: false,
+    });
+    assert.ok(pill_updated);
+
+    // Reset for next test
+    pill_updated = false;
+
+    // Test deactivating an inaccessible user - should keep deactivated as false
+    // We consider inaccessible users as active to avoid falsely showing them as deactivated,
+    // since we don't have information about their activity status.
+    compose_pm_pill.update_user_pill_active_status(inaccessible_user, false);
+
+    assert.deepEqual(pills_data[1].item, {
+        user_id: inaccessible_user.user_id,
+        full_name: inaccessible_user.full_name,
+        deactivated: false,
+    });
+    assert.ok(pill_updated);
+
+    // Reset for next test
+    pill_updated = false;
+
+    // Test updating a user that doesn't have a pill - should be a no-op
+    const hamlet = {user_id: 3, email: "hamlet@example.com", full_name: "Hamlet"};
+    compose_pm_pill.update_user_pill_active_status(hamlet, true);
+
+    assert.ok(!pill_updated);
 });

@@ -1,5 +1,5 @@
 import * as url_template_lib from "url-template";
-import type {z} from "zod";
+import type * as z from "zod/mini";
 
 import * as blueslip from "./blueslip.ts";
 import type {realm_linkifier_schema} from "./state_data.ts";
@@ -16,7 +16,7 @@ export function get_linkifier_map(): LinkifierMap {
     return linkifier_map;
 }
 
-function python_to_js_linkifier(
+export function python_to_js_linkifier(
     pattern: string,
     url: string,
 ): [RegExp | null, url_template_lib.Template, Record<number, string>] {

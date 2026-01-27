@@ -1,4 +1,4 @@
-import {z} from "zod";
+import * as z from "zod/mini";
 
 import {server_add_bot_schema} from "./bot_types.ts";
 import {realm_default_settings_schema} from "./realm_user_settings_defaults.ts";
@@ -20,11 +20,135 @@ const group_permission_setting_schema = z.object({
 });
 export type GroupPermissionSetting = z.output<typeof group_permission_setting_schema>;
 
-export const narrow_term_schema = z.object({
-    negated: z.optional(z.boolean()),
-    operator: z.string(),
-    operand: z.string(),
-});
+// We cannot parse the operand since it is incomplete,
+// only used for generating suggestions.
+export type NarrowTermSuggestion = {
+    operator: NarrowTerm["operator"];
+    operand: string;
+    negated?: boolean | undefined;
+};
+
+export type NarrowCanonicalTermSuggestion = {
+    operator: NarrowCanonicalTerm["operator"];
+    operand: string;
+    negated?: boolean | undefined;
+};
+
+export const narrow_canonical_operator_schema = z.enum([
+    "", // Used for search suggestions.
+    "channel",
+    "channels",
+    "dm",
+    "dm-including",
+    "has",
+    "id",
+    "in",
+    "is",
+    "near",
+    "search",
+    "sender",
+    "topic",
+    "with",
+]);
+export type NarrowCanonicalOperator = z.output<typeof narrow_canonical_operator_schema>;
+
+const narrow_legacy_operator_schema = z.enum([
+    "pm-with",
+    "group-pm-with",
+    "from",
+    "stream",
+    "streams",
+    "subject",
+]);
+
+export const narrow_operator_schema = z.union([
+    narrow_canonical_operator_schema,
+    narrow_legacy_operator_schema,
+]);
+export type NarrowOperator = z.output<typeof narrow_operator_schema>;
+
+export const narrow_canonical_term_schema = z.discriminatedUnion("operator", [
+    z.object({
+        operator: z.literal(""),
+        operand: z.string(),
+        negated: z.optional(z.boolean()),
+    }),
+    z.object({
+        operator: z.literal("channel"),
+        operand: z.string(),
+        negated: z.optional(z.boolean()),
+    }),
+    z.object({
+        operator: z.literal("channels"),
+        operand: z.string(),
+        negated: z.optional(z.boolean()),
+    }),
+    z.object({
+        operator: z.literal("has"),
+        operand: z.string(),
+        negated: z.optional(z.boolean()),
+    }),
+    z.object({
+        operator: z.literal("id"),
+        operand: z.string(),
+        negated: z.optional(z.boolean()),
+    }),
+    z.object({
+        operator: z.literal("in"),
+        operand: z.string(),
+        negated: z.optional(z.boolean()),
+    }),
+    z.object({
+        operator: z.literal("is"),
+        operand: z.string(),
+        negated: z.optional(z.boolean()),
+    }),
+    z.object({
+        operator: z.literal("near"),
+        operand: z.string(),
+        negated: z.optional(z.boolean()),
+    }),
+    z.object({
+        operator: z.literal("search"),
+        operand: z.string(),
+        negated: z.optional(z.boolean()),
+    }),
+    z.object({
+        operator: z.literal("topic"),
+        operand: z.string(),
+        negated: z.optional(z.boolean()),
+    }),
+    z.object({
+        operator: z.literal("with"),
+        operand: z.string(),
+        negated: z.optional(z.boolean()),
+    }),
+    z.object({
+        operator: z.literal("sender"),
+        operand: z.string(),
+        negated: z.optional(z.boolean()),
+    }),
+    z.object({
+        operator: z.literal("dm-including"),
+        operand: z.string(),
+        negated: z.optional(z.boolean()),
+    }),
+    z.object({
+        operator: z.literal("dm"),
+        operand: z.string(),
+        negated: z.optional(z.boolean()),
+    }),
+]);
+export type NarrowCanonicalTerm = z.output<typeof narrow_canonical_term_schema>;
+
+export const narrow_term_schema = z.union([
+    narrow_canonical_term_schema,
+    z.object({
+        negated: z.optional(z.boolean()),
+        operator: narrow_legacy_operator_schema,
+        operand: z.string(),
+    }),
+]);
 export type NarrowTerm = z.output<typeof narrow_term_schema>;
 
 export const custom_profile_field_schema = z.object({
@@ -41,72 +165,80 @@ export const custom_profile_field_schema = z.object({
 
 export type CustomProfileField = z.output<typeof custom_profile_field_schema>;
 
-export const scheduled_message_schema = z
-    .object({
+export const scheduled_message_schema = z.intersection(
+    z.object({
         scheduled_message_id: z.number(),
         content: z.string(),
         rendered_content: z.string(),
         scheduled_delivery_timestamp: z.number(),
         failed: z.boolean(),
-    })
-    .and(
-        z.discriminatedUnion("type", [
-            z.object({
-                type: z.literal("private"),
-                to: z.array(z.number()),
-            }),
-            z.object({
-                type: z.literal("stream"),
-                to: z.number(),
-                topic: z.string(),
-            }),
-        ]),
-    );
+    }),
+    z.discriminatedUnion("type", [
+        z.object({
+            type: z.literal("private"),
+            to: z.array(z.number()),
+        }),
+        z.object({
+            type: z.literal("stream"),
+            to: z.number(),
+            topic: z.string(),
+        }),
+    ]),
+);
+
+export const reminder_schema = z.object({
+    reminder_id: z.number(),
+    type: z.literal("private"),
+    to: z.array(z.number()),
+    content: z.string(),
+    rendered_content: z.string(),
+    scheduled_delivery_timestamp: z.number(),
+    failed: z.boolean(),
+    reminder_target_message_id: z.number(),
+});
 
 export const profile_datum_schema = z.object({
     value: z.string(),
-    rendered_value: z.string().nullish(),
+    rendered_value: z.nullish(z.string()),
 });
 
-export const user_schema = z
-    .object({
+export const user_schema = z.intersection(
+    z.object({
         user_id: z.number(),
-        delivery_email: z.string().nullable(),
+        delivery_email: z.nullable(z.string()),
         email: z.string(),
         full_name: z.string(),
         // used for caching result of remove_diacritics.
-        name_with_diacritics_removed: z.string().optional(),
+        name_with_diacritics_removed: z.optional(z.string()),
         date_joined: z.string(),
-        is_active: z.boolean().optional(),
+        is_active: z.optional(z.boolean()),
         is_owner: z.boolean(),
         is_admin: z.boolean(),
         is_guest: z.boolean(),
-        is_moderator: z.boolean().optional(),
-        is_billing_admin: z.boolean().optional(),
+        is_moderator: z.optional(z.boolean()),
         role: z.number(),
-        timezone: z.string().optional(),
-        avatar_url: z.string().nullish(),
+        timezone: z.optional(z.string()),
+        avatar_url: z.nullish(z.string()),
         avatar_version: z.number(),
-        profile_data: z.record(z.coerce.number(), profile_datum_schema).optional(),
+        profile_data: z.optional(z.record(z.coerce.number<string>(), profile_datum_schema)),
         // used for fake user objects.
         is_missing_server_data: z.optional(z.boolean()),
         // used for inaccessible user objects.
         is_inaccessible_user: z.optional(z.boolean()),
         is_system_bot: z.optional(z.literal(true)),
-    })
-    .and(
-        z.discriminatedUnion("is_bot", [
-            z.object({
-                is_bot: z.literal(false),
-                bot_type: z.null().optional(),
-            }),
-            z.object({
-                is_bot: z.literal(true),
-                bot_type: z.number(),
-                bot_owner_id: z.number().nullable(),
-            }),
-        ]),
-    );
+    }),
+    z.discriminatedUnion("is_bot", [
+        z.object({
+            is_bot: z.literal(false),
+            bot_type: z.optional(z.null()),
+        }),
+        z.object({
+            is_bot: z.literal(true),
+            bot_type: z.number(),
+            bot_owner_id: z.nullable(z.number()),
+        }),
+    ]),
+);
 
 export const server_emoji_schema = z.object({
     id: z.string(),
@@ -114,21 +246,21 @@ export const server_emoji_schema = z.object({
     deactivated: z.boolean(),
     name: z.string(),
     source_url: z.string(),
-    still_url: z.string().nullable(),
+    still_url: z.nullable(z.string()),
 
     // Added later in `settings_emoji.ts` when setting up the emoji settings.
-    author: user_schema.nullish(),
+    author: z.nullish(user_schema),
 });
 
-export const realm_emoji_map_schema = z.record(server_emoji_schema);
+export const realm_emoji_map_schema = z.record(z.string(), server_emoji_schema);
 
 export type GroupSettingValue = z.infer<typeof group_setting_value_schema>;
 
 export const raw_user_group_schema = z.object({
     description: z.string(),
     id: z.number(),
-    creator_id: z.number().nullable(),
-    date_created: z.number().nullable(),
+    creator_id: z.nullable(z.number()),
+    date_created: z.nullable(z.number()),
     name: z.string(),
     members: z.array(z.number()),
     is_system_group: z.boolean(),
@@ -141,6 +273,25 @@ export const raw_user_group_schema = z.object({
     can_remove_members_group: group_setting_value_schema,
     deactivated: z.boolean(),
 });
+
+export const channel_folder_schema = z.object({
+    id: z.number(),
+    name: z.string(),
+    description: z.string(),
+    rendered_description: z.string(),
+    creator_id: z.nullable(z.number()),
+    date_created: z.number(),
+    is_archived: z.boolean(),
+    order: z.number(),
+});
+
+export const navigation_view_schema = z.object({
+    fragment: z.string(),
+    name: z.nullable(z.string()),
+    is_pinned: z.boolean(),
+});
+
+export type NavigationView = z.infer<typeof navigation_view_schema>;
 
 export const user_topic_schema = z.object({
     stream_id: z.number(),
@@ -171,8 +322,12 @@ export const unread_direct_message_group_info_schema = z.object({
 });
 
 export const presence_schema = z.object({
-    active_timestamp: z.number().optional(),
-    idle_timestamp: z.number().optional(),
+    active_timestamp: z.optional(z.number()),
+    idle_timestamp: z.optional(z.number()),
+});
+
+export const realm_billing_schema = z.object({
+    has_pending_sponsorship_request: z.boolean(),
 });
 
 export const saved_snippet_schema = z.object({
@@ -205,20 +360,18 @@ export const onboarding_step_schema = z.union([one_time_notice_schema, one_time_
 // Sync this with zerver.lib.events.do_events_register.
 const current_user_schema = z.object({
     avatar_source: z.string(),
-    avatar_url: z.string().nullish(),
-    avatar_url_medium: z.string().nullish(),
+    avatar_url: z.nullish(z.string()),
+    avatar_url_medium: z.nullish(z.string()),
     can_create_private_streams: z.boolean(),
     can_create_public_streams: z.boolean(),
     can_create_streams: z.boolean(),
     can_create_web_public_streams: z.boolean(),
     can_invite_others_to_realm: z.boolean(),
-    can_subscribe_other_users: z.boolean(),
     delivery_email: z.string(),
     email: z.string(),
     full_name: z.string(),
     has_zoom_token: z.boolean(),
     is_admin: z.boolean(),
-    is_billing_admin: z.boolean(),
     is_guest: z.boolean(),
     is_moderator: z.boolean(),
     is_owner: z.boolean(),
@@ -256,29 +409,39 @@ export const realm_linkifier_schema = z.object({
     id: z.number(),
 });
 
+export const realm_report_message_types = z.object({
+    key: z.string(),
+    name: z.string(),
+});
+
 // Sync this with zerver.lib.events.do_events_register.
 export const realm_schema = z.object({
     custom_profile_fields: z.array(custom_profile_field_schema),
     custom_profile_field_types: custom_profile_field_types_schema,
     demo_organization_scheduled_deletion_date: z.optional(z.number()),
     giphy_api_key: z.string(),
-    giphy_rating_options: z
-        .record(z.object({id: z.number(), name: z.string()}))
-        .and(z.object({disabled: z.object({id: z.number(), name: z.string()})})),
+    gif_rating_options: z.intersection(
+        z.record(z.string(), z.object({id: z.number(), name: z.string()})),
+        z.object({disabled: z.object({id: z.number(), name: z.string()})}),
+    ),
     max_avatar_file_size_mib: z.number(),
+    max_channel_folder_description_length: z.number(),
+    max_channel_folder_name_length: z.number(),
     max_file_upload_size_mib: z.number(),
     max_icon_file_size_mib: z.number(),
     max_logo_file_size_mib: z.number(),
     max_message_length: z.number(),
+    max_reminder_note_length: z.number(),
     max_stream_description_length: z.number(),
     max_stream_name_length: z.number(),
     max_topic_length: z.number(),
+    max_bulk_new_subscription_messages: z.number(),
     password_min_guesses: z.number(),
     password_min_length: z.number(),
     password_max_length: z.number(),
-    realm_allow_edit_history: z.boolean(),
     realm_allow_message_editing: z.boolean(),
     realm_authentication_methods: z.record(
+        z.string(),
         z.object({
             enabled: z.boolean(),
             available: z.boolean(),
@@ -289,23 +452,32 @@ export const realm_schema = z.object({
         disabled: z.object({name: z.string(), id: z.number()}),
         jitsi_meet: z.object({name: z.string(), id: z.number()}),
         zoom: z.optional(z.object({name: z.string(), id: z.number()})),
+        zoom_server_to_server: z.optional(z.object({name: z.string(), id: z.number()})),
         big_blue_button: z.optional(z.object({name: z.string(), id: z.number()})),
     }),
     realm_avatar_changes_disabled: z.boolean(),
-    realm_bot_creation_policy: z.number(),
     realm_bot_domain: z.string(),
     realm_can_access_all_users_group: z.number(),
     realm_can_add_custom_emoji_group: group_setting_value_schema,
+    realm_can_add_subscribers_group: group_setting_value_schema,
+    realm_can_create_bots_group: group_setting_value_schema,
     realm_can_create_groups: group_setting_value_schema,
     realm_can_create_public_channel_group: group_setting_value_schema,
     realm_can_create_private_channel_group: group_setting_value_schema,
     realm_can_create_web_public_channel_group: z.number(),
+    realm_can_create_write_only_bots_group: group_setting_value_schema,
     realm_can_delete_any_message_group: group_setting_value_schema,
     realm_can_delete_own_message_group: group_setting_value_schema,
     realm_can_invite_users_group: group_setting_value_schema,
     realm_can_manage_all_groups: group_setting_value_schema,
+    realm_can_manage_billing_group: group_setting_value_schema,
+    realm_can_mention_many_users_group: group_setting_value_schema,
     realm_can_move_messages_between_channels_group: group_setting_value_schema,
     realm_can_move_messages_between_topics_group: group_setting_value_schema,
+    realm_can_resolve_topics_group: group_setting_value_schema,
+    realm_can_set_delete_message_policy_group: group_setting_value_schema,
+    realm_can_set_topics_policy_group: group_setting_value_schema,
+    realm_can_summarize_topics_group: group_setting_value_schema,
     realm_create_multiuse_invite_group: group_setting_value_schema,
     realm_date_created: z.number(),
     realm_default_code_block_language: z.string(),
@@ -332,10 +504,11 @@ export const realm_schema = z.object({
     realm_embedded_bots: z.array(
         z.object({
             name: z.string(),
-            config: z.record(z.string()),
+            config: z.record(z.string(), z.string()),
         }),
     ),
     realm_empty_topic_display_name: z.string(),
+    realm_enable_guest_user_dm_warning: z.boolean(),
     realm_enable_guest_user_indicator: z.boolean(),
     realm_enable_read_receipts: z.boolean(),
     realm_enable_spectator_access: z.boolean(),
@@ -347,56 +520,69 @@ export const realm_schema = z.object({
             display_name: z.string(),
             name: z.string(),
             all_event_types: z.nullable(z.array(z.string())),
-            config_options: z
-                .array(
+            config_options: z.optional(
+                z.array(
                     z.object({
                         key: z.string(),
                         label: z.string(),
                         validator: z.string(),
                     }),
-                )
-                .optional(),
+                ),
+            ),
+            url_options: z.optional(
+                z.array(
+                    z.object({
+                        key: z.string(),
+                        label: z.string(),
+                        validator: z.string(),
+                    }),
+                ),
+            ),
         }),
     ),
     realm_inline_image_preview: z.boolean(),
     realm_inline_url_embed_preview: z.boolean(),
     realm_invite_required: z.boolean(),
-    realm_invite_to_stream_policy: z.number(),
-    realm_is_zephyr_mirror_realm: z.boolean(),
     realm_jitsi_server_url: z.nullable(z.string()),
     realm_linkifiers: z.array(realm_linkifier_schema),
     realm_logo_source: z.string(),
     realm_logo_url: z.string(),
-    realm_mandatory_topics: z.boolean(),
     realm_message_content_allowed_in_email_notifications: z.boolean(),
-    realm_message_content_edit_limit_seconds: z.number().nullable(),
-    realm_message_content_delete_limit_seconds: z.number().nullable(),
+    realm_message_content_edit_limit_seconds: z.nullable(z.number()),
+    realm_message_content_delete_limit_seconds: z.nullable(z.number()),
+    realm_message_edit_history_visibility_policy: z.enum(["all", "moves", "none"]),
     realm_message_retention_days: z.number(),
-    realm_move_messages_between_streams_limit_seconds: z.number().nullable(),
-    realm_move_messages_within_stream_limit_seconds: z.number().nullable(),
+    realm_moderation_request_channel_id: z.number(),
+    realm_move_messages_between_streams_limit_seconds: z.nullable(z.number()),
+    realm_move_messages_within_stream_limit_seconds: z.nullable(z.number()),
     realm_name_changes_disabled: z.boolean(),
     realm_name: z.string(),
     realm_new_stream_announcements_stream_id: z.number(),
     realm_night_logo_source: z.string(),
     realm_night_logo_url: z.string(),
     realm_org_type: z.number(),
+    realm_owner_full_content_access: z.boolean(),
     realm_password_auth_enabled: z.boolean(),
     realm_plan_type: z.number(),
     realm_playgrounds: z.array(realm_playground_schema),
     realm_presence_disabled: z.boolean(),
     realm_push_notifications_enabled: z.boolean(),
-    realm_push_notifications_enabled_end_timestamp: z.number().nullable(),
+    realm_push_notifications_enabled_end_timestamp: z.nullable(z.number()),
+    realm_require_e2ee_push_notifications: z.boolean(),
     realm_require_unique_names: z.boolean(),
+    realm_send_channel_events_messages: z.boolean(),
     realm_send_welcome_emails: z.boolean(),
     realm_signup_announcements_stream_id: z.number(),
+    realm_topics_policy: z.enum(["allow_empty_topic", "disable_empty_topic"]),
     realm_upload_quota_mib: z.nullable(z.number()),
     realm_url: z.string(),
     realm_video_chat_provider: z.number(),
     realm_waiting_period_threshold: z.number(),
     realm_want_advertise_in_communities_directory: z.boolean(),
-    realm_wildcard_mention_policy: z.number(),
+    realm_welcome_message_custom_text: z.string(),
     realm_zulip_update_announcements_stream_id: z.number(),
     server_avatar_changes_disabled: z.boolean(),
+    server_can_summarize_topics: z.boolean(),
     server_emoji_data_url: z.string(),
     server_inline_image_preview: z.boolean(),
     server_inline_url_embed_preview: z.boolean(),
@@ -407,10 +593,11 @@ export const realm_schema = z.object({
     server_needs_upgrade: z.boolean(),
     server_presence_offline_threshold_seconds: z.number(),
     server_presence_ping_interval_seconds: z.number(),
+    server_report_message_types: z.array(realm_report_message_types),
     server_supported_permission_settings: z.object({
-        realm: z.record(group_permission_setting_schema),
-        stream: z.record(group_permission_setting_schema),
-        group: z.record(group_permission_setting_schema),
+        realm: z.record(z.string(), group_permission_setting_schema),
+        stream: z.record(z.string(), group_permission_setting_schema),
+        group: z.record(z.string(), group_permission_setting_schema),
     }),
     server_thumbnail_formats: z.array(thumbnail_format_schema),
     server_typing_started_expiry_period_milliseconds: z.number(),
@@ -419,6 +606,7 @@ export const realm_schema = z.object({
     server_web_public_streams_enabled: z.boolean(),
     settings_send_digest_emails: z.boolean(),
     stop_words: z.array(z.string()),
+    tenor_api_key: z.string(),
     upgrade_text_for_wide_organization_logo: z.string(),
     zulip_feature_level: z.number(),
     zulip_merge_base: z.string(),
@@ -426,136 +614,94 @@ export const realm_schema = z.object({
     zulip_version: z.string(),
 });
 
-export const state_data_schema = z
-    .object({alert_words: z.array(z.string())})
-    .transform((alert_words) => ({alert_words}))
-    .and(z.object({realm_emoji: realm_emoji_map_schema}).transform((emoji) => ({emoji})))
-    .and(z.object({realm_bots: z.array(server_add_bot_schema)}).transform((bot) => ({bot})))
-    .and(
-        z
-            .object({
-                realm_users: z.array(user_schema),
-                realm_non_active_users: z.array(user_schema),
-                cross_realm_bots: z.array(user_schema),
-            })
-            .transform((people) => ({people})),
-    )
-    .and(
-        z
-            .object({
-                recent_private_conversations: z.array(
-                    z.object({
-                        max_message_id: z.number(),
-                        user_ids: z.array(z.number()),
-                    }),
-                ),
-            })
-            .transform((pm_conversations) => ({pm_conversations})),
-    )
-    .and(
-        z
-            .object({
-                presences: z.record(z.coerce.number(), presence_schema),
-                server_timestamp: z.number(),
-                presence_last_update_id: z.number().optional(),
-            })
-            .transform((presence) => ({presence})),
-    )
-    .and(
-        z
-            .object({saved_snippets: z.array(saved_snippet_schema)})
-            .transform((saved_snippets) => ({saved_snippets})),
-    )
-    .and(
-        z
-            .object({starred_messages: z.array(z.number())})
-            .transform((starred_messages) => ({starred_messages})),
-    )
-    .and(
-        z
-            .object({
-                subscriptions: z.array(api_stream_subscription_schema),
-                unsubscribed: z.array(api_stream_subscription_schema),
-                never_subscribed: z.array(never_subscribed_stream_schema),
-                realm_default_streams: z.array(z.number()),
-            })
-            .transform((stream_data) => ({stream_data})),
-    )
-    .and(
-        z
-            .object({realm_user_groups: z.array(raw_user_group_schema)})
-            .transform((user_groups) => ({user_groups})),
-    )
-    .and(
-        z
-            .object({
-                unread_msgs: z.object({
-                    pms: z.array(unread_direct_message_info_schema),
-                    streams: z.array(unread_stream_info_schema),
-                    huddles: z.array(unread_direct_message_group_info_schema),
-                    mentions: z.array(z.number()),
-                    count: z.number(),
-                    old_unreads_missing: z.boolean(),
-                }),
-            })
-            .transform((unread) => ({unread})),
-    )
-    .and(
-        z
-            .object({muted_users: z.array(muted_user_schema)})
-            .transform((muted_users) => ({muted_users})),
-    )
-    .and(
-        z
-            .object({user_topics: z.array(user_topic_schema)})
-            .transform((user_topics) => ({user_topics})),
-    )
-    .and(
-        z
-            .object({user_status: z.record(user_status_schema)})
-            .transform((user_status) => ({user_status})),
-    )
-    .and(
-        z
-            .object({user_settings: user_settings_schema})
-            .transform((user_settings) => ({user_settings})),
-    )
-    .and(
-        z
-            .object({realm_user_settings_defaults: realm_default_settings_schema})
-            .transform((realm_settings_defaults) => ({realm_settings_defaults})),
-    )
-    .and(
-        z
-            .object({scheduled_messages: z.array(scheduled_message_schema)})
-            .transform((scheduled_messages) => ({scheduled_messages})),
-    )
-    .and(
-        z
-            .object({
-                queue_id: NOT_TYPED_YET,
-                server_generation: NOT_TYPED_YET,
-                event_queue_longpoll_timeout_seconds: NOT_TYPED_YET,
-                last_event_id: NOT_TYPED_YET,
-            })
-            .transform((server_events) => ({server_events})),
-    )
-    .and(z.object({max_message_id: z.number()}).transform((local_message) => ({local_message})))
-    .and(
-        z
-            .object({onboarding_steps: z.array(onboarding_step_schema)})
-            .transform((onboarding_steps) => ({onboarding_steps})),
-    )
-    .and(current_user_schema.transform((current_user) => ({current_user})))
-    .and(realm_schema.transform((realm) => ({realm})));
+export const split_state_data_schema = z.object({
+    alert_words: z.object({alert_words: z.array(z.string())}),
+    emoji: z.object({realm_emoji: realm_emoji_map_schema}),
+    realm_billing: z.object({realm_billing: realm_billing_schema}),
+    bot: z.object({realm_bots: z.array(server_add_bot_schema)}),
+    people: z.object({
+        realm_users: z.array(user_schema),
+        realm_non_active_users: z.array(user_schema),
+        cross_realm_bots: z.array(user_schema),
+    }),
+    pm_conversations: z.object({
+        recent_private_conversations: z.array(
+            z.object({
+                max_message_id: z.number(),
+                user_ids: z.array(z.number()),
+            }),
+        ),
+    }),
+    presence: z.object({
+        presences: z.record(z.coerce.number<string>(), presence_schema),
+        server_timestamp: z.number(),
+        presence_last_update_id: z.optional(z.number()),
+    }),
+    saved_snippets: z.object({saved_snippets: z.array(saved_snippet_schema)}),
+    starred_messages: z.object({starred_messages: z.array(z.number())}),
+    stream_data: z.object({
+        subscriptions: z.array(api_stream_subscription_schema),
+        unsubscribed: z.array(api_stream_subscription_schema),
+        never_subscribed: z.array(never_subscribed_stream_schema),
+        realm_default_streams: z.array(z.number()),
+    }),
+    user_groups: z.object({realm_user_groups: z.array(raw_user_group_schema)}),
+    channel_folders: z.object({channel_folders: z.array(channel_folder_schema)}),
+    unread: z.object({
+        unread_msgs: z.object({
+            pms: z.array(unread_direct_message_info_schema),
+            streams: z.array(unread_stream_info_schema),
+            huddles: z.array(unread_direct_message_group_info_schema),
+            mentions: z.array(z.number()),
+            count: z.number(),
+            old_unreads_missing: z.boolean(),
+        }),
+    }),
+    muted_users: z.object({muted_users: z.array(muted_user_schema)}),
+    user_topics: z.object({user_topics: z.array(user_topic_schema)}),
+    user_status: z.object({user_status: z.record(z.string(), user_status_schema)}),
+    user_settings: z.object({user_settings: user_settings_schema}),
+    realm_settings_defaults: z.object({
+        realm_user_settings_defaults: realm_default_settings_schema,
+    }),
+    scheduled_messages: z.object({scheduled_messages: z.array(scheduled_message_schema)}),
+    reminders: z.object({reminders: z.array(reminder_schema)}),
+    server_events_state: z.object({
+        queue_id: z.nullable(z.string()),
+    }),
+    server_events: z.object({
+        server_generation: NOT_TYPED_YET,
+        event_queue_longpoll_timeout_seconds: NOT_TYPED_YET,
+        last_event_id: NOT_TYPED_YET,
+    }),
+    local_message: z.object({max_message_id: z.number()}),
+    onboarding_steps: z.object({
+        onboarding_steps: z.array(onboarding_step_schema),
+        navigation_tour_video_url: z.nullable(z.string()),
+    }),
+    current_user: current_user_schema,
+    realm: realm_schema,
+    navigation_views: z.object({navigation_views: z.array(navigation_view_schema)}),
+});
+type SplitStateDataInput = z.input<typeof split_state_data_schema>;
 
+export const state_data_schema = z.pipe(
+    z.transform((state_data: SplitStateDataInput[keyof SplitStateDataInput]) =>
+        Object.fromEntries(
+            Object.keys(split_state_data_schema.shape).map((part) => [part, state_data]),
+        ),
+    ),
+    split_state_data_schema,
+);
 export type StateData = z.infer<typeof state_data_schema>;
 
 export type CurrentUser = StateData["current_user"];
 export type Realm = StateData["realm"];
+export type RealmBilling = StateData["realm_billing"]["realm_billing"];
 
 export let current_user: CurrentUser;
 export let realm: Realm;
+export let realm_billing: RealmBilling;
 
 export function set_current_user(initial_current_user: CurrentUser): void {
     current_user = initial_current_user;
@@ -563,4 +709,8 @@ export function set_current_user(initial_current_user: CurrentUser): void {
 
 export function set_realm(initial_realm: Realm): void {
     realm = initial_realm;
+}
+
+export function set_realm_billing(params: StateData["realm_billing"]): void {
+    realm_billing = params.realm_billing;
 }

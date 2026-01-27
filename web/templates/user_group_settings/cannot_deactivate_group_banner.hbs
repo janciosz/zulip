@@ -1,18 +1,22 @@
-<p>
-    {{t "This group cannot be deactivated because it is used in following places:"}}
-    <ul>
-        {{#each streams_using_group_for_setting}}
-            {{#if this.setting_url}}
-            <li><a href="{{this.setting_url}}">#{{this.stream_name}}</a></li>
-            {{else}}
-            <li>{{this.stream_name}}</li>
-            {{/if}}
-        {{/each}}
-        {{#each groups_using_group_for_setting}}
-            <li><a href="{{this.setting_url}}">@{{this.group_name}}</a></li>
-        {{/each}}
-        {{#if realm_using_group_for_setting}}
-            <li><a href="#organization">{{t "Organization settings"}}</a></li>
+<div class="cannot-deactivate-group-banner main-view-banner error">
+    <p class="banner-text">
+        {{#if group_used_for_permissions}}
+            {{t "To deactivate this group, you must first remove all permissions assigned to it."}}
+        {{else}}
+            {{#tr}}
+                To deactivate this group, you must first remove it from all other groups. This group is currently a subgroup of: <z-supergroup-names></z-supergroup-names>.
+                {{#*inline "z-supergroup-names"}}
+                    {{#each supergroups}}
+                        <a class="view-group-members" data-group-id="{{group_id}}" href="{{settings_url}}">{{group_name}}</a>
+                        {{~#unless @last}}, {{/unless~}}
+                    {{/each}}
+                {{/inline}}
+            {{/tr}}
         {{/if}}
-    </ul>
-</p>
+    </p>
+    {{#if group_used_for_permissions}}
+    <button class="permissions-button main-view-banner-action-button">
+        {{t "View permissions"}}
+    </button>
+    {{/if}}
+</div>

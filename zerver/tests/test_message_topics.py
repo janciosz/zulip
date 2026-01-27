@@ -17,24 +17,6 @@ from zerver.tornado.event_queue import allocate_client_descriptor
 
 
 class TopicHistoryTest(ZulipTestCase):
-    def test_topics_history_zephyr_mirror(self) -> None:
-        user_profile = self.mit_user("sipbtest")
-        stream_name = "new_stream"
-
-        # Send a message to this new stream from another user
-        self.subscribe(self.mit_user("starnine"), stream_name)
-        stream = get_stream(stream_name, user_profile.realm)
-        self.send_stream_message(self.mit_user("starnine"), stream_name, topic_name="secret topic")
-
-        # Now subscribe this MIT user to the new stream and verify
-        # that the new topic is not accessible
-        self.login_user(user_profile)
-        self.subscribe(user_profile, stream_name)
-        endpoint = f"/json/users/me/{stream.id}/topics"
-        result = self.client_get(endpoint, {}, subdomain="zephyr")
-        history = self.assert_json_success(result)["topics"]
-        self.assertEqual(history, [])
-
     def test_topics_history(self) -> None:
         # verified: int(UserMessage.flags.read) == 1
         user_profile = self.example_user("iago")
@@ -816,6 +798,7 @@ class EmptyTopicNameTest(ZulipTestCase):
                 client_capabilities=ClientCapabilities(
                     empty_topic_name=True, notification_settings_null=False
                 ),
+                fetch_event_types=["update_message_flags", "message", "user_topic"],
             )
         self.assertEqual(state_data["unread_msgs"]["streams"][0]["topic"], "")
         self.assertEqual(state_data["unread_msgs"]["streams"][1]["topic"], "")
@@ -830,6 +813,7 @@ class EmptyTopicNameTest(ZulipTestCase):
                 client_capabilities=ClientCapabilities(
                     empty_topic_name=False, notification_settings_null=False
                 ),
+                fetch_event_types=["update_message_flags", "message", "user_topic"],
             )
         self.assertEqual(
             state_data["unread_msgs"]["streams"][0]["topic"], Message.EMPTY_TOPIC_FALLBACK_NAME
@@ -843,3 +827,28 @@ class EmptyTopicNameTest(ZulipTestCase):
         self.assertEqual(
             state_data["user_topics"][1]["topic_name"], Message.EMPTY_TOPIC_FALLBACK_NAME
         )
+
+    def test_get_channel_topics(self) -> None:
+        hamlet = self.example_user("hamlet")
+        self.login_user(hamlet)
+        channel_one = self.make_stream("channel_one")
+        channel_two = self.make_stream("channel_two")
+        self.subscribe(hamlet, channel_one.name)
+        self.subscribe(hamlet, channel_two.name)
+
+        self.send_stream_message(hamlet, channel_one.name, topic_name="")
+        self.send_stream_message(
+            hamlet, channel_two.name, topic_name=Message.EMPTY_TOPIC_FALLBACK_NAME
+        )
+
+        params = {"allow_empty_topic_name": "false"}
+        for channel_id in [channel_one.id, channel_two.id]:
+            result = self.client_get(f"/json/users/me/{channel_id}/topics", params)
+            data = self.assert_json_success(result)
+            self.assertEqual(data["topics"][0]["name"], Message.EMPTY_TOPIC_FALLBACK_NAME)
+
+        params = {"allow_empty_topic_name": "true"}
+        for channel_id in [channel_one.id, channel_two.id]:
+            result = self.client_get(f"/json/users/me/{channel_id}/topics", params)
+            data = self.assert_json_success(result)
+            self.assertEqual(data["topics"][0]["name"], "")

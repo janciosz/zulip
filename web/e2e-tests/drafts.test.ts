@@ -122,7 +122,7 @@ async function test_previously_created_drafts_rendered(page: Page): Promise<void
     assert.strictEqual(
         await common.get_text_from_selector(
             page,
-            "#drafts_table .overlay-message-row:nth-last-child(2) .rendered_markdown.restore-overlay-message",
+            "#drafts_table .overlay-message-row .private-message .rendered_markdown.restore-overlay-message",
         ),
         "Test direct message.",
     );
@@ -136,7 +136,7 @@ async function test_previously_created_drafts_rendered(page: Page): Promise<void
     assert.strictEqual(
         await common.get_text_from_selector(
             page,
-            "#drafts_table .overlay-message-row:last-child .rendered_markdown.restore-overlay-message",
+            "#drafts_table .overlay-message-row .message_row:not(.private-message) .rendered_markdown.restore-overlay-message",
         ),
         "Test stream message.",
     );
@@ -215,7 +215,7 @@ async function test_restore_private_message_draft_via_draft_overlay(page: Page):
     await common.pm_recipient.expect(page, `${cordelia_internal_email},${hamlet_internal_email}`);
     assert.strictEqual(
         await common.get_text_from_selector(page, "title"),
-        "Cordelia, Lear's daughter, King Hamlet - Zulip Dev - Zulip",
+        "Cordelia, Lear's daughter and King Hamlet - Zulip Dev - Zulip",
         "Didn't narrow to the direct messages with cordelia and hamlet",
     );
     await page.click("#compose_close");
@@ -325,4 +325,4 @@ async function drafts_test(page: Page): Promise<void> {
     await test_delete_draft_on_clearing_text(page);
 }
 
-common.run_test(drafts_test);
+await common.run_test(drafts_test);

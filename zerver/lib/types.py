@@ -2,7 +2,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import IntEnum
-from typing import Any, TypeAlias, TypeVar
+from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar
+
+if TYPE_CHECKING:
+    from zerver.models import Stream
 
 from django_stubs_ext import StrPromise
 from typing_extensions import NotRequired, TypedDict
@@ -38,6 +41,12 @@ class ProfileDataElement(ProfileDataElementBase):
 class ProfileDataElementUpdateDict(TypedDict):
     id: int
     value: ProfileDataElementValue
+
+
+class UserProfileChangeDict(TypedDict):
+    field_name: str
+    old_value: str
+    new_value: str
 
 
 ProfileData: TypeAlias = list[ProfileDataElement]
@@ -138,8 +147,13 @@ class UserTopicDict(TypedDict, total=False):
     visibility_policy: int
 
 
+class UserGroupMembersDict(TypedDict):
+    direct_members: list[int]
+    direct_subgroups: list[int]
+
+
 @dataclass
-class AnonymousSettingGroupDict:
+class UserGroupMembersData:
     direct_members: list[int]
     direct_subgroups: list[int]
 
@@ -150,14 +164,23 @@ class RawStreamDict(TypedDict):
     are needed to encode the stream for the API.
     """
 
+    can_add_subscribers_group_id: int
     can_administer_channel_group_id: int
+    can_create_topic_group_id: int
+    can_delete_any_message_group_id: int
+    can_delete_own_message_group_id: int
+    can_move_messages_out_of_channel_group_id: int
+    can_move_messages_within_channel_group_id: int
     can_send_message_group_id: int
     can_remove_subscribers_group_id: int
+    can_resolve_topics_group_id: int
+    can_subscribe_group_id: int
     creator_id: int | None
     date_created: datetime
     deactivated: bool
     description: str
     first_message_id: int | None
+    folder_id: int | None
     is_recently_active: bool
     history_public_to_subscribers: bool
     id: int
@@ -167,6 +190,8 @@ class RawStreamDict(TypedDict):
     name: str
     rendered_description: str
     stream_post_policy: int
+    subscriber_count: int
+    topics_policy: str
 
 
 class RawSubscriptionDict(TypedDict):
@@ -194,9 +219,17 @@ class SubscriptionStreamDict(TypedDict):
     """
 
     audible_notifications: bool | None
-    can_administer_channel_group: int | AnonymousSettingGroupDict
-    can_send_message_group: int | AnonymousSettingGroupDict
-    can_remove_subscribers_group: int | AnonymousSettingGroupDict
+    can_add_subscribers_group: int | UserGroupMembersDict
+    can_administer_channel_group: int | UserGroupMembersDict
+    can_create_topic_group: int | UserGroupMembersDict
+    can_delete_any_message_group: int | UserGroupMembersDict
+    can_delete_own_message_group: int | UserGroupMembersDict
+    can_move_messages_out_of_channel_group: int | UserGroupMembersDict
+    can_move_messages_within_channel_group: int | UserGroupMembersDict
+    can_send_message_group: int | UserGroupMembersDict
+    can_remove_subscribers_group: int | UserGroupMembersDict
+    can_resolve_topics_group: int | UserGroupMembersDict
+    can_subscribe_group: int | UserGroupMembersDict
     color: str
     creator_id: int | None
     date_created: int
@@ -204,6 +237,7 @@ class SubscriptionStreamDict(TypedDict):
     desktop_notifications: bool | None
     email_notifications: bool | None
     first_message_id: int | None
+    folder_id: int | None
     is_recently_active: bool
     history_public_to_subscribers: bool
     in_home_view: bool
@@ -220,19 +254,31 @@ class SubscriptionStreamDict(TypedDict):
     stream_id: int
     stream_post_policy: int
     stream_weekly_traffic: int | None
+    subscriber_count: int
     subscribers: NotRequired[list[int]]
+    partial_subscribers: NotRequired[list[int]]
+    topics_policy: str
     wildcard_mentions_notify: bool | None
 
 
 class NeverSubscribedStreamDict(TypedDict):
     is_archived: bool
-    can_administer_channel_group: int | AnonymousSettingGroupDict
-    can_send_message_group: int | AnonymousSettingGroupDict
-    can_remove_subscribers_group: int | AnonymousSettingGroupDict
+    can_add_subscribers_group: int | UserGroupMembersDict
+    can_administer_channel_group: int | UserGroupMembersDict
+    can_create_topic_group: int | UserGroupMembersDict
+    can_delete_any_message_group: int | UserGroupMembersDict
+    can_delete_own_message_group: int | UserGroupMembersDict
+    can_move_messages_out_of_channel_group: int | UserGroupMembersDict
+    can_move_messages_within_channel_group: int | UserGroupMembersDict
+    can_send_message_group: int | UserGroupMembersDict
+    can_remove_subscribers_group: int | UserGroupMembersDict
+    can_resolve_topics_group: int | UserGroupMembersDict
+    can_subscribe_group: int | UserGroupMembersDict
     creator_id: int | None
     date_created: int
     description: str
     first_message_id: int | None
+    folder_id: int | None
     is_recently_active: bool
     history_public_to_subscribers: bool
     invite_only: bool
@@ -244,7 +290,10 @@ class NeverSubscribedStreamDict(TypedDict):
     stream_id: int
     stream_post_policy: int
     stream_weekly_traffic: int | None
+    subscriber_count: int
     subscribers: NotRequired[list[int]]
+    partial_subscribers: NotRequired[list[int]]
+    topics_policy: str
 
 
 class DefaultStreamDict(TypedDict):
@@ -254,13 +303,22 @@ class DefaultStreamDict(TypedDict):
     """
 
     is_archived: bool
-    can_administer_channel_group: int | AnonymousSettingGroupDict
-    can_send_message_group: int | AnonymousSettingGroupDict
-    can_remove_subscribers_group: int | AnonymousSettingGroupDict
+    can_add_subscribers_group: int | UserGroupMembersDict
+    can_administer_channel_group: int | UserGroupMembersDict
+    can_create_topic_group: int | UserGroupMembersDict
+    can_delete_any_message_group: int | UserGroupMembersDict
+    can_delete_own_message_group: int | UserGroupMembersDict
+    can_move_messages_out_of_channel_group: int | UserGroupMembersDict
+    can_move_messages_within_channel_group: int | UserGroupMembersDict
+    can_send_message_group: int | UserGroupMembersDict
+    can_remove_subscribers_group: int | UserGroupMembersDict
+    can_resolve_topics_group: int | UserGroupMembersDict
+    can_subscribe_group: int | UserGroupMembersDict
     creator_id: int | None
     date_created: int
     description: str
     first_message_id: int | None
+    folder_id: int | None
     is_recently_active: bool
     history_public_to_subscribers: bool
     invite_only: bool
@@ -268,8 +326,10 @@ class DefaultStreamDict(TypedDict):
     message_retention_days: int | None
     name: str
     rendered_description: str
-    stream_id: int  # `stream_id`` represents `id` of the `Stream` object in `API_FIELDS`
+    stream_id: int  # `stream_id` represents `id` of the `Stream` object in `API_FIELDS`
     stream_post_policy: int
+    subscriber_count: int
+    topics_policy: str
     # Computed fields not specified in `Stream.API_FIELDS`
     is_announcement_only: bool
     is_default: NotRequired[bool]
@@ -313,11 +373,11 @@ class RealmPlaygroundDict(TypedDict):
 
 @dataclass
 class GroupPermissionSetting:
-    require_system_group: bool
-    allow_internet_group: bool
     allow_nobody_group: bool
     allow_everyone_group: bool
     default_group_name: str
+    require_system_group: bool = False
+    allow_internet_group: bool = False
     default_for_system_groups: str | None = None
     allowed_system_groups: list[str] = field(default_factory=list)
 
@@ -337,7 +397,6 @@ class RawUserDict(TypedDict):
     avatar_version: int
     is_active: bool
     role: int
-    is_billing_admin: bool
     is_bot: bool
     timezone: str
     date_joined: datetime
@@ -346,6 +405,7 @@ class RawUserDict(TypedDict):
     bot_type: int | None
     long_term_idle: bool
     email_address_visibility: int
+    is_imported_stub: bool
 
 
 class RemoteRealmDictValue(TypedDict):
@@ -358,3 +418,27 @@ class AnalyticsDataUploadLevel(IntEnum):
     BASIC = 1
     BILLING = 2
     ALL = 3
+
+
+@dataclass
+class StreamMessageEditRequest:
+    is_content_edited: bool
+    is_topic_edited: bool
+    is_stream_edited: bool
+    is_message_moved: bool
+    topic_resolved: bool
+    topic_unresolved: bool
+    content: str
+    target_topic_name: str
+    target_stream: "Stream"
+    orig_content: str
+    orig_topic_name: str
+    orig_stream: "Stream"
+    propagate_mode: str
+
+
+@dataclass
+class DirectMessageEditRequest:
+    content: str
+    orig_content: str
+    is_content_edited: bool

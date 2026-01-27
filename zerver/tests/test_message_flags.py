@@ -3,10 +3,13 @@ from unittest import mock
 
 import orjson
 from django.db import connection
+from django.test import override_settings
 from typing_extensions import override
 
 from zerver.actions.message_flags import do_update_message_flags
-from zerver.actions.streams import do_change_stream_permission
+from zerver.actions.streams import do_change_stream_group_based_setting, do_change_stream_permission
+from zerver.actions.user_groups import check_add_user_group
+from zerver.actions.user_settings import do_change_user_setting
 from zerver.actions.user_topics import do_set_user_topic_visibility_policy
 from zerver.lib.fix_unreads import fix, fix_unsubscribed
 from zerver.lib.message import (
@@ -28,6 +31,7 @@ from zerver.lib.test_helpers import get_subscription
 from zerver.lib.user_message import DEFAULT_HISTORICAL_FLAGS, create_historical_user_messages
 from zerver.models import (
     Message,
+    PushDevice,
     Recipient,
     Stream,
     Subscription,
@@ -35,7 +39,9 @@ from zerver.models import (
     UserProfile,
     UserTopic,
 )
+from zerver.models.groups import NamedUserGroup
 from zerver.models.realms import get_realm
+from zerver.models.recipients import get_or_create_direct_message_group
 from zerver.models.streams import get_stream
 
 if TYPE_CHECKING:
@@ -169,18 +175,22 @@ class UnreadCountTests(ZulipTestCase):
     @override
     def setUp(self) -> None:
         super().setUp()
-        with mock.patch(
-            "zerver.lib.push_notifications.push_notifications_configured", return_value=True
-        ) as mock_push_notifications_configured:
+        hamlet = self.example_user("hamlet")
+        self.register_push_device(hamlet.id)
+        with (
+            mock.patch(
+                "zerver.lib.push_notifications.send_push_notifications"
+            ) as mock_send_push_notifications,
+            mock.patch(
+                "zerver.lib.push_notifications.push_notifications_configured", return_value=True
+            ) as mock_push_notifications_configured,
+        ):
             self.unread_msg_ids = [
-                self.send_personal_message(
-                    self.example_user("iago"), self.example_user("hamlet"), "hello"
-                ),
-                self.send_personal_message(
-                    self.example_user("iago"), self.example_user("hamlet"), "hello2"
-                ),
+                self.send_personal_message(self.example_user("iago"), hamlet, "hello"),
+                self.send_personal_message(self.example_user("iago"), hamlet, "hello2"),
             ]
             mock_push_notifications_configured.assert_called()
+            mock_send_push_notifications.assert_called()
 
     # Sending a new message results in unread UserMessages being created
     # for users other than sender.
@@ -428,6 +438,61 @@ class UnreadCountTests(ZulipTestCase):
                     "flag": "starred",
                 },
             )
+        )
+
+        # Testing the response when marking messages as unread in a
+        # narrow that contains messages from unsubscribed streams
+        stream_name = "Test Stream"
+        stream = self.subscribe(user, stream_name)
+        self.subscribe(self.example_user("cordelia"), stream_name)
+        message_id = self.send_stream_message(self.example_user("cordelia"), stream_name, "hello")
+
+        self.assert_json_success(
+            self.client_post(
+                "/json/mark_stream_as_read",
+                {
+                    "stream_id": stream.id,
+                },
+            )
+        )
+        um = UserMessage.objects.get(
+            user_profile_id=user.id,
+            message_id=message_id,
+        )
+        self.assertTrue(um.flags.read)
+
+        # Unsubscribe the user from the stream
+        self.unsubscribe(user, stream_name)
+
+        # Marking recently added message and all other
+        # messages added at the start of the test as unread
+        # from an interleaved public narrow
+        response = self.assert_json_success(
+            self.client_post(
+                "/json/messages/flags/narrow",
+                {
+                    "anchor": message_id,
+                    "num_before": 10,
+                    "num_after": 0,
+                    "narrow": orjson.dumps([{"operator": "streams", "operand": "public"}]).decode(),
+                    "op": "remove",
+                    "flag": "read",
+                },
+            )
+        )
+
+        self.assertEqual(response["processed_count"], 11)
+        self.assertEqual(response["updated_count"], 5)
+        self.assertEqual(response["first_processed_id"], message_ids[0])
+        self.assertEqual(response["last_processed_id"], message_id)
+        self.assertEqual(response["found_oldest"], False)
+        self.assertEqual(response["found_newest"], False)
+        self.assertEqual(response["ignored_because_not_subscribed_channels"], [stream.id])
+        self.assertCountEqual(
+            UserMessage.objects.filter(user_profile_id=user.id, message_id__in=message_ids)
+            .extra(where=[UserMessage.where_unread()])  # noqa: S610
+            .values_list("message_id", flat=True),
+            message_ids,
         )
 
     def test_update_flags_for_narrow_misuse(self) -> None:
@@ -800,11 +865,13 @@ class PushNotificationMarkReadFlowsTest(ZulipTestCase):
             .values_list("message_id", flat=True)
         )
 
+    @mock.patch("zerver.lib.push_notifications.send_push_notifications")
     @mock.patch("zerver.lib.push_notifications.push_notifications_configured", return_value=True)
     def test_track_active_mobile_push_notifications(
-        self, mock_push_notifications: mock.MagicMock
+        self,
+        mock_push_notifications: mock.MagicMock,
+        mock_send_push_notifications: mock.MagicMock,
     ) -> None:
-        mock_push_notifications.return_value = True
         self.login("hamlet")
         user_profile = self.example_user("hamlet")
         cordelia = self.example_user("cordelia")
@@ -812,6 +879,7 @@ class PushNotificationMarkReadFlowsTest(ZulipTestCase):
         self.subscribe(cordelia, "test_stream")
         second_stream = self.subscribe(user_profile, "second_stream")
         self.subscribe(cordelia, "second_stream")
+        self.register_push_device(user_profile.id)
 
         property_name = "push_notifications"
         result = self.api_post(
@@ -884,6 +952,55 @@ class PushNotificationMarkReadFlowsTest(ZulipTestCase):
             result = self.client_post("/json/mark_all_as_read", {})
         self.assertEqual(self.get_mobile_push_notification_ids(user_profile), [])
         mock_push_notifications.assert_called()
+        mock_send_push_notifications.assert_called()
+
+    @mock.patch("zerver.lib.push_notifications.send_push_notifications")
+    @mock.patch("zerver.lib.push_notifications.push_notifications_configured", return_value=True)
+    def test_skip_clear_notification_for_user_without_push_device(
+        self,
+        mock_push_notifications: mock.MagicMock,
+        mock_send_push_notifications: mock.MagicMock,
+    ) -> None:
+        hamlet = self.example_user("hamlet")
+        cordelia = self.example_user("cordelia")
+        self.login_user(cordelia)
+        self.register_push_device(cordelia.id)
+        do_change_user_setting(cordelia, "enable_stream_push_notifications", True, acting_user=None)
+
+        # Initially, no active push notifications.
+        self.assertEqual(self.get_mobile_push_notification_ids(cordelia), [])
+
+        verona = self.subscribe(cordelia, "Verona")
+        message_ids = [self.send_stream_message(hamlet, "Verona", str(i)) for i in range(10)]
+
+        # Verify push notifications sent to `cordelia` for `message_ids`
+        self.assertEqual(
+            self.get_mobile_push_notification_ids(cordelia),
+            message_ids,
+        )
+
+        # Device unregistered. Verify that no event to revoke notifications gets
+        # enqueued to `missedmessage_mobile_notifications` and `active_mobile_push_notification`
+        # flag is unset.
+        PushDevice.objects.all().delete()
+        with (
+            mock.patch(
+                "zerver.actions.message_flags.queue_event_on_commit"
+            ) as mock_queue_event_on_commit,
+            self.captureOnCommitCallbacks(execute=True),
+        ):
+            result = self.client_post(
+                "/json/mark_stream_as_read",
+                {
+                    "stream_id": str(verona.id),
+                },
+            )
+        self.assert_json_success(result)
+        mock_queue_event_on_commit.assert_not_called()
+        self.assertEqual(
+            self.get_mobile_push_notification_ids(cordelia),
+            [],
+        )
 
 
 class MarkAllAsReadEndpointTest(ZulipTestCase):
@@ -1086,6 +1203,38 @@ class GetUnreadMsgsTest(ZulipTestCase):
             dict(other_user_id=cordelia.id),
         )
 
+    @override_settings(PREFER_DIRECT_MESSAGE_GROUP=True)
+    def test_raw_unread_personal_using_direct_message_group(self) -> None:
+        cordelia = self.example_user("cordelia")
+        othello = self.example_user("othello")
+        hamlet = self.example_user("hamlet")
+
+        # creating direct message group for 1:1 messages
+        get_or_create_direct_message_group(id_list=[cordelia.id, hamlet.id])
+        get_or_create_direct_message_group(id_list=[othello.id, hamlet.id])
+
+        cordelia_pm_message_ids = [self.send_personal_message(cordelia, hamlet) for i in range(3)]
+        othello_pm_message_ids = [self.send_personal_message(othello, hamlet) for i in range(3)]
+
+        raw_unread_data = get_raw_unread_data(
+            user_profile=hamlet,
+        )
+        pm_dict = raw_unread_data["pm_dict"]
+
+        self.assertEqual(
+            set(pm_dict.keys()),
+            set(cordelia_pm_message_ids) | set(othello_pm_message_ids),
+        )
+
+        self.assertEqual(
+            pm_dict[cordelia_pm_message_ids[0]],
+            dict(other_user_id=cordelia.id),
+        )
+        self.assertEqual(
+            pm_dict[othello_pm_message_ids[0]],
+            dict(other_user_id=othello.id),
+        )
+
     def test_raw_unread_personal_from_self(self) -> None:
         hamlet = self.example_user("hamlet")
 
@@ -1177,6 +1326,40 @@ class GetUnreadMsgsTest(ZulipTestCase):
 
         self.assertEqual(
             pm_dict[hamlet_msg.id],
+            dict(other_user_id=hamlet.id),
+        )
+
+    @override_settings(PREFER_DIRECT_MESSAGE_GROUP=True)
+    def test_raw_unread_personal_from_self_using_direct_message_group(self) -> None:
+        hamlet = self.example_user("hamlet")
+
+        # creating direct message group for self messages
+        get_or_create_direct_message_group(id_list=[hamlet.id])
+
+        # Send a message to ourself.
+        message_id = self.send_personal_message(
+            from_user=hamlet,
+            to_user=hamlet,
+            read_by_sender=False,
+        )
+
+        um = UserMessage.objects.get(
+            user_profile_id=hamlet.id,
+            message_id=message_id,
+        )
+        self.assertFalse(um.flags.read)
+
+        raw_unread_data = get_raw_unread_data(
+            user_profile=hamlet,
+        )
+        pm_dict = raw_unread_data["pm_dict"]
+
+        self.assertEqual(
+            set(pm_dict.keys()),
+            {message_id},
+        )
+        self.assertEqual(
+            pm_dict[message_id],
             dict(other_user_id=hamlet.id),
         )
 
@@ -1732,15 +1915,18 @@ class MessageAccessTests(ZulipTestCase):
         user: UserProfile,
         message_ids: list[int],
         stream: Stream,
-        bulk_access_messages_count: int,
+        *,
+        bulk_access_messages_query_count: int,
         bulk_access_stream_messages_query_count: int,
     ) -> list[Message]:
-        with self.assert_database_query_count(bulk_access_messages_count):
+        with self.assert_database_query_count(bulk_access_messages_query_count):
             messages = [
                 Message.objects.select_related("recipient").get(id=message_id)
                 for message_id in sorted(message_ids)
             ]
-            list_result = bulk_access_messages(user, messages, stream=stream)
+            list_result = bulk_access_messages(
+                user, messages, stream=stream, is_modifying_message=False
+            )
         with self.assert_database_query_count(bulk_access_stream_messages_query_count):
             message_query = (
                 Message.objects.select_related("recipient")
@@ -1776,7 +1962,11 @@ class MessageAccessTests(ZulipTestCase):
         # Message sent before subscribing wouldn't be accessible by later
         # subscribed user as stream has protected history
         filtered_messages = self.assert_bulk_access(
-            later_subscribed_user, message_ids, stream, 4, 2
+            later_subscribed_user,
+            message_ids,
+            stream,
+            bulk_access_messages_query_count=4,
+            bulk_access_stream_messages_query_count=2,
         )
         self.assert_length(filtered_messages, 1)
         self.assertEqual(filtered_messages[0].id, message_two_id)
@@ -1792,14 +1982,65 @@ class MessageAccessTests(ZulipTestCase):
         # Message sent before subscribing are accessible by user as stream
         # now don't have protected history
         filtered_messages = self.assert_bulk_access(
-            later_subscribed_user, message_ids, stream, 4, 2
+            later_subscribed_user,
+            message_ids,
+            stream,
+            bulk_access_messages_query_count=4,
+            bulk_access_stream_messages_query_count=2,
         )
         self.assert_length(filtered_messages, 2)
 
         # Testing messages accessibility for an unsubscribed user
         unsubscribed_user = self.example_user("ZOE")
-        filtered_messages = self.assert_bulk_access(unsubscribed_user, message_ids, stream, 4, 1)
+        unsubscribed_guest = self.example_user("polonius")
+        filtered_messages = self.assert_bulk_access(
+            unsubscribed_user,
+            message_ids,
+            stream,
+            bulk_access_messages_query_count=5,
+            bulk_access_stream_messages_query_count=2,
+        )
         self.assert_length(filtered_messages, 0)
+
+        # Testing messages accessibility for an unsubscribed user
+        # present in `can_add_subscribers_group`
+        unsubscribed_user_group = check_add_user_group(
+            unsubscribed_user.realm,
+            "unsubscribed_user_group",
+            [unsubscribed_user, unsubscribed_guest],
+            acting_user=unsubscribed_user,
+        )
+        do_change_stream_group_based_setting(
+            stream,
+            "can_add_subscribers_group",
+            unsubscribed_user_group,
+            acting_user=unsubscribed_user,
+        )
+        filtered_messages = self.assert_bulk_access(
+            unsubscribed_user,
+            message_ids,
+            stream,
+            bulk_access_messages_query_count=5,
+            bulk_access_stream_messages_query_count=3,
+        )
+        self.assert_length(filtered_messages, 2)
+        filtered_messages = self.assert_bulk_access(
+            unsubscribed_guest,
+            message_ids,
+            stream,
+            bulk_access_messages_query_count=4,
+            bulk_access_stream_messages_query_count=1,
+        )
+        self.assert_length(filtered_messages, 0)
+        nobody_group = NamedUserGroup.objects.get(
+            name="role:nobody", is_system_group=True, realm_for_sharding=unsubscribed_user.realm
+        )
+        do_change_stream_group_based_setting(
+            stream,
+            "can_add_subscribers_group",
+            nobody_group,
+            acting_user=user,
+        )
 
         # Adding more message ids to the list increases the query size
         # for bulk_access_messages but not
@@ -1810,7 +2051,23 @@ class MessageAccessTests(ZulipTestCase):
             self.send_stream_message(user, stream_name, "Message four"),
         ]
         filtered_messages = self.assert_bulk_access(
-            later_subscribed_user, more_message_ids, stream, 6, 2
+            later_subscribed_user,
+            more_message_ids,
+            stream,
+            bulk_access_messages_query_count=6,
+            bulk_access_stream_messages_query_count=2,
+        )
+        self.assert_length(filtered_messages, 4)
+
+        # Test private message access for service bot
+        service_bot = self.example_user("outgoing_webhook_bot")
+        self.subscribe(service_bot, stream_name)
+        filtered_messages = self.assert_bulk_access(
+            service_bot,
+            more_message_ids,
+            stream,
+            bulk_access_messages_query_count=6,
+            bulk_access_stream_messages_query_count=2,
         )
         self.assert_length(filtered_messages, 4)
 
@@ -1819,7 +2076,9 @@ class MessageAccessTests(ZulipTestCase):
         other_stream = get_stream("Denmark", unsubscribed_user.realm)
         with self.assertRaises(AssertionError):
             messages = [Message.objects.get(id=id) for id in message_ids]
-            bulk_access_messages(unsubscribed_user, messages, stream=other_stream)
+            bulk_access_messages(
+                unsubscribed_user, messages, stream=other_stream, is_modifying_message=False
+            )
 
         # Verify that bulk_access_stream_messages_query is empty with a stream mismatch
         message_query = Message.objects.select_related("recipient").filter(id__in=message_ids)
@@ -1847,12 +2106,34 @@ class MessageAccessTests(ZulipTestCase):
 
         # All public stream messages are always accessible
         filtered_messages = self.assert_bulk_access(
-            later_subscribed_user, message_ids, stream, 4, 1
+            later_subscribed_user,
+            message_ids,
+            stream,
+            bulk_access_messages_query_count=4,
+            bulk_access_stream_messages_query_count=1,
         )
         self.assert_length(filtered_messages, 2)
 
         unsubscribed_user = self.example_user("ZOE")
-        filtered_messages = self.assert_bulk_access(unsubscribed_user, message_ids, stream, 4, 1)
+        filtered_messages = self.assert_bulk_access(
+            unsubscribed_user,
+            message_ids,
+            stream,
+            bulk_access_messages_query_count=4,
+            bulk_access_stream_messages_query_count=1,
+        )
+        self.assert_length(filtered_messages, 2)
+
+        # Test public message access for service bot
+        service_bot = self.example_user("outgoing_webhook_bot")
+        self.subscribe(service_bot, stream_name)
+        filtered_messages = self.assert_bulk_access(
+            service_bot,
+            message_ids,
+            stream,
+            bulk_access_messages_query_count=4,
+            bulk_access_stream_messages_query_count=1,
+        )
         self.assert_length(filtered_messages, 2)
 
 

@@ -1,6 +1,6 @@
 import $ from "jquery";
 import assert from "minimalistic-assert";
-import {z} from "zod";
+import * as z from "zod/mini";
 
 import * as channel from "../channel.ts";
 import * as util from "../util.ts";
@@ -14,7 +14,7 @@ const fixture_schema = z.record(
     z.string(),
     z.object({
         body: z.unknown(),
-        headers: z.record(z.string()),
+        headers: z.record(z.string(), z.string()),
     }),
 );
 
@@ -193,7 +193,8 @@ function load_fixture_options(integration_name: string): void {
     );
     const fixtures = loaded_fixtures.get(integration_name);
     assert(fixtures !== undefined);
-    const fixtures_names = Object.keys(fixtures).sort();
+    const fixtures_names = Object.keys(fixtures);
+    fixtures_names.sort();
 
     for (const fixture_name of fixtures_names) {
         const new_dropdown_option = document.createElement("option");
@@ -248,7 +249,7 @@ function handle_unsuccessful_response(response: JQuery.jqXHR): void {
         // Django returning an HTML response containing a stack trace
         // with useful debugging information regarding the backend
         // code.
-        document.write(response.responseText);
+        set_results_notice(response.responseText, "warning");
     }
     return;
 }

@@ -14,7 +14,13 @@ export type MessageViewportInfo = {
     visible_height: number;
 };
 
-export const $scroll_container = $("html");
+export const $scroll_container = $(":root");
+
+let window_resize_handler: () => void;
+
+export function register_resize_handler(handler: () => void): void {
+    window_resize_handler = handler;
+}
 
 let in_stoppable_autoscroll = false;
 
@@ -153,6 +159,16 @@ export function set_message_position(
 
     const new_scroll_top = message_top - message_offset;
 
+    // Ensure we will scroll before we disable updating selection.
+    // This avoids a bug where message selection doesn't change on user scroll.
+    if (
+        // Can't scroll up if we are already at top.
+        (new_scroll_top <= 0 && window.scrollY === 0) ||
+        // Can't scroll down if we are already at bottom.
+        (new_scroll_top >= height() && window.scrollY === height())
+    ) {
+        return;
+    }
     message_scroll_state.set_update_selection_on_next_scroll(false);
     scrollTop(new_scroll_top);
 }
@@ -547,6 +563,7 @@ export function initialize(): void {
         cached_height.reset();
         top_of_feed.reset();
         bottom_of_feed.reset();
+        window_resize_handler?.();
     });
 
     $(document).on("compose_started compose_canceled compose_finished", () => {

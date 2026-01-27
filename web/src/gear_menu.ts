@@ -1,19 +1,18 @@
 import $ from "jquery";
 import assert from "minimalistic-assert";
 import type * as tippy from "tippy.js";
-import WinChan from "winchan";
-import {z} from "zod";
 
 import render_navbar_gear_menu_popover from "../templates/popovers/navbar/navbar_gear_menu_popover.hbs";
 
-import * as blueslip from "./blueslip.ts";
-import * as channel from "./channel.ts";
+import * as demo_organizations_ui from "./demo_organizations_ui.ts";
+import * as information_density from "./information_density.ts";
 import * as popover_menus from "./popover_menus.ts";
 import * as popover_menus_data from "./popover_menus_data.ts";
 import * as popovers from "./popovers.ts";
 import * as settings_preferences from "./settings_preferences.ts";
 import * as theme from "./theme.ts";
 import {parse_html} from "./ui_util.ts";
+import {user_settings} from "./user_settings.ts";
 
 /*
 For various historical reasons there isn't one
@@ -114,69 +113,19 @@ export function initialize(): void {
         onMount(instance) {
             const $popper = $(instance.popper);
             popover_menus.popover_instances.gear_menu = instance;
-            $popper.on("click", ".webathena_login", (e) => {
-                $("#zephyr-mirror-error").removeClass("show");
-                const principal = ["zephyr", "zephyr"];
-                WinChan.open(
-                    {
-                        url: "https://webathena.mit.edu/#!request_ticket_v1",
-                        relay_url: "https://webathena.mit.edu/relay.html",
-                        params: {
-                            realm: "ATHENA.MIT.EDU",
-                            principal,
-                        },
-                    },
-                    (err, raw_response) => {
-                        if (err !== null) {
-                            blueslip.warn(err);
-                            return;
-                        }
 
-                        // https://github.com/davidben/webathena/blob/0be20d9b1d62c19b4f94f77e621bd8721e504446/app/scripts-src/request_ticket.js
-                        const response_schema = z.discriminatedUnion("status", [
-                            z.object({
-                                status: z.literal("OK"),
-                                session: z.unknown(),
-                            }),
-                            z.object({
-                                status: z.literal("ERROR"),
-                                code: z.string(),
-                                message: z.string(),
-                            }),
-                            z.object({
-                                status: z.literal("DENIED"),
-                                code: z.string(),
-                                message: z.string(),
-                            }),
-                        ]);
-                        const r = response_schema.parse(raw_response);
-                        if (r.status !== "OK") {
-                            blueslip.warn(`Webathena: ${r.status}: ${r.message}`);
-                            return;
-                        }
-
-                        channel.post({
-                            url: "/accounts/webathena_kerberos_login/",
-                            data: {cred: JSON.stringify(r.session)},
-                            success() {
-                                $("#zephyr-mirror-error").removeClass("show");
-                            },
-                            error() {
-                                $("#zephyr-mirror-error").addClass("show");
-                            },
-                        });
-                    },
-                );
+            $popper.on("click", ".convert-demo-organization", (e) => {
                 popover_menus.hide_current_popover_if_visible(instance);
                 e.preventDefault();
                 e.stopPropagation();
+                demo_organizations_ui.show_convert_demo_organization_modal();
             });
 
             $popper.on("click", ".change-language-spectator", (e) => {
                 popover_menus.hide_current_popover_if_visible(instance);
                 e.preventDefault();
                 e.stopPropagation();
-                settings_preferences.launch_default_language_setting_modal();
+                settings_preferences.launch_default_language_setting_modal_for_spectator();
             });
 
             $popper.on("change", "input[name='theme-select']", (e) => {
@@ -185,6 +134,35 @@ export function initialize(): void {
                     theme.set_theme_for_spectator(theme_code);
                 });
             });
+
+            $popper.on("click", ".info-density-controls button", function (this: HTMLElement, e) {
+                const changed_property =
+                    information_density.information_density_properties_schema.parse(
+                        $(this).closest(".button-group").attr("data-property"),
+                    );
+                information_density.update_information_density_settings($(this), changed_property);
+                information_density.enable_or_disable_control_buttons($popper);
+
+                if (changed_property === "web_font_size_px") {
+                    // We do not want to display the arrow once font size is
+                    // changed because popover will be detached from the gear
+                    // icon as we do not change the font size in popover.
+                    $("#gear-menu-dropdown").closest(".tippy-box").find(".tippy-arrow").hide();
+                }
+
+                e.preventDefault();
+            });
+
+            information_density.enable_or_disable_control_buttons($popper);
+
+            // We do not want font size of the popover to change when changing
+            // font size using the buttons in popover, so that the buttons do
+            // not shift.
+            const font_size =
+                popover_menus.POPOVER_FONT_SIZE_IN_EM * user_settings.web_font_size_px;
+            $("#gear-menu-dropdown")
+                .closest(".tippy-box")
+                .css("font-size", font_size + "px");
         },
         onShow: render,
         onHidden(instance) {

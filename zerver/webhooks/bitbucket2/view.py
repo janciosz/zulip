@@ -14,7 +14,7 @@ from zerver.lib.validator import WildValue, check_bool, check_int, check_string
 from zerver.lib.webhooks.common import (
     OptionalUserSpecifiedTopicStr,
     check_send_webhook_message,
-    validate_extract_webhook_http_header,
+    get_event_header,
 )
 from zerver.lib.webhooks.git import (
     TOPIC_WITH_BRANCH_TEMPLATE,
@@ -27,6 +27,7 @@ from zerver.lib.webhooks.git import (
     get_push_tag_event_message,
     get_remove_branch_event_message,
     get_short_sha,
+    is_branch_name_notifiable,
 )
 from zerver.models import UserProfile
 
@@ -92,7 +93,7 @@ def api_bitbucket2_webhook(
         if not payload["push"]["changes"]:
             return json_success(request)
         branch = get_branch_name_for_push_event(payload)
-        if branch and branches and branches.find(branch) == -1:
+        if branch and not is_branch_name_notifiable(branch, branches):
             return json_success(request)
 
         topic_names = get_push_topics(payload)
@@ -186,14 +187,14 @@ def get_type(request: HttpRequest, payload: WildValue) -> str:
         pull_request_template = "pull_request_{}"
         # Note that we only need the HTTP header to determine pullrequest events.
         # We rely on the payload itself to determine the other ones.
-        event_key = validate_extract_webhook_http_header(request, "X-Event-Key", "BitBucket")
+        event_key = get_event_header(request, "X-Event-Key", "BitBucket")
         action = re.match(r"pullrequest:(?P<action>.*)$", event_key)
         if action:
             action_group = action.group("action")
             if action_group in PULL_REQUEST_SUPPORTED_ACTIONS:
                 return pull_request_template.format(action_group)
     else:
-        event_key = validate_extract_webhook_http_header(request, "X-Event-Key", "BitBucket")
+        event_key = get_event_header(request, "X-Event-Key", "BitBucket")
         if event_key == "repo:updated":
             return event_key
 

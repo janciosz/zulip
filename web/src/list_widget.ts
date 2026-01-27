@@ -11,8 +11,10 @@ type SortingFunction<T> = (a: T, b: T) => number;
 
 type ListWidgetMeta<Key, Item = Key> = {
     sorting_function: SortingFunction<Item> | null;
+    applied_sorting_functions: [SortingFunction<Item>, boolean][]; // This is used to keep track of the sorting functions applied.
     sorting_functions: Map<string, SortingFunction<Item>>;
     filter_value: string;
+    has_active_filters: boolean;
     offset: number;
     list: Key[];
     filtered_list: Item[];
@@ -25,6 +27,7 @@ type ListWidgetMeta<Key, Item = Key> = {
 type ListWidgetFilterOpts<Item> = {
     $element?: JQuery<HTMLInputElement>;
     onupdate?: () => void;
+    is_active?: () => boolean;
 } & (
     | {
           predicate: (item: Item, value: string) => boolean;
@@ -62,6 +65,7 @@ type BaseListWidget = {
 
 export type ListWidget<Key, Item = Key> = BaseListWidget & {
     get_current_list: () => Item[];
+    get_rendered_list: () => Item[];
     filter_and_sort: () => void;
     retain_selected_items: () => void;
     all_rendered: () => boolean;
@@ -212,12 +216,12 @@ function get_column_count_for_table($table: JQuery): number {
 
 export function render_empty_list_message_if_needed(
     $container: JQuery,
-    filter_value?: string,
+    has_active_filters?: boolean,
 ): void {
     let empty_list_message = $container.attr("data-empty");
 
     const empty_search_results_message = $container.attr("data-search-results-empty");
-    if (filter_value && empty_search_results_message) {
+    if (has_active_filters && empty_search_results_message) {
         empty_list_message = empty_search_results_message;
     }
 
@@ -279,12 +283,14 @@ export function create<Key, Item = Key>(
 
     const meta: ListWidgetMeta<Key, Item> = {
         sorting_function: null,
+        applied_sorting_functions: [],
         sorting_functions: new Map(),
         offset: 0,
         list,
         filtered_list: [],
         reverse_mode: false,
         filter_value: "",
+        has_active_filters: opts.filter?.is_active?.() ?? false,
         $scroll_container: scroll_util.get_scroll_element(opts.$simplebar_container),
         $scroll_listening_element,
     };
@@ -294,15 +300,34 @@ export function create<Key, Item = Key>(
             return meta.filtered_list;
         },
 
+        get_rendered_list() {
+            return meta.filtered_list.slice(0, meta.offset);
+        },
+
         filter_and_sort() {
             meta.filtered_list = get_filtered_items(meta.filter_value, meta.list, opts);
 
             if (meta.sorting_function) {
-                meta.filtered_list.sort(meta.sorting_function);
-            }
+                // If the sorting function is already applied, remove it to avoid duplicate sorting.
+                const existing_sorting_function_index = meta.applied_sorting_functions.findIndex(
+                    ([sorting_function, _]) => sorting_function === meta.sorting_function,
+                );
+                if (existing_sorting_function_index !== -1) {
+                    meta.applied_sorting_functions.splice(existing_sorting_function_index, 1);
+                }
 
-            if (meta.reverse_mode) {
-                meta.filtered_list.reverse();
+                meta.applied_sorting_functions.push([meta.sorting_function, meta.reverse_mode]);
+                meta.filtered_list.sort((a, b) => {
+                    for (let i = meta.applied_sorting_functions.length - 1; i >= 0; i -= 1) {
+                        const sorting_function = meta.applied_sorting_functions[i]![0];
+                        const is_reverse = meta.applied_sorting_functions[i]![1];
+                        const result = sorting_function(a, b);
+                        if (result !== 0) {
+                            return is_reverse ? -result : result;
+                        }
+                    }
+                    return 0;
+                });
             }
         },
 
@@ -342,7 +367,8 @@ export function create<Key, Item = Key>(
 
             // Stop once the offset reaches the length of the original list.
             if (this.all_rendered()) {
-                render_empty_list_message_if_needed($container, meta.filter_value);
+                meta.has_active_filters = opts.filter?.is_active?.() ?? Boolean(meta.filter_value);
+                render_empty_list_message_if_needed($container, meta.has_active_filters);
                 if (opts.callback_after_render) {
                     opts.callback_after_render();
                 }
@@ -467,6 +493,14 @@ export function create<Key, Item = Key>(
                 widget.set_filter_value(value);
                 widget.hard_redraw();
             });
+
+            opts.filter?.$element?.siblings(".clear-filter").on("click", () => {
+                assert(opts.filter?.$element !== undefined);
+                const $filter = opts.filter?.$element;
+                $filter.val("");
+                widget.set_filter_value("");
+                widget.clean_redraw();
+            });
         },
 
         clear_event_handlers() {
@@ -474,6 +508,7 @@ export function create<Key, Item = Key>(
 
             if (opts.$parent_container) {
                 opts.$parent_container.off("click.list_widget_sort", "[data-sort]");
+                opts.filter?.$element?.siblings(".clear-filter").off("click");
             }
 
             opts.filter?.$element?.off("input.list_widget_filter");
@@ -618,9 +653,11 @@ export function handle_sort<Key, Item>($th: JQuery, list: ListWidget<Key, Item>)
                         to find custom sort function
 
         <thead>
-            <th data-sort="alphabetic" data-sort-prop="name"></th>
-            <th data-sort="numeric" data-sort-prop="age"></th>
-            <th data-sort="status"></th>
+            <tr>
+                <th data-sort="alphabetic" data-sort-prop="name"></th>
+                <th data-sort="numeric" data-sort-prop="age"></th>
+                <th data-sort="status"></th>
+            </tr>
         </thead>
         */
     const sort_type = $th.attr("data-sort");

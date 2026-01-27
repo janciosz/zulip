@@ -2,6 +2,7 @@
 
 const assert = require("node:assert/strict");
 
+const {make_realm} = require("./lib/example_realm.cjs");
 const {zrequire} = require("./lib/namespace.cjs");
 const {run_test} = require("./lib/test.cjs");
 
@@ -27,12 +28,13 @@ const bot_data_params = {
 };
 
 const bot_data = zrequire("bot_data");
+const bot_helper = zrequire("bot_helper");
 const settings_bots = zrequire("settings_bots");
 const {set_current_user, set_realm} = zrequire("state_data");
 
 const current_user = {};
 set_current_user(current_user);
-const realm = {};
+const realm = make_realm();
 set_realm(realm);
 
 bot_data.initialize(bot_data_params);
@@ -51,7 +53,7 @@ function test(label, f) {
 }
 
 test("generate_zuliprc_url", () => {
-    const url = settings_bots.generate_zuliprc_url(1);
+    const url = bot_helper.generate_zuliprc_url(1);
     const expected =
         "data:application/octet-stream;charset=utf-8," +
         encodeURIComponent(
@@ -65,7 +67,7 @@ test("generate_zuliprc_url", () => {
 
 test("generate_zuliprc_content", () => {
     const bot_user = bot_data.get(1);
-    const content = settings_bots.generate_zuliprc_content(bot_user);
+    const content = bot_helper.generate_zuliprc_content(bot_user);
     const expected =
         "[api]\nemail=error-bot@zulip.org\n" +
         "key=QadL788EkiottHmukyhHgePUFHREiu8b\n" +
@@ -94,16 +96,4 @@ test("generate_botserverrc_content", () => {
         "token=abcd1234\n";
 
     assert.equal(content, expected);
-});
-
-test("can_create_new_bots", ({override}) => {
-    override(current_user, "is_admin", true);
-    assert.ok(settings_bots.can_create_new_bots());
-
-    override(current_user, "is_admin", false);
-    override(realm, "realm_bot_creation_policy", 1);
-    assert.ok(settings_bots.can_create_new_bots());
-
-    override(realm, "realm_bot_creation_policy", 3);
-    assert.ok(!settings_bots.can_create_new_bots());
 });

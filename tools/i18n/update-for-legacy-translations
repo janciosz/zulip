@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import glob
 import os
 import re
 from subprocess import check_output
@@ -97,7 +98,7 @@ LEGACY_STRINGS_MAP = {
     "Only subscribers to this channel can edit channel permissions.": "Only subscribers to this stream can edit stream permissions.",
     "Pin channel to top": "Pin stream to top",
     "Pin channel to top of left sidebar": "Pin stream to top of left sidebar",
-    "Please specify a channel.": "Please specify a stream.",
+    "Please select a channel.": "Please specify a stream.",
     "Private channels cannot be default channels for new users.": "Private streams cannot be default streams for new users.",
     "Receives new channel announcements": "Receives new stream announcements",
     "Require topics in channel messages": "Require topics in stream messages",
@@ -216,11 +217,13 @@ def update_for_legacy_stream_translations(
         # If the string has a legacy string mapped and see if it's
         # not currently translated (e.g. an empty string), then use
         # the legacy translated string (which might be an empty string).
-        if line in LEGACY_STRINGS_MAP and translation == "":
-            legacy_string = LEGACY_STRINGS_MAP[line]
-            if legacy_string in legacy:
-                updated_translations[line] = legacy[legacy_string]
-                number_of_updates += 1
+        if (
+            line in LEGACY_STRINGS_MAP
+            and translation == ""
+            and (legacy_string := LEGACY_STRINGS_MAP[line]) in legacy
+        ):
+            updated_translations[line] = legacy[legacy_string]
+            number_of_updates += 1
         else:
             updated_translations[line] = translation
 
@@ -237,11 +240,19 @@ def update_for_legacy_stream_translations(
         print(f"Updated {number_of_updates} strings in: {path}")
 
 
+expected_legacy_filenames = set()
 for locale in get_locales():
     current = get_json_filename(locale)
     legacy = get_legacy_filename(locale)
+    expected_legacy_filenames.add(legacy)
     if os.path.exists(current) and os.path.exists(legacy):
         print(f"Checking legacy translations for: {current}")
         current_translations = get_translations(current)
         legacy_translations = get_translations(legacy)
         update_for_legacy_stream_translations(current_translations, legacy_translations, current)
+
+for extra_file in (
+    set(glob.glob("locale/*/legacy_stream_translations.json")) - expected_legacy_filenames
+):
+    print(f"Removing dangling legacy translation file {extra_file}")
+    os.unlink(extra_file)

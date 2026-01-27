@@ -1,7 +1,7 @@
-<div class="hide" id="user-group-creation" tabindex="-1" role="dialog"
+<div class="hide two-pane-settings-right-simplebar-container" id="user-group-creation" tabindex="-1" role="dialog"
   aria-label="{{t 'User group creation' }}">
     <form id="user_group_creation_form">
-        <div class="user-group-creation-simplebar-container" data-simplebar data-simplebar-tab-index="-1">
+        <div class="two-pane-settings-creation-simplebar-container" data-simplebar data-simplebar-tab-index="-1">
             <div class="alert user_group_create_info"></div>
             <div id="user_group_creating_indicator"></div>
             <div class="user-group-creation-body">
@@ -29,15 +29,15 @@
                                 </h3>
                             </div>
 
-                            {{> group_permissions prefix="id_new_group_"}}
+                            {{> group_permissions prefix="id_new_group_" group_setting_labels=all_group_setting_labels.group}}
                         </div>
                     </section>
                 </div>
                 <div class="user_group_members_container user_group_creation">
                     <section id="choose_member_section">
-                        <label for="people_to_add_in_group">
-                            <h4 class="user_group_setting_subsection_title">{{t "Choose members" }}</h4>
-                        </label>
+                        <h4 class="user_group_setting_subsection_title">
+                            <label for="people_to_add_in_group">{{t "Choose members" }}</label>
+                        </h4>
                         <div id="user_group_membership_error" class="user_group_creation_error"></div>
                         <div class="controls" id="people_to_add_in_group"></div>
                     </section>
@@ -46,12 +46,35 @@
         </div>
         <div class="settings-sticky-footer">
             <div class="settings-sticky-footer-left">
-                <button id="user_group_go_to_configure_settings" class="button small sea-green rounded hide">{{t "Back to settings" }}</button>
+                {{> ../components/action_button
+                  label=(t "Back to settings")
+                  custom_classes="hide"
+                  variant="subtle"
+                  intent="brand"
+                  id="user_group_go_to_configure_settings"
+                  }}
             </div>
             <div class="settings-sticky-footer-right">
-                <button class="create_user_group_cancel button small white rounded" data-dismiss="modal">{{t "Cancel" }}</button>
-                <button class="finalize_create_user_group button small sea-green rounded hide" type="submit">{{t "Create" }}</button>
-                <button id="user_group_go_to_members" class="button small sea-green rounded">{{t "Continue to add members" }}</button>
+                {{> ../components/action_button
+                  label=(t "Cancel")
+                  custom_classes="create_user_group_cancel inline-block"
+                  variant="subtle"
+                  intent="neutral"
+                  }}
+                {{> ../components/action_button
+                  label=(t "Create")
+                  custom_classes="finalize_create_user_group hide"
+                  variant="subtle"
+                  intent="brand"
+                  type="submit"
+                  }}
+                {{> ../components/action_button
+                  label=(t "Continue to add members")
+                  id="user_group_go_to_members"
+                  custom_classes="inline-block"
+                  variant="subtle"
+                  intent="brand"
+                  }}
             </div>
         </div>
     </form>

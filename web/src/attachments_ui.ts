@@ -1,19 +1,22 @@
 import $ from "jquery";
-import type {z} from "zod";
+import type * as z from "zod/mini";
 
 import render_confirm_delete_attachment from "../templates/confirm_dialog/confirm_delete_attachment.hbs";
 import render_confirm_delete_detached_attachments_modal from "../templates/confirm_dialog/confirm_delete_detached_attachments.hbs";
-import render_settings_upload_space_stats from "../templates/settings/upload_space_stats.hbs";
 import render_uploaded_files_list from "../templates/settings/uploaded_files_list.hbs";
 
 import {attachment_api_response_schema} from "./attachments.ts";
+import * as banners from "./banners.ts";
+import type {ActionButton} from "./buttons.ts";
 import * as channel from "./channel.ts";
 import * as dialog_widget from "./dialog_widget.ts";
 import {$t, $t_html} from "./i18n.ts";
 import * as ListWidget from "./list_widget.ts";
 import * as loading from "./loading.ts";
 import * as scroll_util from "./scroll_util.ts";
-import {realm} from "./state_data.ts";
+import {message_edit_history_visibility_policy_values} from "./settings_config.ts";
+import * as settings_config from "./settings_config.ts";
+import {current_user, realm} from "./state_data.ts";
 import * as timerender from "./timerender.ts";
 import * as ui_report from "./ui_report.ts";
 
@@ -68,21 +71,48 @@ function set_upload_space_stats(): void {
     if (realm.realm_upload_quota_mib === null) {
         return;
     }
-    const args = {
-        show_upgrade_message: realm.realm_plan_type === 2,
-        upload_quota_string: $t(
+    if (current_user.is_guest) {
+        return;
+    }
+
+    const show_upgrade_message =
+        realm.realm_plan_type === settings_config.realm_plan_types.limited.code &&
+        current_user.is_admin;
+    const $container = $("#attachment-stats-holder");
+
+    if (!$container) {
+        return;
+    }
+
+    let buttons: ActionButton[] = [];
+    if (show_upgrade_message) {
+        buttons = [
+            ...buttons,
+            {
+                label: $t({defaultMessage: "Upgrade"}),
+                custom_classes: "request-upgrade",
+                variant: "subtle",
+            },
+        ];
+    }
+
+    const UPLOAD_STATS_BANNER: banners.Banner = {
+        intent: show_upgrade_message ? "info" : "neutral",
+        label: $t(
             {
                 defaultMessage:
-                    "Your organization is using {percent_used}% of your {upload_quota} file storage quota.",
+                    "Your organization is using {percent_used}% of your {upload_quota} file storage quota. Upgrade for more space.",
             },
             {
                 percent_used: percentage_used_space(upload_space_used),
                 upload_quota: bytes_to_size(mib_to_bytes(realm.realm_upload_quota_mib), true),
             },
         ),
+        buttons,
+        close_button: false,
     };
-    const rendered_upload_stats_html = render_settings_upload_space_stats(args);
-    $("#attachment-stats-holder").html(rendered_upload_stats_html);
+
+    banners.open(UPLOAD_STATS_BANNER, $container);
 }
 
 function delete_attachments(attachment: string, file_name: string): void {
@@ -160,7 +190,7 @@ function render_attachments_ui(): void {
 function format_attachment_data(attachment: ServerAttachment): Attachment {
     return {
         ...attachment,
-        create_time_str: timerender.render_now(new Date(attachment.create_time)).time_str,
+        create_time_str: timerender.render_now(new Date(attachment.create_time * 1000)).time_str,
         size_str: bytes_to_size(attachment.size),
     };
 }
@@ -190,6 +220,10 @@ export function set_up_attachments(): void {
         text: $t({defaultMessage: "Loading…"}),
     });
 
+    $("#uploaded_files_table").on("click", ".download-attachment", function () {
+        $(this).siblings(".hidden-attachment-download")[0]?.click();
+    });
+
     $("#uploaded_files_table").on("click", ".remove-attachment", (e) => {
         const file_name = $(e.target).closest(".uploaded_file_row").attr("data-attachment-name");
         delete_attachments(
@@ -217,7 +251,9 @@ export function set_up_attachments(): void {
 export function suggest_delete_detached_attachments(attachments_list: ServerAttachment[]): void {
     const html_body = render_confirm_delete_detached_attachments_modal({
         attachments_list,
-        realm_allow_edit_history: realm.realm_allow_edit_history,
+        realm_message_edit_history_is_visible:
+            realm.realm_message_edit_history_visibility_policy !==
+            message_edit_history_visibility_policy_values.never.code,
     });
 
     // Since we want to delete multiple attachments, we want to be
@@ -230,8 +266,7 @@ export function suggest_delete_detached_attachments(attachments_list: ServerAtta
 
     function do_delete_attachments(): void {
         dialog_widget.show_dialog_spinner();
-        for (const [key, attachment] of attachments_map.entries()) {
-            const id = Number(key);
+        for (const [id, attachment] of attachments_map.entries()) {
             void channel.del({
                 url: "/json/attachments/" + attachment.id,
                 success() {

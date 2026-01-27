@@ -15,20 +15,30 @@ mobile apps.
 
 :::{important}
 
-These instructions are for Zulip Server 9.0+. If you are running an older
-version of Zulip ([check](https://zulip.com/help/view-zulip-version) if you are
-unsure), see the [Zulip 8.x
-documentation](https://zulip.readthedocs.io/en/8.4/production/mobile-push-notifications.html).
+The Zulip Server 10.0+ [installer](install.md#step-2-install-zulip)
+includes a `--push-notifications` flag that automates this
+registration process.
 
+These instructions apply to Zulip 9.0+. If you are running an older
+version of Zulip ([check](https://zulip.com/help/view-zulip-version)
+if you are unsure), see the [Zulip 8.x
+documentation](https://zulip.readthedocs.io/en/8.4/production/mobile-push-notifications.html).
 :::
 
-You can enable the mobile push notification service for your Zulip server as
-follows:
+You can enable the mobile push notification service for your Zulip
+server as follows:
 
 1. Make sure your server has outgoing HTTPS access to the public Internet. If
    that is restricted by a proxy, you will need to [configure Zulip to use your
    outgoing HTTP proxy](deployment.md#customizing-the-outgoing-http-proxy)
    first.
+
+1. Make sure that the `ZULIP_ADMINISTRATOR` setting in your
+   `/etc/zulip/settings.py` file is a real email address which you
+   monitor. If the Mobile Push Notification Service needs to contact
+   you regarding your server, and will use this email address. [See
+   below](#updating-your-servers-registration) for instructions if
+   this contact needs to be updated later.
 
 1. Set `ZULIP_SERVICE_PUSH_NOTIFICATIONS = True` in your
    `/etc/zulip/settings.py` file. Simply uncomment the appropriate line [in
@@ -50,7 +60,7 @@ follows:
 
    [update-settings-docs]: ../production/upgrade.md#updating-settingspy-inline-documentation
 
-1. [Restart your Zulip server](settings.md#making-changes) so that
+1. [Restart your Zulip server](settings.md#changing-server-settings) so that
    your configuration changes take effect.
 
 1. Run the registration command. If you installed Zulip directly on the server
@@ -96,10 +106,24 @@ manage your plan, the same plans are offered for all Zulip versions.
 ### Plan management for a Zulip organization
 
 On a self-hosted Zulip server running Zulip 8.0+, [organization
-owners](https://zulip.com/help/roles-and-permissions) and billing administrators
+owners](https://zulip.com/help/user-roles) and billing administrators
 can conveniently access plan management from the Zulip app. See [help center
 documentation](https://zulip.com/help/self-hosted-billing) for detailed
 instructions.
+
+#### Configure who can manage plans and billing
+
+::::{tab-set}
+
+:::{tab-item} Zulip Server 10.0+
+
+Follow [these
+instructions](https://zulip.com/help/self-hosted-billing#configure-who-can-manage-plans-and-billing)
+to configure who can manage plans and billing.
+
+:::
+
+:::{tab-item} Older versions
 
 You can add billing administrators using the `change_user_role` [management
 command][management-commands], passing [the organization's
@@ -116,6 +140,10 @@ option:
 ```
 /home/zulip/deployments/current/manage.py change_user_role --revoke -r '' username@example.com is_billing_admin
 ```
+
+:::
+
+::::
 
 [management-commands]: ../production/management-commands.md
 [accessing-string-id]: https://zulip.readthedocs.io/en/stable/production/management-commands.html#accessing-an-organization-s-string-id
@@ -167,6 +195,13 @@ to these terms.
 We've designed this push notification bouncer service with security
 and privacy in mind:
 
+- Zulip Server 11.0+ supports a new end-to-end encrypted (E2EE)
+  protocol for mobile push notifications. Because mobile app support
+  for that protocol is not yet available, this documentation details
+  the legacy protocol. This documentation will be updated to reflect
+  on the new protocol's better privacy guarantees once [official
+  mobile app support][e2ee-flutter-issue] for the new protocol is
+  generally available.
 - A central design goal of the Push Notification Service is to
   avoid any message content being stored or logged by the service,
   even in error cases.
@@ -194,17 +229,16 @@ and privacy in mind:
   - A timestamp.
   - The message's content.
 
-  There's a `PUSH_NOTIFICATION_REDACT_CONTENT` setting available to
-  disable any message content being sent via the push notification
-  bouncer (i.e., message content will be replaced with
-  `New message`). Note that this setting makes push notifications
-  significantly less usable.
+  Zulip 11.0+ has an organization-level setting available to disable
+  message content being sent via the push notification bouncer (i.e.,
+  message content will be replaced with `New message`), for clients
+  that don't support the new end-to-end encrypted notifications
+  protocol. As of July 2025, this setting makes push notifications
+  significantly less usable, since mobile client support for
+  end-to-end encrypted push notifications is not yet available.
 
-  We plan to
-  [replace that setting with end-to-end encryption](https://github.com/zulip/zulip/issues/6954)
-  which would eliminate that usability tradeoff and additionally allow
-  us to not have any access to the other details mentioned in this
-  section.
+  (Prior to Zulip 11.0, this functionality was available via the
+  `PUSH_NOTIFICATION_REDACT_CONTENT` server-level setting).
 
 - All of the network requests (both from Zulip servers to the Push
   Notification Service and from the Push Notification Service to the
@@ -219,6 +253,8 @@ and privacy in mind:
 
 If you have any questions about the security model, [contact Zulip
 support](https://zulip.com/help/contact-support).
+
+[e2ee-flutter-issue]: https://github.com/zulip/zulip-flutter/issues/1764
 
 ### Uploading basic metadata
 
@@ -317,6 +353,70 @@ If you'd like to rotate your server's API key for this service
 generate a new `zulip_org_key` and store that new key in
 `/etc/zulip/zulip-secrets.conf`.
 
+## Moving your registration to a new server
+
+When migrating your Zulip deployment to a new machine, you will likely want to
+retain your original registration and successfully transfer it. This is
+especially important if you have an active plan for the Mobile Push
+Notification Service.
+
+The best way to preserve your registration when moving to a new server is to
+copy over the credentials from the old server. These credentials are stored in
+the `/etc/zulip/zulip-secrets.conf` file, specifically in the `zulip_org_id`
+and `zulip_org_key` fields. After installing Zulip on the new machine, ensure
+that `zulip_org_id` and `zulip_org_key` are set to the same values as on the
+old server.
+
+If you used the [official backup tool](export-and-import.md#backups)
+to restore your Zulip deployment on the new machine, it will have
+automatically transferred all secrets, including the registration
+credentials, correctly.
+
+### Transferring your registration if you lost the original credentials
+
+If you have lost your original credentials, you can still transfer your Zulip
+registration to a new server by following these steps:
+
+1. Ensure Zulip is installed and accessible:
+
+   - Install Zulip on the new machine and ensure it is fully operational.
+   - The server must be accessible on the hostname associated with the original
+     registration, with properly configured SSL certificates.
+   - This process **will not work** if your Zulip server is on a local network
+     or otherwise unreachable from the internet by our Mobile Push Notification
+     Service. If that’s the case, contact
+     [support@zulip.com](mailto:support@zulip.com) for assistance.
+
+1. Run the below command to transfer your registration to the new server. This will
+   execute a verification flow to prove to our Mobile Push Notification Service that
+   you control the hostname and upon success, re-generate the credentials for
+   using the registration and write them to the `/etc/zulip/zulip-secrets.conf` file.
+
+   ```bash
+   /home/zulip/deployments/current/manage.py register_server --registration-transfer
+   ```
+
+   Note that the `zulip_org_key` value changes in the process, and therefore if you
+   still have an old server running using the service, it will lose access upon
+   execution of this command.
+
+1. Apply the changes by restarting the server:
+
+   ```bash
+   /home/zulip/deployments/current/scripts/restart-server
+   ```
+
+   Finally, [verify][verify-push-notifications] that push
+   notifications are working correctly. If you encounter further
+   issues, contact [support@zulip.com](mailto:support@zulip.com).
+
+1. If you store `/etc/zulip/zulip-secrets.conf` secrets externally in
+   an external configuration management tool (Ansible, etc.), or
+   [backups](export-and-import.md#backups), this is a good time to
+   update that configuration.
+
+[verify-push-notifications]: https://zulip.com/help/mobile-notifications#testing-mobile-notifications
+
 ## Deactivating your server's registration
 
 If you are deleting your Zulip server or otherwise no longer want to
@@ -344,7 +444,7 @@ registration.
    `ZULIP_SERVICE_PUSH_NOTIFICATIONS = True` line
    in your `/etc/zulip/settings.py` file (i.e., add `# ` at the
    start of the line), and [restart your Zulip
-   server](settings.md#making-changes).
+   server](settings.md#changing-server-settings).
 
 If you ever need to reactivate your server's registration, [contact Zulip
 support](https://zulip.com/help/contact-support).
@@ -354,68 +454,5 @@ support](https://zulip.com/help/contact-support).
 You can temporarily stop using the Mobile Push Notification Service. Comment out
 the `PUSH_NOTIFICATION_BOUNCER_URL = 'https://push.zulipchat.com'` line in your
 `/etc/zulip/settings.py` file (i.e., add `# ` at the start of the line), and
-[restart your Zulip server](settings.md#making-changes). This approach makes it
+[restart your Zulip server](settings.md#changing-server-settings). This approach makes it
 easy to start using the service again by uncommenting the same line.
-
-## Sending push notifications directly from your server
-
-This section documents an alternative way to send push notifications
-that does not involve using the Mobile Push Notification Service at
-the cost of needing to compile and distribute modified versions of the
-Zulip mobile apps.
-
-We don't recommend this path -- patching and shipping a production
-mobile app can take dozens of hours to set up even for an experienced
-developer, and even more time to maintain. And it doesn't provide
-material privacy benefits -- your organization's push notification
-data would still go through Apple/Google's servers, just not Kandra
-Labs'. But in the interest of transparency, we document in this
-section roughly what's involved in doing so.
-
-As [discussed above](#why-a-push-notification-service-is-necessary),
-it is impossible for a single app in the Google or Apple
-store to receive push notifications from multiple, mutually
-untrusted, servers. The Mobile Push Notification Service is one of
-the possible solutions to this problem.
-
-The other possible solution is for an individual Zulip server's administrators
-to build and distribute their own copy of the Zulip mobile apps, hardcoding a
-key that they possess. This solution is possible with Zulip, but it requires the
-server administrators to publish their own copies of the Zulip mobile apps.
-There's nothing the Zulip team can do to eliminate this onerous requirement.
-
-The main work is thus distributing your own copies of the Zulip mobile apps
-configured to use APNS/FCM keys that you generate. This is not for
-the faint of heart! If you haven't done this before, be warned that
-one can easily spend hundreds of dollars (on things like a DUNS number
-registration) and a week struggling through the hoops Apple requires
-to build and distribute an app through the Apple app store, even if
-you're making no code modifications to an app already present in the
-store (as would be the case here). The Zulip mobile app also gets
-frequent updates that you will have to either forgo or republish to
-the app stores yourself.
-
-If you've done that work, the Zulip server configuration for sending
-push notifications through the new app is quite straightforward:
-
-- Create an
-  [FCM push notifications](https://firebase.google.com/docs/cloud-messaging)
-  key in the Google Developer console and set `android_gcm_api_key` in
-  `/etc/zulip/zulip-secrets.conf` to that key.
-
-- In Apple's developer console, register a [token][apple-doc-token] or
-  [certificate][apple-doc-cert] for sending push notifications.
-  Then in `/etc/zulip/settings.py`, set `APNS_SANDBOX=False`, and:
-
-  - If using APNs [certificate-based authentication][apple-doc-cert],
-    set `APNS_CERT_FILE` to the path of your APNs certificate file.
-
-  - If using APNs [token-based authentication][apple-doc-token],
-    set `APNS_TOKEN_KEY_FILE` to the path of your APNs token key file,
-    `APNS_TOKEN_KEY_ID` to the corresponding 10-character key ID, and
-    `APNS_TEAM_ID` to your 10-character Apple team ID.
-
-- Restart the Zulip server.
-
-[apple-doc-cert]: https://developer.apple.com/documentation/usernotifications/setting_up_a_remote_notification_server/establishing_a_certificate-based_connection_to_apns
-[apple-doc-token]: https://developer.apple.com/documentation/usernotifications/setting_up_a_remote_notification_server/establishing_a_token-based_connection_to_apns

@@ -39,6 +39,7 @@ from django.utils.timezone import now as timezone_now
 from psycopg2.sql import SQL, Composable, Identifier, Literal
 
 from zerver.lib.logging_util import log_to_file
+from zerver.lib.message import event_recipient_ids_for_action_on_messages
 from zerver.lib.request import RequestVariableConversionError
 from zerver.models import (
     ArchivedAttachment,
@@ -54,7 +55,9 @@ from zerver.models import (
     Stream,
     SubMessage,
     UserMessage,
+    UserProfile,
 )
+from zerver.tornado.django_api import send_event_on_commit
 
 logger = logging.getLogger("zulip.retention")
 log_to_file(logger, settings.RETENTION_LOG_PATH)
@@ -123,7 +126,7 @@ def move_rows(
 def run_archiving(
     query: SQL,
     type: int,
-    realm: Realm | None = None,
+    realm: Realm,
     chunk_size: int | None = MESSAGE_BATCH_SIZE,
     **kwargs: Composable,
 ) -> int:
@@ -228,18 +231,15 @@ def move_expired_direct_messages_to_archive(
     assert message_retention_days != -1
     check_date = timezone_now() - timedelta(days=message_retention_days)
 
-    recipient_types = (Recipient.PERSONAL, Recipient.DIRECT_MESSAGE_GROUP)
-
     # Archive expired direct Messages in the realm, including cross-realm messages.
-    # Uses index: zerver_message_realm_recipient_date_sent
+    # Uses index: zerver_message_realm_date_sent
     query = SQL(
         """
     INSERT INTO zerver_archivedmessage ({dst_fields}, archive_transaction_id)
         SELECT {src_fields}, {archive_transaction_id}
         FROM zerver_message
-        INNER JOIN zerver_recipient ON zerver_recipient.id = zerver_message.recipient_id
         WHERE zerver_message.realm_id = {realm_id}
-            AND zerver_recipient.type in {recipient_types}
+            AND NOT zerver_message.is_channel_message
             AND zerver_message.date_sent < {check_date}
         LIMIT {chunk_size}
     ON CONFLICT (id) DO UPDATE SET archive_transaction_id = {archive_transaction_id}
@@ -252,7 +252,6 @@ def move_expired_direct_messages_to_archive(
         type=ArchiveTransaction.RETENTION_POLICY_BASED,
         realm=realm,
         realm_id=Literal(realm.id),
-        recipient_types=Literal(recipient_types),
         check_date=Literal(check_date.isoformat()),
         chunk_size=chunk_size,
     )
@@ -321,6 +320,57 @@ def move_attachment_messages_to_archive(msg_ids: list[int]) -> None:
         cursor.execute(query, dict(message_ids=tuple(msg_ids)))
 
 
+def _process_grouped_messages_deletion(
+    realm: Realm,
+    grouped_messages: list[Message],
+    *,
+    stream: Stream | None,
+    topic: str | None,
+    acting_user: UserProfile | None,
+) -> None:
+    """
+    Helper for do_delete_messages. Should not be called directly otherwise.
+    """
+    from zerver.actions.message_delete import DeleteMessagesEvent, check_update_first_message_id
+
+    message_ids = [message.id for message in grouped_messages]
+    if not message_ids:
+        return  # nocoverage
+
+    event: DeleteMessagesEvent = {
+        "type": "delete_message",
+        "message_ids": sorted(message_ids),
+    }
+    if stream is None:
+        assert topic is None
+        message_type = "private"
+        archiving_chunk_size = MESSAGE_BATCH_SIZE
+    else:
+        assert topic is not None
+        message_type = "stream"
+        event["stream_id"] = stream.id
+        event["topic"] = topic
+        archiving_chunk_size = STREAM_MESSAGE_BATCH_SIZE
+    event["message_type"] = message_type
+
+    # We exclude long-term idle users, since they by definition have no active clients.
+    users_to_notify = event_recipient_ids_for_action_on_messages(
+        message_ids,
+        is_channel_message=message_type == "stream",
+        channel=stream if message_type == "stream" else None,
+    )
+
+    if acting_user is not None:
+        # Always send event to the user who deleted the message.
+        users_to_notify.add(acting_user.id)
+
+    move_messages_to_archive(message_ids, realm=realm, chunk_size=archiving_chunk_size)
+    if stream is not None:
+        check_update_first_message_id(realm, stream, message_ids, users_to_notify)
+
+    send_event_on_commit(realm, event, users_to_notify)
+
+
 def delete_messages(msg_ids: list[int]) -> None:
     # Important note: This also deletes related objects with a foreign
     # key to Message (due to `on_delete=CASCADE` in our models
@@ -332,7 +382,7 @@ def delete_messages(msg_ids: list[int]) -> None:
 
 
 def delete_expired_attachments(realm: Realm) -> None:
-    (num_deleted, ignored) = Attachment.objects.filter(
+    (num_deleted, _deletions) = Attachment.objects.filter(
         messages__isnull=True,
         scheduled_messages__isnull=True,
         realm_id=realm.id,
@@ -460,7 +510,7 @@ def get_realms_and_streams_for_archiving() -> list[tuple[Realm, list[Stream]]]:
 
 
 def move_messages_to_archive(
-    message_ids: list[int], realm: Realm | None = None, chunk_size: int = MESSAGE_BATCH_SIZE
+    message_ids: list[int], realm: Realm, chunk_size: int = MESSAGE_BATCH_SIZE
 ) -> None:
     """
     Callers using this to archive a large amount of messages should ideally make sure the message_ids are
@@ -502,7 +552,7 @@ def move_messages_to_archive(
             messages__isnull=True, scheduled_messages__isnull=True, id__in=archived_attachments
         ).delete()
 
-    if count == 0:
+    if message_ids and count == 0:
         raise Message.DoesNotExist
 
 
@@ -633,7 +683,7 @@ def restore_data_from_archive_by_realm(realm: Realm) -> None:
 
 
 def restore_all_data_from_archive(restore_manual_transactions: bool = True) -> None:
-    for realm in Realm.objects.all():
+    for realm in Realm.objects.all().iterator():
         restore_data_from_archive_by_realm(realm)
 
     if restore_manual_transactions:
@@ -680,12 +730,20 @@ def clean_archived_data() -> None:
     # Associated archived objects will get deleted through the on_delete=CASCADE property:
     count = 0
     transaction_ids = list(
-        ArchiveTransaction.objects.filter(timestamp__lt=check_date).values_list("id", flat=True)
+        ArchiveTransaction.objects.filter(
+            timestamp__lt=check_date, protect_from_deletion=False
+        ).values_list("id", flat=True)
     )
     while len(transaction_ids) > 0:
         transaction_block = transaction_ids[0:TRANSACTION_DELETION_BATCH_SIZE]
         transaction_ids = transaction_ids[TRANSACTION_DELETION_BATCH_SIZE:]
-        ArchiveTransaction.objects.filter(id__in=transaction_block).delete()
+
+        ArchiveTransaction.objects.filter(
+            # The protect_from_deletion=False condition is redundant at this point, but can act
+            # as an extra safeguard against future bugs.
+            id__in=transaction_block,
+            protect_from_deletion=False,
+        ).delete()
         count += len(transaction_block)
 
     logger.info("Deleted %s old ArchiveTransactions.", count)

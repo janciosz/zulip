@@ -171,13 +171,13 @@ def create_realm_custom_profile_field(
     request: HttpRequest,
     user_profile: UserProfile,
     *,
-    name: Annotated[str, StringConstraints(strip_whitespace=True)] = "",
-    hint: str = "",
+    display_in_profile_summary: Json[bool] = False,
+    editable_by_user: Json[bool] = True,
     field_data: Json[ProfileFieldData] | None = None,
     field_type: Json[int],
-    display_in_profile_summary: Json[bool] = False,
+    hint: str = "",
+    name: Annotated[str, StringConstraints(strip_whitespace=True)] = "",
     required: Json[bool] = False,
-    editable_by_user: Json[bool] = True,
 ) -> HttpResponse:
     if field_data is None:
         field_data = {}
@@ -220,7 +220,7 @@ def delete_realm_custom_profile_field(
     request: HttpRequest, user_profile: UserProfile, field_id: int
 ) -> HttpResponse:
     try:
-        field = CustomProfileField.objects.get(id=field_id)
+        field = CustomProfileField.objects.get(realm_id=user_profile.realm_id, id=field_id)
     except CustomProfileField.DoesNotExist:
         raise JsonableError(_("Field id {id} not found.").format(id=field_id))
 
@@ -234,13 +234,13 @@ def update_realm_custom_profile_field(
     request: HttpRequest,
     user_profile: UserProfile,
     *,
-    field_id: PathOnly[int],
-    name: Annotated[str, StringConstraints(strip_whitespace=True)] | None = None,
-    hint: str | None = None,
-    field_data: Json[ProfileFieldData] | None = None,
-    required: Json[bool] | None = None,
     display_in_profile_summary: Json[bool] | None = None,
     editable_by_user: Json[bool] | None = None,
+    field_data: Json[ProfileFieldData] | None = None,
+    field_id: PathOnly[int],
+    hint: str | None = None,
+    name: Annotated[str, StringConstraints(strip_whitespace=True)] | None = None,
+    required: Json[bool] | None = None,
 ) -> HttpResponse:
     realm = user_profile.realm
     try:
@@ -310,7 +310,7 @@ def remove_user_custom_profile_data(
     with transaction.atomic(durable=True):
         for field_id in data:
             check_remove_custom_profile_field_value(
-                user_profile, field_id, acting_user=user_profile
+                user_profile, field_id, acting_user=user_profile, notify=False
             )
     return json_success(request)
 
@@ -325,6 +325,6 @@ def update_user_custom_profile_data(
 ) -> HttpResponse:
     validate_user_custom_profile_data(user_profile.realm.id, data, acting_user=user_profile)
     with transaction.atomic(durable=True):
-        do_update_user_custom_profile_data_if_changed(user_profile, data)
+        do_update_user_custom_profile_data_if_changed(user_profile, data, user_profile, notify=True)
     # We need to call this explicitly otherwise constraints are not check
     return json_success(request)

@@ -15,16 +15,10 @@ from corporate.lib.stripe import (
     get_configured_fixed_price_plan_offer,
     start_of_next_billing_cycle,
 )
-from corporate.models import (
-    Customer,
-    CustomerPlan,
-    CustomerPlanOffer,
-    LicenseLedger,
-    SponsoredPlanTypes,
-    ZulipSponsorshipRequest,
-    get_current_plan_by_customer,
-    get_customer_by_realm,
-)
+from corporate.models.customers import Customer, get_customer_by_realm
+from corporate.models.licenses import LicenseLedger
+from corporate.models.plans import CustomerPlan, CustomerPlanOffer, get_current_plan_by_customer
+from corporate.models.sponsorships import SponsoredPlanTypes, ZulipSponsorshipRequest
 from zerver.actions.create_realm import do_create_realm
 from zerver.actions.invites import do_create_multiuse_invite_link
 from zerver.actions.realm_settings import do_change_realm_org_type, do_send_realm_reactivation_email
@@ -65,49 +59,54 @@ class TestRemoteServerSupportEndpoint(ZulipTestCase):
                 org_website=website,
                 org_description="We help people.",
                 expected_total_users="20-35",
+                plan_to_use_zulip="For communication on moon.",
                 paid_users_count=paid_users,
                 paid_users_description="",
                 requested_plan=plan,
             )
 
-        def upgrade_legacy_plan(legacy_plan: CustomerPlan) -> None:
+        def upgrade_complimentary_access_plan(complimentary_access_plan: CustomerPlan) -> None:
             billed_licenses = 10
-            assert legacy_plan.end_date is not None
+            assert complimentary_access_plan.end_date is not None
             last_ledger_entry = (
-                LicenseLedger.objects.filter(plan=legacy_plan).order_by("-id").first()
+                LicenseLedger.objects.filter(plan=complimentary_access_plan).order_by("-id").first()
             )
             assert last_ledger_entry is not None
             last_ledger_entry.licenses_at_next_renewal = billed_licenses
             last_ledger_entry.save(update_fields=["licenses_at_next_renewal"])
-            legacy_plan.status = CustomerPlan.SWITCH_PLAN_TIER_AT_PLAN_END
-            legacy_plan.save(update_fields=["status"])
+            complimentary_access_plan.status = CustomerPlan.SWITCH_PLAN_TIER_AT_PLAN_END
+            complimentary_access_plan.save(update_fields=["status"])
             plan_params = {
                 "automanage_licenses": True,
                 "charge_automatically": False,
                 "price_per_license": 100,
-                "billing_cycle_anchor": legacy_plan.end_date,
+                "billing_cycle_anchor": complimentary_access_plan.end_date,
                 "billing_schedule": CustomerPlan.BILLING_SCHEDULE_MONTHLY,
                 "tier": CustomerPlan.TIER_SELF_HOSTED_BASIC,
                 "status": CustomerPlan.NEVER_STARTED,
             }
             CustomerPlan.objects.create(
-                customer=legacy_plan.customer, next_invoice_date=legacy_plan.end_date, **plan_params
+                customer=complimentary_access_plan.customer,
+                next_invoice_date=complimentary_access_plan.end_date,
+                **plan_params,
             )
 
-        def add_legacy_plan(name: str, upgrade: bool) -> None:
-            legacy_anchor = datetime(2050, 1, 1, tzinfo=timezone.utc)
+        def add_complimentary_access_plan(name: str, upgrade: bool) -> None:
+            complimentary_access_plan_anchor = datetime(2050, 1, 1, tzinfo=timezone.utc)
             next_plan_anchor = datetime(2050, 2, 1, tzinfo=timezone.utc)
             remote_realm = RemoteRealm.objects.get(name=name)
             billing_session = RemoteRealmBillingSession(remote_realm)
 
-            billing_session.migrate_customer_to_legacy_plan(legacy_anchor, next_plan_anchor)
+            billing_session.create_complimentary_access_plan(
+                complimentary_access_plan_anchor, next_plan_anchor
+            )
             customer = billing_session.get_customer()
             assert customer is not None
             complimentary_access_plan = billing_session.get_complimentary_access_plan(customer)
             assert complimentary_access_plan is not None
             assert complimentary_access_plan.end_date is not None
             if upgrade:
-                upgrade_legacy_plan(complimentary_access_plan)
+                upgrade_complimentary_access_plan(complimentary_access_plan)
 
         super().setUp()
 
@@ -158,11 +157,11 @@ class TestRemoteServerSupportEndpoint(ZulipTestCase):
             plan=SponsoredPlanTypes.COMMUNITY.value,
         )
 
-        # Add expected legacy customer and plan data:
+        # Add expected customer and plan data:
         # with upgrade scheduled
-        add_legacy_plan(name="realm-name-4", upgrade=True)
+        add_complimentary_access_plan(name="realm-name-4", upgrade=True)
         # without upgrade scheduled
-        add_legacy_plan(name="realm-name-5", upgrade=False)
+        add_complimentary_access_plan(name="realm-name-5", upgrade=False)
 
         # Add billing users
         remote_realm = RemoteRealm.objects.get(name="realm-name-3")
@@ -282,11 +281,11 @@ class TestRemoteServerSupportEndpoint(ZulipTestCase):
                 result,
             )
 
-        def check_legacy_plan_with_upgrade(result: "TestHttpResponse") -> None:
+        def check_complimentary_access_plan_with_upgrade(result: "TestHttpResponse") -> None:
             self.assert_in_success_response(
                 [
                     "Current plan information:",
-                    "<b>Plan name</b>: Free (legacy plan)<br />",
+                    "<b>Plan name</b>: Zulip Basic (complimentary)<br />",
                     "<b>Status</b>: New plan scheduled<br />",
                     "<b>End date</b>: 01 February 2050<br />",
                     "⏱️ Next plan information:",
@@ -301,11 +300,11 @@ class TestRemoteServerSupportEndpoint(ZulipTestCase):
                 result,
             )
 
-        def check_legacy_plan_without_upgrade(result: "TestHttpResponse") -> None:
+        def check_complimentary_access_plan_without_upgrade(result: "TestHttpResponse") -> None:
             self.assert_in_success_response(
                 [
                     "Current plan information:",
-                    "<b>Plan name</b>: Free (legacy plan)<br />",
+                    "<b>Plan name</b>: Zulip Basic (complimentary)<br />",
                     "<b>Status</b>: Active<br />",
                     "<b>End date</b>: 01 February 2050<br />",
                 ],
@@ -410,14 +409,14 @@ class TestRemoteServerSupportEndpoint(ZulipTestCase):
         assert_server_details_in_response(result, f"zulip-{server}.example.com")
         assert_realm_details_in_response(result, f"realm-name-{server}", f"realm-host-{server}")
         check_no_sponsorship_request(result)
-        check_legacy_plan_with_upgrade(result)
+        check_complimentary_access_plan_with_upgrade(result)
 
         server = 5
         result = self.client_get("/activity/remote/support", {"q": f"zulip-{server}.example.com"})
         assert_server_details_in_response(result, f"zulip-{server}.example.com")
         assert_realm_details_in_response(result, f"realm-name-{server}", f"realm-host-{server}")
         check_no_sponsorship_request(result)
-        check_legacy_plan_without_upgrade(result)
+        check_complimentary_access_plan_without_upgrade(result)
 
         # search for UUIDs
         remote_server = RemoteZulipServer.objects.get(hostname=f"zulip-{server}.example.com")
@@ -514,32 +513,34 @@ class TestRemoteServerSupportEndpoint(ZulipTestCase):
             ["Cannot update current plan for realm-name-5 to end on 2020-01-01."], result
         )
 
-    def test_configure_temporary_courtesy_plan(self) -> None:
+    def test_configure_complimentary_access_plan(self) -> None:
         iago = self.example_user("iago")
         self.login_user(iago)
         remote_realm = RemoteRealm.objects.get(name="realm-name-4")
-        # Cannot configure courtesy plan to end in the past.
+        # Cannot configure complimentary access plan to end in the past.
         result = self.client_post(
             "/activity/remote/support",
             {
                 "remote_realm_id": f"{remote_realm.id}",
-                "temporary_courtesy_plan": "2010-03-01",
+                "complimentary_access_plan": "2010-03-01",
             },
         )
         self.assert_in_success_response(
-            ["Cannot configure a courtesy plan for realm-name-4 to end on 2010-03-01."],
+            ["Cannot configure a complimentary access plan for realm-name-4 to end on 2010-03-01."],
             result,
         )
-        # Cannot configure courtesy plan if there is a current plan for billing entity.
+        # Cannot configure omplimentary access plan if there is a current plan for billing entity.
         result = self.client_post(
             "/activity/remote/support",
             {
                 "remote_realm_id": f"{remote_realm.id}",
-                "temporary_courtesy_plan": "2050-03-01",
+                "complimentary_access_plan": "2050-03-01",
             },
         )
         self.assert_in_success_response(
-            ["Cannot configure a courtesy plan for realm-name-4 because of current plan."],
+            [
+                "Cannot configure a complimentary access plan for realm-name-4 because of current plan."
+            ],
             result,
         )
         remote_realm = RemoteRealm.objects.get(name="realm-name-2")
@@ -548,11 +549,11 @@ class TestRemoteServerSupportEndpoint(ZulipTestCase):
             "/activity/remote/support",
             {
                 "remote_realm_id": f"{remote_realm.id}",
-                "temporary_courtesy_plan": "2050-03-01",
+                "complimentary_access_plan": "2050-03-01",
             },
         )
         self.assert_in_success_response(
-            ["Temporary courtesy plan for realm-name-2 configured to end on 2050-03-01."],
+            ["Complimentary access plan for realm-name-2 configured to end on 2050-03-01."],
             result,
         )
         remote_realm.refresh_from_db()
@@ -750,7 +751,7 @@ class TestSupportEndpoint(ZulipTestCase):
     def test_realm_support_view_queries(self) -> None:
         iago = self.example_user("iago")
         self.login_user(iago)
-        with self.assert_database_query_count(18):
+        with self.assert_database_query_count(23):
             result = self.client_get("/activity/support", {"q": "zulip"}, subdomain="zulip")
             self.assertEqual(result.status_code, 200)
 
@@ -769,7 +770,6 @@ class TestSupportEndpoint(ZulipTestCase):
                     '<span class="cloud-label">Cloud user</span>\n',
                     f"<h3>{full_name}</h3>",
                     f"<b>Email</b>: {email}",
-                    "<b>Is active</b>: True<br />",
                     f"<b>Role</b>: {role}<br />",
                 ],
                 html_response,
@@ -835,13 +835,13 @@ class TestSupportEndpoint(ZulipTestCase):
                     '<option value="2">Limited</option>',
                     'input type="number" name="monthly_discounted_price" value="None"',
                     'input type="number" name="annual_discounted_price" value="None"',
-                    '<option value="active" selected>Active</option>',
-                    '<option value="deactivated" >Deactivated</option>',
+                    '<button type="submit" class="support-submit-button">Deactivate realm</button>',
                     f'<option value="{zulip_realm.org_type}" selected>',
-                    'scrub-realm-button">',
-                    'data-string-id="zulip"',
                 ],
                 result,
+            )
+            self.assert_not_in_success_response(
+                ["scrub-realm-button", "Send reactivation email to owners"], result
             )
 
         def check_lear_realm_query_result(result: "TestHttpResponse") -> None:
@@ -853,10 +853,7 @@ class TestSupportEndpoint(ZulipTestCase):
                     '<option value="2">Limited</option>',
                     'input type="number" name="monthly_discounted_price" value="None"',
                     'input type="number" name="annual_discounted_price" value="None"',
-                    '<option value="active" selected>Active</option>',
-                    '<option value="deactivated" >Deactivated</option>',
-                    'scrub-realm-button">',
-                    'data-string-id="lear"',
+                    '<button type="submit" class="support-submit-button">Deactivate realm</button>',
                     "<b>Plan name</b>: Zulip Cloud Standard",
                     "<b>Status</b>: Active",
                     "<b>Billing schedule</b>: Annual",
@@ -868,6 +865,9 @@ class TestSupportEndpoint(ZulipTestCase):
                     '<option value="charge_automatically" >',
                 ],
                 result,
+            )
+            self.assert_not_in_success_response(
+                ["scrub-realm-button", "Send reactivation email to owners"], result
             )
 
         def check_preregistration_user_query_result(
@@ -1647,7 +1647,7 @@ class TestSupportEndpoint(ZulipTestCase):
             },
         )
         self.assert_in_success_response(
-            ["Fixed price offer deleted"],
+            ["Fixed-price plan offer deleted"],
             result,
         )
         customer.refresh_from_db()
@@ -1752,7 +1752,7 @@ class TestSupportEndpoint(ZulipTestCase):
         )
 
         billing_session = RealmBillingSession(user=iago, realm=lear_realm, support_session=True)
-        next_billing_cycle = billing_session.get_next_billing_cycle(plan).strftime("%Y-%m-%d")
+        next_billing_cycle = billing_session.get_next_billing_cycle(plan).date().isoformat()
         with time_machine.travel(datetime(2016, 1, 3, tzinfo=timezone.utc), tick=False):
             result = self.client_post(
                 "/activity/support",
@@ -1796,7 +1796,22 @@ class TestSupportEndpoint(ZulipTestCase):
         self.assertEqual(next_plan.charge_automatically, plan.charge_automatically)
         self.assertTrue(next_plan.automanage_licenses)
 
-    def test_approve_sponsorship_deactivated_realm(self) -> None:
+        # Test deleting the fixed-price next plan via support.
+        result = self.client_post(
+            "/activity/support",
+            {
+                "realm_id": f"{lear_realm.id}",
+                "delete_fixed_price_next_plan": "true",
+            },
+        )
+        self.assert_in_success_response(
+            ["Fixed-price scheduled plan deleted"],
+            result,
+        )
+        next_plan = billing_session.get_next_plan(plan)
+        self.assertIsNone(next_plan)
+
+    def test_deactivated_realm_support_view_and_actions(self) -> None:
         support_admin = self.example_user("iago")
         with self.settings(BILLING_ENABLED=True):
             limited_realm = do_create_realm("limited", "limited")
@@ -1805,12 +1820,65 @@ class TestSupportEndpoint(ZulipTestCase):
                 user=support_admin, realm=limited_realm, support_session=True
             )
             billing_session.update_customer_sponsorship_status(True)
+
+        # This will not create an audit log for the realm's deactivation.
         limited_realm.deactivated = True
         limited_realm.save()
 
         iago = self.example_user("iago")
         self.login_user(iago)
 
+        # Confirm reactivate and scrub realm buttons are shown, but as
+        # there is no audit log, that data isn't in the support view.
+        result = self.client_get("/activity/support", {"q": "limited"})
+        self.assert_in_success_response(
+            [
+                "scrub-realm-button",
+                "Send reactivation email to owners",
+                "❌ Scrub realm",
+            ],
+            result,
+        )
+        self.assert_not_in_success_response(
+            [
+                "Deactivation audit log data",
+                "<b>Deactivation reason</b>: owner_request",
+            ],
+            result,
+        )
+
+        # Undo manual deactivation and deactivate through the normal
+        # support action, which creates an audit log for the realm's
+        # deactivation.
+        limited_realm.deactivated = False
+        limited_realm.save()
+
+        result = self.client_post(
+            "/activity/support",
+            {
+                "realm_id": f"{limited_realm.id}",
+                "status": "deactivated",
+                "deactivation_reason": "owner_request",
+            },
+        )
+        self.assertIn(b"limited deactivated", result.content)
+
+        # Confirm reactivate and scrub realm buttons, as well as the audit log
+        # data for the realm's deactivation, are shown for deactivated realms.
+        result = self.client_get("/activity/support", {"q": "limited"})
+        self.assert_in_success_response(
+            [
+                "scrub-realm-button",
+                "Send reactivation email to owners",
+                "❌ Scrub realm",
+                "Deactivation audit log data",
+                "<b>Deactivation reason</b>: owner_request",
+            ],
+            result,
+        )
+
+        # Even if a sponsorship request was pending, it cannot be approved
+        # for a deactivated realm.
         result = self.client_post(
             "/activity/support",
             {"realm_id": f"{limited_realm.id}", "approve_sponsorship": "true"},
@@ -1834,12 +1902,17 @@ class TestSupportEndpoint(ZulipTestCase):
 
         with mock.patch("corporate.views.support.do_deactivate_realm") as m:
             result = self.client_post(
-                "/activity/support", {"realm_id": f"{lear_realm.id}", "status": "deactivated"}
+                "/activity/support",
+                {
+                    "realm_id": f"{lear_realm.id}",
+                    "status": "deactivated",
+                    "deactivation_reason": "inactivity",
+                },
             )
             m.assert_called_once_with(
                 lear_realm,
                 acting_user=self.example_user("iago"),
-                deactivation_reason="owner_request",
+                deactivation_reason="inactivity",
                 email_owners=True,
             )
             self.assert_in_success_response(["lear deactivated"], result)
@@ -1866,35 +1939,44 @@ class TestSupportEndpoint(ZulipTestCase):
         self.login("iago")
 
         result = self.client_post(
-            "/activity/support", {"realm_id": f"{lear_realm.id}", "new_subdomain": "new-name"}
+            "/activity/support",
+            {
+                "realm_id": f"{lear_realm.id}",
+                "new_subdomain": "new-name",
+                "add_redirect_url": "true",
+            },
         )
         self.assertEqual(result.status_code, 302)
         self.assertEqual(result["Location"], "/activity/support?q=new-name")
         realm_id = lear_realm.id
         lear_realm = get_realm("new-name")
         self.assertEqual(lear_realm.id, realm_id)
+
+        # Old subdomain redirects to new subdomain
         self.assertTrue(Realm.objects.filter(string_id="lear").exists())
         self.assertTrue(Realm.objects.filter(string_id="lear")[0].deactivated)
+        result = self.client_get("/activity/support?q=lear")
+        self.assert_in_success_response(["Placeholder realm", "Redirects to", "new-name"], result)
 
         result = self.client_post(
             "/activity/support", {"realm_id": f"{lear_realm.id}", "new_subdomain": "new-name"}
         )
         self.assert_in_success_response(
-            ["Subdomain already in use. Please choose a different one."], result
+            ["Subdomain is already in use. Please choose a different one."], result
         )
 
         result = self.client_post(
             "/activity/support", {"realm_id": f"{lear_realm.id}", "new_subdomain": "zulip"}
         )
         self.assert_in_success_response(
-            ["Subdomain already in use. Please choose a different one."], result
+            ["Subdomain is already in use. Please choose a different one."], result
         )
 
         result = self.client_post(
             "/activity/support", {"realm_id": f"{lear_realm.id}", "new_subdomain": "lear"}
         )
         self.assert_in_success_response(
-            ["Subdomain already in use. Please choose a different one."], result
+            ["Subdomain is already in use. Please choose a different one."], result
         )
 
         # Test renaming to a "reserved" subdomain
@@ -1904,6 +1986,24 @@ class TestSupportEndpoint(ZulipTestCase):
         self.assert_in_success_response(
             ["Subdomain reserved. Please choose a different one."], result
         )
+
+        # Test not adding a redirect
+        result = self.client_post(
+            "/activity/support", {"realm_id": f"{lear_realm.id}", "new_subdomain": "new-lear"}
+        )
+        self.assertEqual(result.status_code, 302)
+        self.assertEqual(result["Location"], "/activity/support?q=new-lear")
+        realm_id = lear_realm.id
+        lear_realm = get_realm("new-lear")
+        self.assertEqual(lear_realm.id, realm_id)
+
+        # Realm on previous subdomain does not exist
+        self.assertFalse(Realm.objects.filter(string_id="new-name").exists())
+
+        # Original subdomain exists and redirects to new subdomain
+        self.assertTrue(Realm.objects.filter(string_id="lear").exists())
+        result = self.client_get("/activity/support?q=lear")
+        self.assert_in_success_response(["Placeholder realm", "Redirects to", "new-lear"], result)
 
     def test_modify_plan_for_downgrade_at_end_of_billing_cycle(self) -> None:
         realm = get_realm("zulip")
@@ -2013,5 +2113,5 @@ class TestSupportEndpoint(ZulipTestCase):
                 "/activity/support",
                 {"realm_id": f"{realm.id}", "delete_user_by_id": hamlet.id},
             )
-            m.assert_called_once_with(hamlet)
+            m.assert_called_once_with(hamlet, acting_user=self.example_user("iago"))
             self.assert_in_success_response([f"{hamlet_email} in zulip deleted"], result)

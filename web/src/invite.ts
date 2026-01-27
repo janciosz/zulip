@@ -1,28 +1,28 @@
 import ClipboardJS from "clipboard";
 import {add} from "date-fns";
+import Handlebars from "handlebars/runtime.js";
 import $ from "jquery";
 import assert from "minimalistic-assert";
-import {z} from "zod";
+import * as z from "zod/mini";
 
-import copy_invite_link from "../templates/copy_invite_link.hbs";
-import render_guest_visible_users_message from "../templates/guest_visible_users_message.hbs";
 import render_invitation_failed_error from "../templates/invitation_failed_error.hbs";
 import render_invite_user_modal from "../templates/invite_user_modal.hbs";
-import render_invite_tips_banner from "../templates/modal_banner/invite_tips_banner.hbs";
+import render_invite_users_tips from "../templates/modal_banner/invite_users_tips.hbs";
 import render_settings_dev_env_email_access from "../templates/settings/dev_env_email_access.hbs";
 
+import * as banners from "./banners.ts";
+import type {Banner} from "./banners.ts";
 import * as channel from "./channel.ts";
 import * as common from "./common.ts";
 import * as components from "./components.ts";
-import * as compose_banner from "./compose_banner.ts";
 import {show_copied_confirmation} from "./copied_tooltip.ts";
 import {csrf_token} from "./csrf.ts";
+import * as demo_organizations_ui from "./demo_organizations_ui.ts";
 import * as dialog_widget from "./dialog_widget.ts";
 import * as email_pill from "./email_pill.ts";
 import {$t, $t_html} from "./i18n.ts";
-import * as input_pill from "./input_pill.ts";
 import * as invite_stream_picker_pill from "./invite_stream_picker_pill.ts";
-import * as invite_user_group_picker_pill from "./invite_user_group_picker_pill.ts";
+import * as loading from "./loading.ts";
 import {page_params} from "./page_params.ts";
 import * as peer_data from "./peer_data.ts";
 import * as settings_components from "./settings_components.ts";
@@ -34,33 +34,46 @@ import * as stream_pill from "./stream_pill.ts";
 import * as timerender from "./timerender.ts";
 import type {HTMLSelectOneElement} from "./types.ts";
 import * as ui_report from "./ui_report.ts";
+import * as user_group_picker_pill from "./user_group_picker_pill.ts";
 import * as user_group_pill from "./user_group_pill.ts";
 import * as util from "./util.ts";
 
 let custom_expiration_time_input = 10;
 let custom_expiration_time_unit = "days";
-let pills: email_pill.EmailPillWidget;
+let email_pill_widget: email_pill.EmailPillWidget;
 let stream_pill_widget: stream_pill.StreamPillWidget;
 let user_group_pill_widget: user_group_pill.UserGroupPillWidget;
 let guest_invite_stream_ids: number[] = [];
 
-function reset_error_messages(): void {
-    $("#dialog_error").hide().text("").removeClass(common.status_classes);
-
-    if (page_params.development_environment) {
-        $("#dev_env_msg").hide().text("").removeClass(common.status_classes);
-    }
-}
-
-function get_common_invitation_data(): {
+type CommonInvitationData = {
     csrfmiddlewaretoken: string;
     invite_as: number;
     notify_referrer_on_join: boolean;
     stream_ids: string;
+    group_ids: string;
     invite_expires_in_minutes: string;
     invitee_emails: string;
     include_realm_default_subscriptions: string;
-} {
+    welcome_message_custom_text?: string;
+};
+
+const DEV_ENV_EMAIL_ACCESS_BANNER: Banner = {
+    intent: "info",
+    label: new Handlebars.SafeString(render_settings_dev_env_email_access()),
+    buttons: [],
+    close_button: false,
+};
+
+function reset_invite_modal_banners(): void {
+    $("#dialog_error").hide().text("").removeClass(common.status_classes);
+    $("#invite-success-banner-container").empty();
+
+    if (page_params.development_environment) {
+        $("#dev-env-email-access-banner-container").empty();
+    }
+}
+
+function get_common_invitation_data(): CommonInvitationData {
     const invite_as = Number.parseInt(
         $<HTMLSelectOneElement>("select:not([multiple])#invite_as").val()!,
         10,
@@ -82,10 +95,7 @@ function get_common_invitation_data(): {
 
     let stream_ids: number[] = [];
     let include_realm_default_subscriptions = false;
-    if (
-        $("#invite_select_default_streams").prop("checked") ||
-        !settings_data.user_can_subscribe_other_users()
-    ) {
+    if ($("#invite_select_default_streams").prop("checked")) {
         include_realm_default_subscriptions = true;
     } else {
         stream_ids = stream_pill.get_stream_ids(stream_pill_widget);
@@ -96,32 +106,55 @@ function get_common_invitation_data(): {
     }
 
     assert(csrf_token !== undefined);
-    const data = {
+    const data: CommonInvitationData = {
         csrfmiddlewaretoken: csrf_token,
         invite_as,
         notify_referrer_on_join,
         stream_ids: JSON.stringify(stream_ids),
         invite_expires_in_minutes: JSON.stringify(expires_in),
         group_ids: JSON.stringify(group_ids),
-        invitee_emails: pills
+        invitee_emails: email_pill_widget
             .items()
-            .map((pill) => email_pill.get_email_from_item(pill))
+            .map((item) => item.email)
             .join(","),
         include_realm_default_subscriptions: JSON.stringify(include_realm_default_subscriptions),
     };
-    const current_email = email_pill.get_current_email(pills);
+    const current_email = email_pill.get_current_email(email_pill_widget);
     if (current_email) {
-        if (pills.items().length === 0) {
+        if (email_pill_widget.items().length === 0) {
             data.invitee_emails = current_email;
         } else {
             data.invitee_emails += "," + current_email;
         }
     }
+
+    if (current_user.is_admin) {
+        const realm_welcome_message_configured = realm.realm_welcome_message_custom_text.length > 0;
+        const send_realm_default_custom_message = $(
+            "#send_default_realm_welcome_message_custom_text",
+        ).is(":checked");
+        const send_custom_message = $("#send_custom_welcome_message_custom_text").is(":checked");
+        const welcome_message_custom_text = $<HTMLTextAreaElement>(
+            "#invite_welcome_custom_message_text",
+        )
+            .val()!
+            .trim();
+
+        if (
+            (realm_welcome_message_configured && !send_realm_default_custom_message) ||
+            (!realm_welcome_message_configured &&
+                send_custom_message &&
+                welcome_message_custom_text.length > 0)
+        ) {
+            data.welcome_message_custom_text = welcome_message_custom_text;
+        }
+    }
+
     return data;
 }
 
 function beforeSend(): void {
-    reset_error_messages();
+    reset_invite_modal_banners();
     // TODO: You could alternatively parse the emails here, and return errors to
     // the user if they don't match certain constraints (i.e. not real email addresses,
     // aren't in the right domain, etc.)
@@ -143,22 +176,32 @@ function submit_invitation_form(): void {
         data,
         beforeSend,
         success() {
-            const number_of_invites_sent = pills.items().length;
-            ui_report.success(
-                $t_html(
-                    {
-                        defaultMessage:
-                            "{N, plural, one {User invited successfully.} other {Users invited successfully.}}",
-                    },
-                    {N: number_of_invites_sent},
-                ),
-                $invite_status,
+            const number_of_invites_sent = email_pill_widget.items().length;
+            banners.open(
+                {
+                    intent: "success",
+                    label: new Handlebars.SafeString(
+                        $t_html(
+                            {
+                                defaultMessage:
+                                    "{N, plural, one {User invited successfully.} other {Users invited successfully.}}",
+                            },
+                            {N: number_of_invites_sent},
+                        ),
+                    ),
+                    buttons: [],
+                    close_button: false,
+                    custom_classes: "invite-user-modal-banner",
+                },
+                $("#invite-success-banner-container"),
             );
-            pills.clear();
+            email_pill_widget.clear();
 
             if (page_params.development_environment) {
-                const rendered_email_msg = render_settings_dev_env_email_access();
-                $("#dev_env_msg").html(rendered_email_msg).addClass("alert-info").show();
+                banners.open(
+                    DEV_ENV_EMAIL_ACCESS_BANNER,
+                    $("#dev-env-email-access-banner-container"),
+                );
             }
 
             if ($expires_in.val() === "custom") {
@@ -191,7 +234,7 @@ function submit_invitation_form(): void {
                 .safeParse(xhr.responseJSON);
             if (!parsed.success) {
                 // There was a fatal error, no partial processing occurred.
-                ui_report.error("", xhr, $invite_status);
+                ui_report.error($t({defaultMessage: "Failed"}), xhr, $invite_status);
             } else {
                 // Some users were not invited.
                 const invitee_emails_errored = [];
@@ -211,14 +254,14 @@ function submit_invitation_form(): void {
                     is_admin: current_user.is_admin,
                     is_invitee_deactivated,
                     license_limit_reached: parsed.data.license_limit_reached,
-                    has_billing_access: current_user.is_owner || current_user.is_billing_admin,
+                    has_billing_access: settings_data.user_has_billing_access(),
                     daily_limit_reached: parsed.data.daily_limit_reached,
                 });
                 ui_report.message(error_response, $invite_status, "alert-error");
 
                 if (parsed.data.sent_invitations) {
                     for (const email of invitee_emails_errored) {
-                        pills.appendValue(email);
+                        email_pill_widget.appendValue(email);
                     }
                 }
             }
@@ -232,6 +275,29 @@ function submit_invitation_form(): void {
     });
 }
 
+const copy_invite_link_banner = (invite_link: string): Banner => ({
+    intent: "success",
+    label: new Handlebars.SafeString(
+        $t_html(
+            {defaultMessage: "Link: <z-link></z-link>"},
+            {
+                "z-link": () =>
+                    `<a href='${invite_link}' id='multiuse_invite_link' class='banner-link'>${invite_link}</a>`,
+            },
+        ),
+    ),
+    buttons: [
+        {
+            variant: "solid",
+            icon: "copy",
+            label: $t({defaultMessage: "Copy link"}),
+            id: "copy_generated_invite_link",
+        },
+    ],
+    close_button: false,
+    custom_classes: "copy-invite-link-banner",
+});
+
 function generate_multiuse_invite(): void {
     const $invite_status = $("#dialog_error");
     const data = get_common_invitation_data();
@@ -239,10 +305,17 @@ function generate_multiuse_invite(): void {
         url: "/json/invites/multiuse",
         data,
         beforeSend,
-        success(data) {
-            const copy_link_html = copy_invite_link(data);
-            ui_report.success(copy_link_html, $invite_status);
-            const clipboard = new ClipboardJS("#copy_generated_invite_link");
+        success(raw_data) {
+            const data = z.object({invite_link: z.string()}).parse(raw_data);
+            banners.open(
+                copy_invite_link_banner(data.invite_link),
+                $("#invite-success-banner-container"),
+            );
+            util.the($(".copy-invite-link-banner")).scrollIntoView();
+
+            const clipboard = new ClipboardJS("#copy_generated_invite_link", {
+                text: () => data.invite_link,
+            });
 
             clipboard.on("success", () => {
                 const tippy_timeout_in_ms = 800;
@@ -253,7 +326,7 @@ function generate_multiuse_invite(): void {
             });
         },
         error(xhr) {
-            ui_report.error("", xhr, $invite_status);
+            ui_report.error($t({defaultMessage: "Failed"}), xhr, $invite_status);
         },
         complete() {
             $("#invite-user-modal .dialog_submit_button").text($t({defaultMessage: "Create link"}));
@@ -305,7 +378,29 @@ function set_streams_to_join_list_visibility(): void {
     }
 }
 
-function update_guest_visible_users_count_and_stream_ids(): void {
+function set_welcome_message_custom_text_visibility(): void {
+    if (!current_user.is_admin) {
+        return;
+    }
+
+    const realm_welcome_message_configured = realm.realm_welcome_message_custom_text.length > 0;
+    const send_realm_default_custom_message = $(
+        "#send_default_realm_welcome_message_custom_text",
+    ).is(":checked");
+    const send_custom_message = $("#send_custom_welcome_message_custom_text").is(":checked");
+
+    const should_show_welcome_message_container =
+        (send_custom_message && !realm_welcome_message_configured) ||
+        (!send_realm_default_custom_message && realm_welcome_message_configured);
+
+    if (should_show_welcome_message_container) {
+        $("#invite_welcome_message_custom_text_container").show();
+    } else {
+        $("#invite_welcome_message_custom_text_container").hide();
+    }
+}
+
+async function update_guest_visible_users_count_and_stream_ids(): Promise<void> {
     const invite_as = Number.parseInt(
         $<HTMLSelectOneElement>("select:not([multiple])#invite_as").val()!,
         10,
@@ -324,16 +419,21 @@ function update_guest_visible_users_count_and_stream_ids(): void {
     const stream_ids = $("#invite_select_default_streams").is(":checked")
         ? stream_data.get_default_stream_ids()
         : stream_pill.get_stream_ids(stream_pill_widget);
-    const visible_users_count = peer_data.get_unique_subscriber_count_for_streams(stream_ids);
 
-    const message_html = render_guest_visible_users_message({
-        user_count: visible_users_count,
-    });
+    $(".guest-visible-users-count").empty();
+    loading.make_indicator($(".guest_visible_users_loading"));
+    $("#guest_visible_users_container").show();
 
-    $("#guest_visible_users_container").html(message_html).show();
+    const visible_users_count = await peer_data.get_unique_subscriber_count_for_streams(stream_ids);
+    $(".guest-visible-users-count").text(visible_users_count);
+    loading.destroy_indicator($(".guest_visible_users_loading"));
 }
 
-function generate_invite_tips_data(): Record<string, boolean> {
+function generate_invite_tips_data(): {
+    realm_has_description: boolean;
+    realm_has_user_set_icon: boolean;
+    realm_has_custom_profile_fields: boolean;
+} {
     const {realm_description, realm_icon_source, custom_profile_fields} = realm;
 
     return {
@@ -344,6 +444,17 @@ function generate_invite_tips_data(): Record<string, boolean> {
         realm_has_custom_profile_fields: custom_profile_fields.length > 0,
     };
 }
+
+const invite_tips_banner = (): Banner => {
+    const invite_tips_banner_data = generate_invite_tips_data();
+    return {
+        intent: "info",
+        label: new Handlebars.SafeString(render_invite_users_tips(invite_tips_banner_data)),
+        buttons: [],
+        close_button: false,
+        custom_classes: "invite-tips-banner",
+    };
+};
 
 function update_stream_list(): void {
     const invite_as = Number.parseInt(
@@ -377,7 +488,7 @@ function open_invite_user_modal(e: JQuery.ClickEvent<Document, undefined>): void
     e.preventDefault();
 
     const show_group_pill_container =
-        invite_user_group_picker_pill.get_user_groups_allowed_to_add_members().length > 0;
+        user_group_picker_pill.get_user_groups_allowed_to_add_members().length > 0;
 
     const html_body = render_invite_user_modal({
         is_admin: current_user.is_admin,
@@ -389,18 +500,13 @@ function open_invite_user_modal(e: JQuery.ClickEvent<Document, undefined>): void
         time_choices: settings_config.custom_time_unit_values,
         show_select_default_streams_option: stream_data.get_default_stream_ids().length > 0,
         user_has_email_set: !settings_data.user_email_not_configured(),
-        can_subscribe_other_users: settings_data.user_can_subscribe_other_users(),
+        default_welcome_message_custom_text: realm.realm_welcome_message_custom_text,
     });
 
     function invite_user_modal_post_render(): void {
         const $expires_in = $<HTMLSelectOneElement>("select:not([multiple])#expires_in");
         const $pill_container = $("#invitee_emails_container .pill-container");
-        pills = input_pill.create({
-            $container: $pill_container,
-            create_item_from_text: email_pill.create_item_from_email,
-            get_text_from_item: email_pill.get_email_from_item,
-            get_display_value_from_item: email_pill.get_email_from_item,
-        });
+        email_pill_widget = email_pill.create_pills($pill_container);
 
         $("#invite-user-modal .dialog_submit_button").prop("disabled", true);
 
@@ -414,30 +520,28 @@ function open_invite_user_modal(e: JQuery.ClickEvent<Document, undefined>): void
         const valid_to_text = valid_to();
         settings_components.set_time_input_formatted_text($expires_in, valid_to_text);
 
-        if (settings_data.user_can_subscribe_other_users()) {
-            set_streams_to_join_list_visibility();
-            const $stream_pill_container = $("#invite_streams_container .pill-container");
-            stream_pill_widget = invite_stream_picker_pill.create($stream_pill_container);
-        }
+        set_streams_to_join_list_visibility();
+        const $stream_pill_container = $("#invite_streams_container .pill-container");
+        stream_pill_widget = invite_stream_picker_pill.create($stream_pill_container);
 
         if (show_group_pill_container) {
             const $user_group_pill_container = $("#invite-user-group-container .pill-container");
-            user_group_pill_widget = invite_user_group_picker_pill.create(
-                $user_group_pill_container,
-            );
+            user_group_pill_widget = user_group_picker_pill.create($user_group_pill_container);
         }
+
+        set_welcome_message_custom_text_visibility();
 
         $("#invite_streams_container .input, #invite_select_default_streams").on(
             "change",
-            update_guest_visible_users_count_and_stream_ids,
+            () => void update_guest_visible_users_count_and_stream_ids(),
         );
 
         $("#invite_as").on("change", () => {
             update_stream_list();
-            update_guest_visible_users_count_and_stream_ids();
+            void update_guest_visible_users_count_and_stream_ids();
         });
 
-        $("#invite-user-modal").on("click", ".setup-tips-container .banner_content a", () => {
+        $("#invite-user-modal").on("click", ".invite-setup-tips-container .banner-link", () => {
             dialog_widget.close();
         });
 
@@ -446,12 +550,11 @@ function open_invite_user_modal(e: JQuery.ClickEvent<Document, undefined>): void
             $(e.target).parent().remove();
         });
 
-        function toggle_invite_submit_button(selected_tab?: string): void {
-            if (selected_tab === undefined) {
-                selected_tab = $(".invite_users_option_tabs")
-                    .find(".selected")
-                    .attr("data-tab-key");
-            }
+        function toggle_invite_submit_button(
+            selected_tab: string | undefined = $(".invite_users_option_tabs")
+                .find(".selected")
+                .attr("data-tab-key"),
+        ): void {
             const valid_custom_time = util.validate_custom_time_input(
                 custom_expiration_time_input,
                 false,
@@ -459,9 +562,10 @@ function open_invite_user_modal(e: JQuery.ClickEvent<Document, undefined>): void
             const $button = $("#invite-user-modal .dialog_submit_button");
             $button.prop(
                 "disabled",
-                (selected_tab === "invite-email-tab" &&
-                    pills.items().length === 0 &&
-                    email_pill.get_current_email(pills) === null) ||
+                !user_has_email_set ||
+                    (selected_tab === "invite-email-tab" &&
+                        email_pill_widget.items().length === 0 &&
+                        email_pill.get_current_email(email_pill_widget) === null) ||
                     ($expires_in.val() === "custom" && !valid_custom_time),
             );
             if (selected_tab === "invite-email-tab") {
@@ -473,11 +577,11 @@ function open_invite_user_modal(e: JQuery.ClickEvent<Document, undefined>): void
             }
         }
 
-        pills.onPillCreate(toggle_invite_submit_button);
-        pills.onPillRemove(() => {
+        email_pill_widget.onPillCreate(toggle_invite_submit_button);
+        email_pill_widget.onPillRemove(() => {
             toggle_invite_submit_button();
         });
-        pills.onTextInputHook(toggle_invite_submit_button);
+        email_pill_widget.onTextInputHook(toggle_invite_submit_button);
 
         $expires_in.on("change", () => {
             if (!util.validate_custom_time_input(custom_expiration_time_input, false)) {
@@ -524,22 +628,39 @@ function open_invite_user_modal(e: JQuery.ClickEvent<Document, undefined>): void
             set_streams_to_join_list_visibility();
         });
 
+        $(
+            "#send_default_realm_welcome_message_custom_text, #send_custom_welcome_message_custom_text",
+        ).on("change", () => {
+            set_welcome_message_custom_text_visibility();
+        });
+
         if (!user_has_email_set) {
             $(util.the($<HTMLFormElement>("form#invite-user-form")).elements).prop(
                 "disabled",
                 true,
             );
+            demo_organizations_ui.show_configure_email_banner();
         }
 
-        const invite_tips_data = generate_invite_tips_data();
-
-        const context = {
-            banner_type: compose_banner.INFO,
-            classname: "setup_tips_banner",
-            ...invite_tips_data,
-        };
-
-        $("#invite-user-form .setup-tips-container").html(render_invite_tips_banner(context));
+        // Render organization settings tips for non-demo organizations
+        // and for users with admin privileges.
+        if (
+            realm.demo_organization_scheduled_deletion_date === undefined &&
+            current_user.is_admin
+        ) {
+            const invite_tips_data = generate_invite_tips_data();
+            const should_show_invite_tips_banner = !(
+                invite_tips_data.realm_has_description &&
+                invite_tips_data.realm_has_user_set_icon &&
+                invite_tips_data.realm_has_custom_profile_fields
+            );
+            if (should_show_invite_tips_banner) {
+                banners.open(
+                    invite_tips_banner(),
+                    $("#invite-user-modal .invite-setup-tips-container"),
+                );
+            }
+        }
 
         const toggler = components.toggle({
             html_class: "invite_users_option_tabs large allow-overflow",
@@ -561,7 +682,7 @@ function open_invite_user_modal(e: JQuery.ClickEvent<Document, undefined>): void
                         break;
                 }
                 toggle_invite_submit_button(key);
-                reset_error_messages();
+                reset_invite_modal_banners();
             },
         });
         const $container = $("#invite_users_option_tabs_container");

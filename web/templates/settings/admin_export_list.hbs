@@ -1,10 +1,10 @@
 {{#with realm_export}}
-<tr class="export_row" id="export_{{id}}">
+<tr class="export_row" id="export_{{id}}" data-export-id="{{id}}">
     <td>
         <span class="acting_user">{{acting_user}}</span>
     </td>
     <td>
-        <span>{{export_type}}</span>
+        <span>{{export_type_description}}</span>
     </td>
     <td>
         <span class="export_time">{{event_time}}</span>
@@ -22,9 +22,13 @@
     </td>
     <td class="actions">
         {{#if url}}
-        <button class="button rounded small delete button-danger" data-export-id="{{id}}">
-            <i class="fa fa-trash-o" aria-hidden="true"></i>
-        </button>
+        {{> ../components/icon_button
+          icon="trash"
+          intent="danger"
+          custom_classes="tippy-zulip-delayed-tooltip delete"
+          data-tippy-content=(t "Delete")
+          aria-label=(t "Delete")
+          }}
         {{/if}}
     </td>
 </tr>

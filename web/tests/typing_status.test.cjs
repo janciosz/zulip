@@ -2,6 +2,7 @@
 
 const assert = require("node:assert/strict");
 
+const {make_realm} = require("./lib/example_realm.cjs");
 const {mock_esm, set_global, zrequire} = require("./lib/namespace.cjs");
 const {run_test} = require("./lib/test.cjs");
 
@@ -11,11 +12,11 @@ const stream_data = mock_esm("../src/stream_data");
 
 const {set_realm} = zrequire("state_data");
 const typing = zrequire("typing");
-const typing_status = zrequire("../shared/src/typing_status");
+const typing_status = zrequire("typing_status");
 const {initialize_user_settings} = zrequire("user_settings");
 
 initialize_user_settings({user_settings: {}});
-const realm = {};
+const realm = make_realm();
 set_realm(realm);
 
 const TYPING_STARTED_WAIT_PERIOD = 10000;
@@ -33,7 +34,7 @@ function returns_time(secs) {
 }
 
 run_test("basics", ({override, override_rewire}) => {
-    override(realm, "realm_mandatory_topics", true);
+    override(realm, "realm_topics_policy", "disable_empty_topic");
     override(realm, "server_typing_started_wait_period_milliseconds", TYPING_STARTED_WAIT_PERIOD);
     override(realm, "server_typing_stopped_wait_period_milliseconds", TYPING_STOPPED_WAIT_PERIOD);
 
@@ -64,12 +65,20 @@ run_test("basics", ({override, override_rewire}) => {
     set_global("clearTimeout", clear_timeout);
 
     function notify_server_start(recipient) {
-        assert.deepStrictEqual(recipient, {message_type: "direct", ids: [1, 2]});
+        assert.deepStrictEqual(recipient, {
+            message_type: "direct",
+            notification_event_type: "typing",
+            ids: [1, 2],
+        });
         events.started = true;
     }
 
     function notify_server_stop(recipient) {
-        assert.deepStrictEqual(recipient, {message_type: "direct", ids: [1, 2]});
+        assert.deepStrictEqual(recipient, {
+            message_type: "direct",
+            notification_event_type: "typing",
+            ids: [1, 2],
+        });
         events.stopped = true;
     }
 
@@ -97,11 +106,11 @@ run_test("basics", ({override, override_rewire}) => {
     };
 
     // Start talking to users having ids - 1, 2.
-    call_handler({message_type: "direct", ids: [1, 2]});
+    call_handler({message_type: "direct", notification_event_type: "typing", ids: [1, 2]});
     assert.deepEqual(typing_status.state, {
         next_send_start_time: make_time(5 + 10),
         idle_timer: "idle_timer_stub",
-        current_recipient: {message_type: "direct", ids: [1, 2]},
+        current_recipient: {message_type: "direct", notification_event_type: "typing", ids: [1, 2]},
     });
     assert.deepEqual(events, {
         idle_callback: events.idle_callback,
@@ -113,11 +122,11 @@ run_test("basics", ({override, override_rewire}) => {
 
     // type again 3 seconds later
     worker.get_current_time = returns_time(8);
-    call_handler({message_type: "direct", ids: [1, 2]});
+    call_handler({message_type: "direct", notification_event_type: "typing", ids: [1, 2]});
     assert.deepEqual(typing_status.state, {
         next_send_start_time: make_time(5 + 10),
         idle_timer: "idle_timer_stub",
-        current_recipient: {message_type: "direct", ids: [1, 2]},
+        current_recipient: {message_type: "direct", notification_event_type: "typing", ids: [1, 2]},
     });
     assert.deepEqual(events, {
         idle_callback: events.idle_callback,
@@ -130,11 +139,11 @@ run_test("basics", ({override, override_rewire}) => {
     // type after 15 secs, so that we can notify the server
     // again
     worker.get_current_time = returns_time(18);
-    call_handler({message_type: "direct", ids: [1, 2]});
+    call_handler({message_type: "direct", notification_event_type: "typing", ids: [1, 2]});
     assert.deepEqual(typing_status.state, {
         next_send_start_time: make_time(18 + 10),
         idle_timer: "idle_timer_stub",
-        current_recipient: {message_type: "direct", ids: [1, 2]},
+        current_recipient: {message_type: "direct", notification_event_type: "typing", ids: [1, 2]},
     });
     assert.deepEqual(events, {
         idle_callback: events.idle_callback,
@@ -167,11 +176,11 @@ run_test("basics", ({override, override_rewire}) => {
 
     // Start talking to users again.
     worker.get_current_time = returns_time(50);
-    call_handler({message_type: "direct", ids: [1, 2]});
+    call_handler({message_type: "direct", notification_event_type: "typing", ids: [1, 2]});
     assert.deepEqual(typing_status.state, {
         next_send_start_time: make_time(50 + 10),
         idle_timer: "idle_timer_stub",
-        current_recipient: {message_type: "direct", ids: [1, 2]},
+        current_recipient: {message_type: "direct", notification_event_type: "typing", ids: [1, 2]},
     });
     assert.deepEqual(events, {
         idle_callback: events.idle_callback,
@@ -193,11 +202,11 @@ run_test("basics", ({override, override_rewire}) => {
 
     // Start talking to users again.
     worker.get_current_time = returns_time(80);
-    call_handler({message_type: "direct", ids: [1, 2]});
+    call_handler({message_type: "direct", notification_event_type: "typing", ids: [1, 2]});
     assert.deepEqual(typing_status.state, {
         next_send_start_time: make_time(80 + 10),
         idle_timer: "idle_timer_stub",
-        current_recipient: {message_type: "direct", ids: [1, 2]},
+        current_recipient: {message_type: "direct", notification_event_type: "typing", ids: [1, 2]},
     });
     assert.deepEqual(events, {
         idle_callback: events.idle_callback,
@@ -229,11 +238,11 @@ run_test("basics", ({override, override_rewire}) => {
 
     // Start talking to users again.
     worker.get_current_time = returns_time(170);
-    call_handler({message_type: "direct", ids: [1, 2]});
+    call_handler({message_type: "direct", notification_event_type: "typing", ids: [1, 2]});
     assert.deepEqual(typing_status.state, {
         next_send_start_time: make_time(170 + 10),
         idle_timer: "idle_timer_stub",
-        current_recipient: {message_type: "direct", ids: [1, 2]},
+        current_recipient: {message_type: "direct", notification_event_type: "typing", ids: [1, 2]},
     });
     assert.deepEqual(events, {
         idle_callback: events.idle_callback,
@@ -247,15 +256,19 @@ run_test("basics", ({override, override_rewire}) => {
     worker.get_current_time = returns_time(171);
 
     worker.notify_server_start = (recipient) => {
-        assert.deepStrictEqual(recipient, {message_type: "direct", ids: [3, 4]});
+        assert.deepStrictEqual(recipient, {
+            message_type: "direct",
+            notification_event_type: "typing",
+            ids: [3, 4],
+        });
         events.started = true;
     };
 
-    call_handler({message_type: "direct", ids: [3, 4]});
+    call_handler({message_type: "direct", notification_event_type: "typing", ids: [3, 4]});
     assert.deepEqual(typing_status.state, {
         next_send_start_time: make_time(171 + 10),
         idle_timer: "idle_timer_stub",
-        current_recipient: {message_type: "direct", ids: [3, 4]},
+        current_recipient: {message_type: "direct", notification_event_type: "typing", ids: [3, 4]},
     });
     assert.deepEqual(events, {
         idle_callback: events.idle_callback,
@@ -270,6 +283,7 @@ run_test("basics", ({override, override_rewire}) => {
     override(compose_state, "get_message_type", () => "stream");
     override(compose_state, "stream_name", () => "Verona");
     override(stream_data, "get_stream_id", () => "2");
+    override(stream_data, "can_use_empty_topic", () => false);
     override(compose_state, "topic", () => "");
     assert.equal(typing.get_recipient(), null);
 
@@ -367,12 +381,22 @@ run_test("stream_messages", ({override, override_rewire}) => {
     set_global("clearTimeout", clear_timeout);
 
     function notify_server_start(recipient) {
-        assert.deepStrictEqual(recipient, {message_type: "stream", stream_id: 3, topic: "test"});
+        assert.deepStrictEqual(recipient, {
+            message_type: "stream",
+            notification_event_type: "typing",
+            stream_id: 3,
+            topic: "test",
+        });
         events.started = true;
     }
 
     function notify_server_stop(recipient) {
-        assert.deepStrictEqual(recipient, {message_type: "stream", stream_id: 3, topic: "test"});
+        assert.deepStrictEqual(recipient, {
+            message_type: "stream",
+            notification_event_type: "typing",
+            stream_id: 3,
+            topic: "test",
+        });
         events.stopped = true;
     }
 
@@ -400,11 +424,21 @@ run_test("stream_messages", ({override, override_rewire}) => {
     };
 
     // Start typing stream message
-    call_handler({message_type: "stream", stream_id: 3, topic: "test"});
+    call_handler({
+        message_type: "stream",
+        notification_event_type: "typing",
+        stream_id: 3,
+        topic: "test",
+    });
     assert.deepEqual(typing_status.state, {
         next_send_start_time: make_time(5 + 10),
         idle_timer: "idle_timer_stub",
-        current_recipient: {message_type: "stream", stream_id: 3, topic: "test"},
+        current_recipient: {
+            message_type: "stream",
+            notification_event_type: "typing",
+            stream_id: 3,
+            topic: "test",
+        },
     });
     assert.deepEqual(events, {
         idle_callback: events.idle_callback,
@@ -416,11 +450,21 @@ run_test("stream_messages", ({override, override_rewire}) => {
 
     // type again 3 seconds later. Covers 'same_stream_and_topic' codepath.
     worker.get_current_time = returns_time(8);
-    call_handler({message_type: "stream", stream_id: 3, topic: "test"});
+    call_handler({
+        message_type: "stream",
+        notification_event_type: "typing",
+        stream_id: 3,
+        topic: "test",
+    });
     assert.deepEqual(typing_status.state, {
         next_send_start_time: make_time(5 + 10),
         idle_timer: "idle_timer_stub",
-        current_recipient: {message_type: "stream", stream_id: 3, topic: "test"},
+        current_recipient: {
+            message_type: "stream",
+            notification_event_type: "typing",
+            stream_id: 3,
+            topic: "test",
+        },
     });
     assert.deepEqual(events, {
         idle_callback: events.idle_callback,
@@ -433,6 +477,188 @@ run_test("stream_messages", ({override, override_rewire}) => {
     // Explicitly stop.
     call_handler(null);
     assert.deepEqual(typing_status.state, null);
+    assert.deepEqual(events, {
+        idle_callback: undefined,
+        started: false,
+        stopped: true,
+        timer_cleared: true,
+    });
+});
+
+run_test("edit_messages", ({override_rewire}) => {
+    override_rewire(typing_status, "state", null);
+
+    let worker = {};
+    const events = {};
+    const message_id = 7;
+
+    function set_timeout(f, delay) {
+        assert.equal(delay, 5000);
+        events.idle_callback = f;
+        return "idle_timer_stub";
+    }
+
+    function clear_timeout() {
+        events.timer_cleared = true;
+    }
+
+    set_global("setTimeout", set_timeout);
+    set_global("clearTimeout", clear_timeout);
+
+    function notify_server_editing_start(recipient) {
+        assert.deepStrictEqual(recipient, {
+            notification_event_type: "typing_message_edit",
+            message_id,
+        });
+        events.started = true;
+    }
+
+    function notify_server_editing_stop(recipient) {
+        assert.deepStrictEqual(recipient, {
+            notification_event_type: "typing_message_edit",
+            message_id,
+        });
+        events.stopped = true;
+    }
+
+    function clear_events() {
+        events.idle_callback = undefined;
+        events.started = false;
+        events.stopped = false;
+        events.timer_cleared = false;
+    }
+
+    function call_handler_start(new_recipient) {
+        clear_events();
+        typing_status.update_editing_status(
+            worker,
+            new_recipient,
+            "start",
+            TYPING_STARTED_WAIT_PERIOD,
+            TYPING_STOPPED_WAIT_PERIOD,
+        );
+    }
+
+    function call_handler_stop(new_recipient) {
+        clear_events();
+        typing_status.update_editing_status(
+            worker,
+            new_recipient,
+            "stop",
+            TYPING_STARTED_WAIT_PERIOD,
+            TYPING_STOPPED_WAIT_PERIOD,
+        );
+    }
+
+    worker = {
+        get_current_time: returns_time(5),
+        notify_server_editing_start,
+        notify_server_editing_stop,
+    };
+
+    // Start typing stream message
+    call_handler_start({
+        notification_event_type: "typing_message_edit",
+        message_id,
+    });
+    assert.deepEqual(typing_status.editing_state.get(message_id), {
+        next_send_start_time: make_time(5 + 10),
+        idle_timer: "idle_timer_stub",
+        current_recipient: {
+            notification_event_type: "typing_message_edit",
+            message_id,
+        },
+    });
+    assert.deepEqual(events, {
+        idle_callback: events.idle_callback,
+        started: true,
+        stopped: false,
+        timer_cleared: false,
+    });
+    assert.ok(events.idle_callback);
+
+    worker.get_current_time = returns_time(8);
+    call_handler_start({
+        notification_event_type: "typing_message_edit",
+        message_id,
+    });
+    assert.deepEqual(typing_status.editing_state.get(message_id), {
+        next_send_start_time: make_time(5 + 10),
+        idle_timer: "idle_timer_stub",
+        current_recipient: {
+            notification_event_type: "typing_message_edit",
+            message_id,
+        },
+    });
+    assert.deepEqual(events, {
+        idle_callback: events.idle_callback,
+        started: false,
+        stopped: false,
+        timer_cleared: true,
+    });
+    assert.ok(events.idle_callback);
+
+    worker.get_current_time = returns_time(18);
+    call_handler_start({
+        notification_event_type: "typing_message_edit",
+        message_id,
+    });
+    assert.deepEqual(typing_status.editing_state.get(message_id), {
+        next_send_start_time: make_time(18 + 10),
+        idle_timer: "idle_timer_stub",
+        current_recipient: {
+            notification_event_type: "typing_message_edit",
+            message_id,
+        },
+    });
+    assert.deepEqual(events, {
+        idle_callback: events.idle_callback,
+        started: true,
+        stopped: false,
+        timer_cleared: true,
+    });
+    assert.ok(events.idle_callback);
+
+    // Now call recipients idle callback that we captured earlier.
+    const callback = events.idle_callback;
+    clear_events();
+    callback();
+    assert.deepEqual(typing_status.editing_state.get(message_id), undefined);
+    assert.deepEqual(events, {
+        idle_callback: undefined,
+        started: false,
+        stopped: true,
+        timer_cleared: true,
+    });
+
+    // Start editing message again.
+    worker.get_current_time = returns_time(50);
+    call_handler_start({
+        notification_event_type: "typing_message_edit",
+        message_id,
+    });
+    assert.deepEqual(typing_status.editing_state.get(message_id), {
+        next_send_start_time: make_time(50 + 10),
+        idle_timer: "idle_timer_stub",
+        current_recipient: {
+            notification_event_type: "typing_message_edit",
+            message_id,
+        },
+    });
+    assert.deepEqual(events, {
+        idle_callback: events.idle_callback,
+        started: true,
+        stopped: false,
+        timer_cleared: false,
+    });
+    assert.ok(events.idle_callback);
+
+    // Explicitly stop.
+    call_handler_stop({
+        notification_event_type: "typing_message_edit",
+        message_id,
+    });
+    assert.deepEqual(typing_status.editing_state.get(message_id), undefined);
     assert.deepEqual(events, {
         idle_callback: undefined,
         started: false,

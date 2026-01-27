@@ -23,10 +23,8 @@ page_params.test_suite = false;
 // we also directly write to pointer
 set_global("pointer", {});
 
-mock_esm("../src/ui_report", {
-    hide_error() {
-        return false;
-    },
+mock_esm("../src/popup_banners", {
+    close_connection_error_popup_banner() {},
 });
 
 mock_esm("../src/stream_events", {
@@ -77,7 +75,6 @@ const message = {
     submessages: [],
     sender_full_name: "user1",
     sender_email: "user2@foo.com",
-    sender_realm_str: "foo",
     display_recipient: "test",
     type: "stream",
     stream_id: 1,
@@ -95,7 +92,8 @@ run_test("message_event", ({override}) => {
     };
 
     let inserted;
-    override(message_events, "insert_new_messages", (messages) => {
+    override(message_events, "insert_new_messages", (message_data) => {
+        const messages = message_data.raw_messages;
         assert.equal(messages[0].content, event.message.content);
         inserted = true;
         return messages;

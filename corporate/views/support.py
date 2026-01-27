@@ -4,8 +4,8 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import timedelta
 from operator import attrgetter
-from typing import Annotated, Any, Literal
-from urllib.parse import urlencode, urlsplit
+from typing import Annotated, Any, Literal, get_args
+from urllib.parse import urlsplit
 
 from django import forms
 from django.conf import settings
@@ -27,9 +27,10 @@ from corporate.lib.activity import (
     remote_installation_stats_link,
 )
 from corporate.lib.billing_types import BillingModality
-from corporate.models import CustomerPlan
+from corporate.models.plans import CustomerPlan
 from zerver.actions.create_realm import do_change_realm_subdomain
 from zerver.actions.realm_settings import (
+    RealmDeactivationReasonType,
     do_change_realm_max_invites,
     do_change_realm_org_type,
     do_change_realm_plan_type,
@@ -87,6 +88,11 @@ class DemoRequestForm(forms.Form):
     SORTED_ORG_TYPE_NAMES = sorted(
         ([org_type["name"] for org_type in Realm.ORG_TYPES.values() if not org_type["hidden"]]),
     )
+    TYPE_OF_HOSTING_OPTIONS = [
+        "Zulip Cloud",
+        "Self-hosting",
+        "Both / not sure",
+    ]
     full_name = forms.CharField(max_length=MAX_INPUT_LENGTH)
     email = forms.EmailField()
     role = forms.CharField(max_length=MAX_INPUT_LENGTH)
@@ -94,6 +100,7 @@ class DemoRequestForm(forms.Form):
     organization_type = forms.CharField()
     organization_website = forms.URLField(required=True, assume_scheme="https")
     expected_user_count = forms.CharField(max_length=MAX_INPUT_LENGTH)
+    type_of_hosting = forms.CharField()
     message = forms.CharField(widget=forms.Textarea)
 
 
@@ -157,6 +164,7 @@ def demo_request(request: HttpRequest) -> HttpResponse:
     context = {
         "MAX_INPUT_LENGTH": DemoRequestForm.MAX_INPUT_LENGTH,
         "SORTED_ORG_TYPE_NAMES": DemoRequestForm.SORTED_ORG_TYPE_NAMES,
+        "TYPE_OF_HOSTING_OPTIONS": DemoRequestForm.TYPE_OF_HOSTING_OPTIONS,
     }
 
     if request.POST:
@@ -174,6 +182,7 @@ def demo_request(request: HttpRequest) -> HttpResponse:
                 "organization_type": form.cleaned_data["organization_type"],
                 "organization_website": form.cleaned_data["organization_website"],
                 "expected_user_count": form.cleaned_data["expected_user_count"],
+                "type_of_hosting": form.cleaned_data["type_of_hosting"],
                 "message": form.cleaned_data["message"],
             }
             # Sent to the server's sales team, so this email is not user-facing.
@@ -409,7 +418,9 @@ def support(
     minimum_licenses: Json[NonNegativeInt] | None = None,
     required_plan_tier: Json[NonNegativeInt] | None = None,
     new_subdomain: str | None = None,
+    add_redirect_url: str | None = None,
     status: RemoteServerStatus | None = None,
+    deactivation_reason: RealmDeactivationReasonType | None = None,
     billing_modality: BillingModality | None = None,
     sponsorship_pending: Json[bool] | None = None,
     approve_sponsorship: Json[bool] = False,
@@ -442,11 +453,6 @@ def support(
     acting_user = request.user
     assert isinstance(acting_user, UserProfile)
     if settings.BILLING_ENABLED and request.method == "POST":
-        # We check that request.POST only has two keys in it: The
-        # realm_id and a field to change.
-        keys = set(request.POST.keys())
-        keys.discard("csrfmiddlewaretoken")
-
         assert realm_id is not None
         realm = Realm.objects.get(id=realm_id)
 
@@ -532,19 +538,27 @@ def support(
                     f"Cannot update maximum number of daily invitations for {realm.string_id}, because {update_text}."
                 )
         elif new_subdomain is not None:
+            add_deactivated_redirect = True
+            if add_redirect_url is None:
+                add_deactivated_redirect = False
+            else:
+                assert add_redirect_url == "true"
             old_subdomain = realm.string_id
             try:
                 check_subdomain_available(new_subdomain)
             except ValidationError as error:
                 context["error_message"] = error.message
             else:
-                do_change_realm_subdomain(realm, new_subdomain, acting_user=acting_user)
+                do_change_realm_subdomain(
+                    realm,
+                    new_subdomain,
+                    acting_user=acting_user,
+                    add_deactivated_redirect=add_deactivated_redirect,
+                )
                 request.session["success_message"] = (
                     f"Subdomain changed from {old_subdomain} to {new_subdomain}"
                 )
-                return HttpResponseRedirect(
-                    reverse("support") + "?" + urlencode({"q": new_subdomain})
-                )
+                return HttpResponseRedirect(reverse("support", query={"q": new_subdomain}))
         elif status is not None:
             if status == "active":
                 do_send_realm_reactivation_email(realm, acting_user=acting_user)
@@ -552,12 +566,11 @@ def support(
                     f"Realm reactivation email sent to admins of {realm.string_id}."
                 )
             elif status == "deactivated":
-                # TODO: Add support for deactivation reason in the support UI that'll be passed
-                # here.
+                assert deactivation_reason is not None
                 do_deactivate_realm(
                     realm,
                     acting_user=acting_user,
-                    deactivation_reason="owner_request",
+                    deactivation_reason=deactivation_reason,
                     email_owners=True,
                 )
                 context["success_message"] = f"{realm.string_id} deactivated."
@@ -568,7 +581,7 @@ def support(
             user_profile_for_deletion = get_user_profile_by_id(delete_user_by_id)
             user_email = user_profile_for_deletion.delivery_email
             assert user_profile_for_deletion.realm == realm
-            do_delete_user_preserving_messages(user_profile_for_deletion)
+            do_delete_user_preserving_messages(user_profile_for_deletion, acting_user=acting_user)
             context["success_message"] = f"{user_email} in {realm.subdomain} deleted."
 
         if support_view_request is not None:
@@ -599,6 +612,7 @@ def support(
                 if parse_result.port:
                     hostname = f"{hostname}:{parse_result.port}"
                 subdomain = get_subdomain_from_hostname(hostname)
+                assert subdomain is not None
                 with suppress(Realm.DoesNotExist):
                     realms.add(get_realm(subdomain))
             except ValidationError:
@@ -625,7 +639,7 @@ def support(
             user.id for user in PreregistrationRealm.objects.filter(email__in=key_words)
         ]
         confirmations += get_confirmations(
-            [Confirmation.REALM_CREATION],
+            [Confirmation.NEW_REALM_USER_REGISTRATION],
             preregistration_realm_ids,
             hostname=request.get_host(),
         )
@@ -686,7 +700,9 @@ def support(
     context["ORGANIZATION_TYPES"] = sorted(
         Realm.ORG_TYPES.values(), key=lambda d: d["display_order"]
     )
+    context["DEACTIVATION_REASONS"] = get_args(RealmDeactivationReasonType)
     context["remote_support_view"] = False
+    context["format_optional_datetime"] = format_optional_datetime
 
     return render(request, "corporate/support/support.html", context=context)
 
@@ -763,8 +779,8 @@ def remote_servers_support(
     modify_plan: ModifyPlan | None = None,
     delete_fixed_price_next_plan: Json[bool] = False,
     remote_server_status: RemoteServerStatus | None = None,
-    temporary_courtesy_plan: Annotated[
-        str, AfterValidator(lambda x: check_date("temporary_courtesy_plan", x))
+    complimentary_access_plan: Annotated[
+        str, AfterValidator(lambda x: check_date("complimentary_access_plan", x))
     ]
     | None = None,
 ) -> HttpResponse:
@@ -834,10 +850,10 @@ def remote_servers_support(
                 fixed_price=fixed_price,
                 sent_invoice_id=sent_invoice_id,
             )
-        elif temporary_courtesy_plan is not None:
+        elif complimentary_access_plan is not None:
             support_view_request = SupportViewRequest(
-                support_type=SupportType.configure_temporary_courtesy_plan,
-                plan_end_date=temporary_courtesy_plan,
+                support_type=SupportType.configure_complimentary_access_plan,
+                plan_end_date=complimentary_access_plan,
             )
         elif billing_modality is not None:
             support_view_request = SupportViewRequest(

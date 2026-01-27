@@ -11,11 +11,12 @@ from django.test import override_settings
 from django.utils.timezone import now as timezone_now
 from typing_extensions import override
 
+from zerver.actions.channel_folders import check_add_channel_folder
 from zerver.actions.custom_profile_fields import try_update_realm_custom_profile_field
 from zerver.actions.message_send import check_send_message
 from zerver.actions.presence import do_update_user_presence
+from zerver.actions.streams import do_change_stream_folder
 from zerver.actions.user_settings import do_change_user_setting
-from zerver.actions.users import do_change_user_role
 from zerver.lib.event_schema import check_web_reload_client_event
 from zerver.lib.events import fetch_initial_state_data, post_process_state
 from zerver.lib.exceptions import AccessDeniedError
@@ -27,10 +28,10 @@ from zerver.lib.test_helpers import (
     reset_email_visibility_to_everyone_in_zulip_realm,
     stub_event_queue_user_events,
 )
-from zerver.lib.users import get_api_key, get_users_for_api
+from zerver.lib.users import get_users_for_api
 from zerver.models import CustomProfileField, UserMessage, UserPresence, UserProfile
 from zerver.models.clients import get_client
-from zerver.models.realms import get_realm, get_realm_with_settings
+from zerver.models.realms import get_realm
 from zerver.models.streams import get_stream
 from zerver.models.users import get_system_bot
 from zerver.tornado.event_queue import (
@@ -171,7 +172,7 @@ class EventsEndpointTest(ZulipTestCase):
                 status_code=401,
             )
 
-        with self.assert_database_query_count(17):
+        with self.assert_database_query_count(15):
             result = self.client_post("/json/register")
             result_dict = self.assert_json_success(result)
             self.assertEqual(result_dict["queue_id"], None)
@@ -197,6 +198,32 @@ class EventsEndpointTest(ZulipTestCase):
             "Invalid 'include_subscribers' parameter for anonymous request",
             status_code=400,
         )
+
+    def test_channel_folders_for_spectators(self) -> None:
+        realm = get_realm("zulip")
+        iago = self.example_user("iago")
+
+        frontend_folder = check_add_channel_folder(realm, "Frontend", "", acting_user=iago)
+        backend_folder = check_add_channel_folder(realm, "Backend", "", acting_user=iago)
+
+        result = self.client_post("/json/register")
+        self.assertEqual(result.status_code, 200)
+
+        channel_folders_data = orjson.loads(result.content)["channel_folders"]
+        self.assert_length(channel_folders_data, 0)
+
+        web_public_stream = get_stream("Rome", realm)
+        do_change_stream_folder(web_public_stream, frontend_folder, acting_user=iago)
+
+        public_stream = get_stream("Verona", realm)
+        do_change_stream_folder(public_stream, backend_folder, acting_user=iago)
+
+        result = self.client_post("/json/register")
+        self.assertEqual(result.status_code, 200)
+
+        channel_folders_data = orjson.loads(result.content)["channel_folders"]
+        self.assert_length(channel_folders_data, 1)
+        self.assertEqual(channel_folders_data[0]["name"], "Frontend")
 
     def test_events_register_endpoint_all_public_streams_access(self) -> None:
         guest_user = self.example_user("polonius")
@@ -627,13 +654,13 @@ class FetchInitialStateDataTest(ZulipTestCase):
         self.assert_length(result["realm_bots"], 0)
 
         # additionally the API key for a random bot is not present in the data
-        api_key = get_api_key(self.notification_bot(user_profile.realm))
+        api_key = self.notification_bot(user_profile.realm).api_key
         self.assertNotIn(api_key, str(result))
 
     # Admin users have access to all bots in the realm_bots field
     def test_realm_bots_admin(self) -> None:
         user_profile = self.example_user("hamlet")
-        do_change_user_role(user_profile, UserProfile.ROLE_REALM_ADMINISTRATOR, acting_user=None)
+        self.set_user_role(user_profile, UserProfile.ROLE_REALM_ADMINISTRATOR)
         self.assertTrue(user_profile.is_realm_admin)
         result = fetch_initial_state_data(user_profile, realm=user_profile.realm)
         self.assertGreater(len(result["realm_bots"]), 2)
@@ -753,33 +780,6 @@ class FetchInitialStateDataTest(ZulipTestCase):
                 self.assertIsNone(user_dict["avatar_url"])
             else:
                 self.assertFalse("avatar_url" in user_dict)
-
-    def test_user_settings_based_on_client_capabilities(self) -> None:
-        hamlet = self.example_user("hamlet")
-        result = fetch_initial_state_data(
-            user_profile=hamlet,
-            realm=hamlet.realm,
-            user_settings_object=True,
-        )
-        self.assertIn("user_settings", result)
-        for prop in UserProfile.property_types:
-            self.assertNotIn(prop, result)
-            self.assertIn(prop, result["user_settings"])
-
-        result = fetch_initial_state_data(
-            user_profile=hamlet,
-            realm=hamlet.realm,
-            user_settings_object=False,
-        )
-        self.assertIn("user_settings", result)
-        for prop in UserProfile.property_types:
-            if prop in {
-                **UserProfile.display_settings_legacy,
-                **UserProfile.notification_settings_legacy,
-            }:
-                # Only legacy settings are included in the top level.
-                self.assertIn(prop, result)
-            self.assertIn(prop, result["user_settings"])
 
     def test_realm_linkifiers_based_on_client_capabilities(self) -> None:
         user = self.example_user("iago")
@@ -1212,29 +1212,34 @@ class FetchQueriesTest(ZulipTestCase):
 
         self.login_user(user)
 
-        # Fetch realm like it is done when calling fetch_initial_state_data
-        # in production to match the query counts with the actual query
-        # count in production.
-        realm = get_realm_with_settings(realm_id=user.realm_id)
-
         with (
-            self.assert_database_query_count(45),
+            self.assert_database_query_count(48),
             mock.patch("zerver.lib.events.always_want") as want_mock,
         ):
-            fetch_initial_state_data(user, realm=realm)
+            fetch_initial_state_data(user, realm=user.realm)
 
         expected_counts = dict(
             alert_words=1,
+            channel_folders=1,
             custom_profile_fields=1,
             default_streams=1,
             default_stream_groups=1,
             drafts=1,
+            giphy=0,
+            tenor=0,
             message=1,
             muted_topics=1,
             muted_users=1,
+            navigation_views=1,
             onboarding_steps=1,
             presence=1,
-            realm=1,
+            push_device=1,
+            # 2 of the 3 queries here are a single query that is used
+            # for all the 'realm', 'stream', 'subscription'
+            # and 'realm_user_groups' event types.
+            realm=3,
+            # Similarly, this query is shared with the realm_user total.
+            realm_billing=1,
             realm_bot=1,
             realm_domains=1,
             realm_embedded_bots=0,
@@ -1244,33 +1249,30 @@ class FetchQueriesTest(ZulipTestCase):
             realm_linkifiers=0,
             realm_playgrounds=1,
             realm_user=4,
-            realm_user_groups=3,
+            realm_user_groups=2,
             realm_user_settings_defaults=1,
             recent_private_conversations=1,
+            reminders=1,
             saved_snippets=1,
             scheduled_messages=1,
             starred_messages=1,
+            # 3 of the 5 queries here are shared with other event types
+            # as mentioned above.
             stream=5,
             stop_words=0,
-            subscription=7,
-            update_display_settings=0,
-            update_global_notifications=0,
-            update_message_flags=5,
+            # 3 of the 9 queries here are shared with other event types
+            # as mentioned above.
+            subscription=9,
+            update_message_flags=7,
             user_settings=0,
             user_status=1,
             user_topic=1,
             video_calls=0,
-            giphy=0,
         )
 
         wanted_event_types = {item[0][0] for item in want_mock.call_args_list}
 
         self.assertEqual(wanted_event_types, set(expected_counts))
-
-        # Fetch realm again here so that the cached foreign key fields
-        # while testing the above case does not reduce the query count
-        # and we test the actual query count for each event type.
-        realm = get_realm_with_settings(realm_id=user.realm_id)
 
         for event_type in sorted(wanted_event_types):
             count = expected_counts[event_type]
@@ -1280,7 +1282,7 @@ class FetchQueriesTest(ZulipTestCase):
                 else:
                     event_types = [event_type]
 
-                fetch_initial_state_data(user, realm=realm, event_types=event_types)
+                fetch_initial_state_data(user, realm=user.realm, event_types=event_types)
 
 
 class TestEventsRegisterAllPublicStreamsDefaults(ZulipTestCase):

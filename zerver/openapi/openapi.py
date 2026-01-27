@@ -470,7 +470,7 @@ def validate_test_response(request: Request, response: Response) -> bool:
         return True
     # Code is not declared but appears in various 400 responses. If
     # common, it can be added to 400 response schema
-    if status_code.startswith("4"):
+    if status_code.startswith("4") or status_code == "502":
         # This return statement should ideally be not here. But since
         # we have not defined 400 responses for various paths this has
         # been added as all 400 have the same schema.  When all 400
@@ -526,13 +526,13 @@ def deprecated_note_in_description(description: str) -> bool:
 def check_deprecated_consistency(deprecated: bool, description: str) -> None:
     # Test to make sure deprecated parameters are marked so.
     if deprecated_note_in_description(description):
-        assert (
-            deprecated
-        ), f"Missing `deprecated: true` despite being described as deprecated:\n\n{description}\n"
+        assert deprecated, (
+            f"Missing `deprecated: true` despite being described as deprecated:\n\n{description}\n"
+        )
     if deprecated:
-        assert deprecated_note_in_description(
-            description
-        ), f"Marked as `deprecated: true`, but changes documentation doesn't properly explain as **Deprecated** in the standard format\n\n:{description}\n"
+        assert deprecated_note_in_description(description), (
+            f"Marked as `deprecated: true`, but changes documentation doesn't properly explain as **Deprecated** in the standard format\n\n:{description}\n"
+        )
 
 
 # Skip those JSON endpoints whose query parameters are different from

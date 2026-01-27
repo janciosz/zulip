@@ -12,15 +12,13 @@ TOPIC_DEPLOYMENT = "public-repo / Deployment on production"
 TOPIC_ORGANIZATION = "baxterandthehackers organization"
 TOPIC_BRANCH = "public-repo / changes"
 TOPIC_WIKI = "public-repo / wiki pages"
-TOPIC_DISCUSSION = "testing-gh discussion #20: Lets discuss"
+TOPIC_DISCUSSION = "webhook-tester discussion #3: Tips for Writing Clear and ..."
+TOPIC_DISCUSSION_ANSWERS = "webhook-tester discussion #5: Understanding Project Direc..."
+TOPIC_DISCUSSION_COMMENT = "testing-gh discussion #20: Lets discuss"
 TOPIC_SPONSORS = "sponsors"
 
 
 class GitHubWebhookTest(WebhookTestCase):
-    CHANNEL_NAME = "github"
-    URL_TEMPLATE = "/api/v1/external/github?stream={stream}&api_key={api_key}"
-    WEBHOOK_DIR_NAME = "github"
-
     def test_ping_event(self) -> None:
         expected_message = "GitHub webhook has been successfully configured by TomaszKolek."
         self.check_webhook("ping", TOPIC_REPO, expected_message)
@@ -115,6 +113,17 @@ class GitHubWebhookTest(WebhookTestCase):
         commit_info = "* Update README.md ([0d1a26e67d8](https://github.com/baxterthehacker/public-repo/commit/0d1a26e67d8f5eaf1f6ba5c57fc3c7d91ac0fd1c))\n"
         expected_message = f"baxterthehacker [pushed](https://github.com/baxterthehacker/public-repo/compare/9049f1265b7d...0d1a26e67d8f) 50 commits to branch changes.\n\n{commit_info * COMMITS_LIMIT}[and 30 more commit(s)]"
         self.check_webhook("push__50_commits", TOPIC_BRANCH, expected_message)
+
+    def test_push_1_commit_with_repository_name(self) -> None:
+        self.url = self.build_webhook_url(include_repository_name="true")
+        expected_message = "baxterthehacker [pushed](https://github.com/baxterthehacker/public-repo/compare/9049f1265b7d...0d1a26e67d8f) 1 commit to branch changes of [baxterthehacker/public-repo](https://github.com/baxterthehacker/public-repo).\n\n* Update README.md ([0d1a26e67d8](https://github.com/baxterthehacker/public-repo/commit/0d1a26e67d8f5eaf1f6ba5c57fc3c7d91ac0fd1c))"
+        self.check_webhook("push__1_commit", TOPIC_BRANCH, expected_message)
+
+    def test_push_multiple_committers_with_repository_name(self) -> None:
+        self.url = self.build_webhook_url(include_repository_name="true")
+        commits_info = "* Update README.md ([0d1a26e67d8](https://github.com/baxterthehacker/public-repo/commit/0d1a26e67d8f5eaf1f6ba5c57fc3c7d91ac0fd1c))\n"
+        expected_message = f"""baxterthehacker [pushed](https://github.com/baxterthehacker/public-repo/compare/9049f1265b7d...0d1a26e67d8f) 6 commits to branch changes of [baxterthehacker/public-repo](https://github.com/baxterthehacker/public-repo). Commits by Tomasz (3), Ben (2) and baxterthehacker (1).\n\n{commits_info * 5}* Update README.md ([0d1a26e67d8](https://github.com/baxterthehacker/public-repo/commit/0d1a26e67d8f5eaf1f6ba5c57fc3c7d91ac0fd1c))"""
+        self.check_webhook("push__multiple_committers", TOPIC_BRANCH, expected_message)
 
     def test_commit_comment_msg(self) -> None:
         expected_message = "baxterthehacker [commented](https://github.com/baxterthehacker/public-repo/commit/9049f1265b7d61be4a8904a9a27120d2064dab3b#commitcomment-11056394) on [9049f1265b7](https://github.com/baxterthehacker/public-repo/commit/9049f1265b7d61be4a8904a9a27120d2064dab3b):\n~~~ quote\nThis is a really good change! :+1:\n~~~"
@@ -225,6 +234,24 @@ class GitHubWebhookTest(WebhookTestCase):
         expected_message = "[sbansal1999](https://github.com/sbansal1999) removed milestone [some_random_milestone](https://github.com/sbansal1999/testing-gh/milestone/1) from [issue #6](https://github.com/sbansal1999/testing-gh/issues/6)."
 
         self.check_webhook("issues__demilestoned", expected_topic_name, expected_message)
+
+    def test_issue_transfer_transferred_message(self) -> None:
+        expected_message = "Aditya8840 transferred [issue #4 Fixture collection](https://github.com/CrisisCollab/TestWebhook/issues/4) to [CrisisCollab/admin-frontend-mvp/#4](https://github.com/CrisisCollab/admin-frontend-mvp/issues/4)."
+        expected_topic_name = "TestWebhook / issue #4 Fixture collection"
+        self.check_webhook(
+            "issues__transferred",
+            expected_topic_name,
+            expected_message,
+        )
+
+    def test_issue_transfer_opened_message(self) -> None:
+        expected_message = "[Issue #4 Fixture collection](https://github.com/CrisisCollab/admin-frontend-mvp/issues/4) was transferred from [CrisisCollab/TestWebhook#4](https://github.com/CrisisCollab/TestWebhook/issues/4)."
+        expected_topic_name = "admin-frontend-mvp / issue #4 Fixture collection"
+        self.check_webhook(
+            "issues__opened_via_transfer",
+            expected_topic_name,
+            expected_message,
+        )
 
     def test_membership_msg(self) -> None:
         expected_message = (
@@ -457,6 +484,58 @@ class GitHubWebhookTest(WebhookTestCase):
         expected_message = "**eeshangarg** requested [showell](https://github.com/showell) for a review on [PR #1 This is just a test commit](https://github.com/eeshangarg/Scheduler/pull/1)."
         self.check_webhook("pull_request__review_requested", expected_topic_name, expected_message)
 
+    def test_pull_request_labeled_msg(self) -> None:
+        expected_message = "soheil-star01 added the label `documentation` on [PR #1](https://github.com/soheil-star01/soheil-star01/pull/1)."
+        self.check_webhook(
+            "pull_request__labeled", "soheil-star01 / PR #1 test webhook", expected_message
+        )
+
+    def test_pull_request_unlabeled_msg(self) -> None:
+        expected_message = "soheil-star01 removed the label `documentation` from [PR #1](https://github.com/soheil-star01/soheil-star01/pull/1)."
+        self.check_webhook(
+            "pull_request__unlabeled", "soheil-star01 / PR #1 test webhook", expected_message
+        )
+
+    def test_pull_request_review_request_removed_msg(self) -> None:
+        expected_message = "soheil-star01 unassigned redolat from [PR #1 Feat/webhook](https://github.com/techpillars-oy/test1/pull/1)."
+        self.check_webhook(
+            "pull_request__review_request_removed", "test1 / PR #1 Feat/webhook", expected_message
+        )
+
+    def test_pull_request_milestoned_msg(self) -> None:
+        expected_message = "soheil-star01 linked [PR #1](https://github.com/soheil-star01/soheil-star01/pull/1) to the milestone `new_ms`."
+        self.check_webhook(
+            "pull_request__milestoned", "soheil-star01 / PR #1 test webhook", expected_message
+        )
+
+    def test_pull_request_demilestoned_msg(self) -> None:
+        expected_message = "soheil-star01 unlinked [PR #1](https://github.com/soheil-star01/soheil-star01/pull/1) from the milestone `new_ms`."
+        self.check_webhook(
+            "pull_request__demilestoned", "soheil-star01 / PR #1 test webhook", expected_message
+        )
+
+    def test_pull_request_enqueued_msg(self) -> None:
+        expected_message = "soheil-star01 added [PR #1 Feat/webhook](https://github.com/techpillars-oy/test1/pull/1) to the merge queue."
+        self.check_webhook("pull_request__enqueued", "test1 / PR #1 Feat/webhook", expected_message)
+
+    def test_pull_request_dequeued_msg(self) -> None:
+        expected_message = "soheil-star01 removed [PR #1 Feat/webhook](https://github.com/techpillars-oy/test1/pull/1) from the merge queue."
+        self.check_webhook("pull_request__dequeued", "test1 / PR #1 Feat/webhook", expected_message)
+
+    def test_pull_request_reopened_msg(self) -> None:
+        expected_message = "soheil-star01 reopened [PR #7](https://github.com/soheil-star01/soheil-star01/pull/7) from `soheil-star01:feat/webhook` to `soheil-star01:main`."
+        self.check_webhook(
+            "pull_request__reopened", "soheil-star01 / PR #7 Feat/webhook", expected_message
+        )
+
+    def test_pull_request_converted_to_draft_msg(self) -> None:
+        expected_message = "soheil-star01 converted [PR #1 test webhook](https://github.com/soheil-star01/soheil-star01/pull/1) to a draft."
+        self.check_webhook(
+            "pull_request__converted_to_draft",
+            "soheil-star01 / PR #1 test webhook",
+            expected_message,
+        )
+
     def test_check_run(self) -> None:
         expected_topic_name = "hello-world / checks"
         expected_message = """
@@ -497,19 +576,6 @@ A temporary team so that I can get some webhook fixtures!
     def test_check_run_in_progress_ignore(self) -> None:
         payload = self.get_body("check_run__in_progress")
         self.verify_post_is_ignored(payload, "check_run")
-
-    def test_ignored_pull_request_actions(self) -> None:
-        ignored_actions = [
-            "approved",
-            "converted_to_draft",
-            "labeled",
-            "review_request_removed",
-            "unlabeled",
-        ]
-        for action in ignored_actions:
-            data = dict(action=action)
-            payload = orjson.dumps(data).decode()
-            self.verify_post_is_ignored(payload, "pull_request")
 
     def test_pull_request_review_edited_empty_changes_ignore(self) -> None:
         payload = self.get_body("pull_request_review__edited_empty_changes")
@@ -571,7 +637,7 @@ A temporary team so that I can get some webhook fixtures!
             self.verify_post_is_ignored(payload, event)
 
     def test_team_edited_with_unsupported_keys(self) -> None:
-        self.subscribe(self.test_user, self.CHANNEL_NAME)
+        self.subscribe(self.test_user, self.channel_name)
 
         event = "team"
         payload = dict(
@@ -596,7 +662,7 @@ A temporary team so that I can get some webhook fixtures!
 
         self.assert_channel_message(
             message=channel_message,
-            channel_name=self.CHANNEL_NAME,
+            channel_name=self.channel_name,
             topic_name="team My Team",
             content="Team has changes to `bogus_key1/bogus_key2` data.",
         )
@@ -611,13 +677,80 @@ A temporary team so that I can get some webhook fixtures!
         )
         self.assertTrue(stack_info)
 
-    def test_discussion_msg(self) -> None:
-        expected_message = "sbansal1999 created [discussion #20](https://github.com/sbansal1999/testing-gh/discussions/20) in General:\n\n~~~ quote\n### Lets discuss\nSome random text about which no one cares.\r\n\n~~~"
-        self.check_webhook("discussion", TOPIC_DISCUSSION, expected_message)
+    def test_discussion_answered(self) -> None:
+        expected_message = "Niloth-p marked [comment #11460065](https://github.com/Niloth-p/webhook-tester/discussions/5#discussioncomment-11460065) as the answer:\n\n~~~ quote\nIf you're looking for a detailed explanation of the project structure, I'd recommend checking out our CONTRIBUTING.md file. It includes a breakdown of the different directories and files, as well as some guidelines for contributing to the project.\n~~~"
+        self.check_webhook("discussion__answered", TOPIC_DISCUSSION_ANSWERS, expected_message)
+
+    def test_discussion_category_changed(self) -> None:
+        expected_message = "Niloth-p changed the category of [discussion #3](https://github.com/Niloth-p/webhook-tester/discussions/3) from General to Ideas."
+        self.check_webhook("discussion__category_changed", TOPIC_DISCUSSION, expected_message)
+
+    def test_discussion_category_changed_with_custom_topic_in_url(self) -> None:
+        self.url = self.build_webhook_url(topic="discussions")
+        expected_topic_name = "discussions"
+        expected_message = "Niloth-p changed the category of [discussion #3 Tips for Writing Clear and Concise Commit Messages](https://github.com/Niloth-p/webhook-tester/discussions/3) from General to Ideas."
+        self.check_webhook("discussion__category_changed", expected_topic_name, expected_message)
+
+    def test_discussion_created(self) -> None:
+        expected_message = "Niloth-p created [discussion #3](https://github.com/Niloth-p/webhook-tester/discussions/3) in General:\n\n~~~ quote\n### Tips for Writing Clear and Concise Commit Messages\nWriting good commit messages is an art, but it's also an important part of maintaining a clear and understandable project history. What are some tips and tricks you've learned for writing clear and concise commit messages? Do you have any favorite templates or formats?\n~~~"
+        self.check_webhook("discussion__created", TOPIC_DISCUSSION, expected_message)
+
+    def test_discussion_closed(self) -> None:
+        expected_message = "Cordelia closed [discussion #3](https://github.com/Niloth-p/webhook-tester/discussions/3) as resolved."
+        self.check_webhook("discussion__closed", TOPIC_DISCUSSION, expected_message)
+
+    def test_discussion_deleted(self) -> None:
+        expected_message = "Niloth-p deleted discussion #3."
+        self.check_webhook("discussion__deleted", TOPIC_DISCUSSION, expected_message)
+
+    def test_discussion_edited_title(self) -> None:
+        expected_topic = "webhook-tester discussion #3: Tips for Writing Good Commi..."
+        expected_message = "Niloth-p edited the title of [discussion #3](https://github.com/Niloth-p/webhook-tester/discussions/3):\n\n~~~ quote\n### Tips for Writing Good Commit Messages\n~~~"
+        self.check_webhook("discussion__edited_title", expected_topic, expected_message)
+
+    def test_discussion_edited_body(self) -> None:
+        expected_message = "Niloth-p edited [discussion #3](https://github.com/Niloth-p/webhook-tester/discussions/3):\n\n~~~ quote\nWriting good commit messages is an art, but it's also an important part of maintaining a clear and understandable project history. What are some tips and tricks you've learned for writing clear and concise commit messages? Do you have any favorite templates or formats?\r\nAny advice would be greatly appreciated!\n~~~"
+        self.check_webhook("discussion__edited_body", TOPIC_DISCUSSION, expected_message)
+
+    def test_discussion_labeled(self) -> None:
+        expected_message = "Niloth-p added the enhancement label to [discussion #3](https://github.com/Niloth-p/webhook-tester/discussions/3)."
+        self.check_webhook("discussion__labeled", TOPIC_DISCUSSION, expected_message)
+
+    def test_discussion_locked(self) -> None:
+        expected_message = "Niloth-p locked [discussion #3](https://github.com/Niloth-p/webhook-tester/discussions/3) as resolved."
+        self.check_webhook("discussion__locked", TOPIC_DISCUSSION, expected_message)
+
+    def test_discussion_pinned(self) -> None:
+        expected_message = "Niloth-p pinned [discussion #3](https://github.com/Niloth-p/webhook-tester/discussions/3)."
+        self.check_webhook("discussion__pinned", TOPIC_DISCUSSION, expected_message)
+
+    def test_discussion_reopened(self) -> None:
+        expected_message = "Niloth-p reopened [discussion #3](https://github.com/Niloth-p/webhook-tester/discussions/3)."
+        self.check_webhook("discussion__reopened", TOPIC_DISCUSSION, expected_message)
+
+    def test_discussion_transferred(self) -> None:
+        expected_message = "Niloth-p transferred discussion #3 from webhook-tester to another-webhook-tester as [discussion #1](https://github.com/Niloth-p/webhook-tester/discussions/3)."
+        self.check_webhook("discussion__transferred", TOPIC_DISCUSSION, expected_message)
+
+    def test_discussion_unlabeled(self) -> None:
+        expected_message = "Niloth-p removed the enhancement label from [discussion #3](https://github.com/Niloth-p/webhook-tester/discussions/3)."
+        self.check_webhook("discussion__unlabeled", TOPIC_DISCUSSION, expected_message)
+
+    def test_discussion_unlocked(self) -> None:
+        expected_message = "Niloth-p unlocked [discussion #3](https://github.com/Niloth-p/webhook-tester/discussions/3)."
+        self.check_webhook("discussion__unlocked", TOPIC_DISCUSSION, expected_message)
+
+    def test_discussion_unpinned(self) -> None:
+        expected_message = "Niloth-p unpinned [discussion #3](https://github.com/Niloth-p/webhook-tester/discussions/3)."
+        self.check_webhook("discussion__unpinned", TOPIC_DISCUSSION, expected_message)
+
+    def test_discussion_unanswered(self) -> None:
+        expected_message = "Cordelia marked [comment #11460059](https://github.com/Niloth-p/webhook-tester/discussions/5#discussioncomment-11460059) as not the answer."
+        self.check_webhook("discussion__unanswered", TOPIC_DISCUSSION_ANSWERS, expected_message)
 
     def test_discussion_comment_msg(self) -> None:
         expected_message = "sbansal1999 [commented](https://github.com/sbansal1999/testing-gh/discussions/20#discussioncomment-6332416) on [discussion #20](https://github.com/sbansal1999/testing-gh/discussions/20):\n\n~~~ quote\nsome random comment\n~~~"
-        self.check_webhook("discussion_comment", TOPIC_DISCUSSION, expected_message)
+        self.check_webhook("discussion_comment", TOPIC_DISCUSSION_COMMENT, expected_message)
 
     def test_discussion_comment_msg_with_custom_topic_in_url(self) -> None:
         self.url = self.build_webhook_url(topic="notifications")
@@ -627,7 +760,7 @@ A temporary team so that I can get some webhook fixtures!
 
     def test_discussion_comment_edited_msg(self) -> None:
         expected_message = "sbansal1999 edited a [comment](https://github.com/sbansal1999/testing-gh/discussions/20#discussioncomment-6332416) on [discussion #20](https://github.com/sbansal1999/testing-gh/discussions/20):\n\n~~~ quote\nsome random comment edited\n~~~"
-        self.check_webhook("discussion_comment__edited", TOPIC_DISCUSSION, expected_message)
+        self.check_webhook("discussion_comment__edited", TOPIC_DISCUSSION_COMMENT, expected_message)
 
     def test_comment_edited_unchanged_skipped(self) -> None:
         self.check_webhook(
@@ -639,9 +772,7 @@ A temporary team so that I can get some webhook fixtures!
 
 
 class GitHubSponsorsHookTests(WebhookTestCase):
-    CHANNEL_NAME = "github"
     URL_TEMPLATE = "/api/v1/external/githubsponsors?stream={stream}&api_key={api_key}"
-    WEBHOOK_DIR_NAME = "github"
 
     def test_cancelled_message(self) -> None:
         expected_message = "monalisa cancelled their $5 a month subscription."

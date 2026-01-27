@@ -16,7 +16,7 @@ from zerver.actions.user_topics import do_set_user_topic_visibility_policy
 from zerver.lib.cache import cache_delete, get_muting_users_cache_key
 from zerver.lib.test_classes import ZulipTestCase
 from zerver.lib.test_helpers import HostRequestMock, dummy_handler, mock_queue_publish
-from zerver.models import Recipient, Subscription, UserProfile, UserTopic
+from zerver.models import PushDevice, Recipient, Subscription, UserProfile, UserTopic
 from zerver.models.streams import get_stream
 from zerver.tornado.event_queue import (
     ClientDescriptor,
@@ -25,7 +25,6 @@ from zerver.tornado.event_queue import (
     maybe_enqueue_notifications,
     missedmessage_hook,
     persistent_queue_filename,
-    process_notification,
 )
 from zerver.tornado.views import cleanup_event_queue, get_events
 
@@ -195,6 +194,7 @@ class MissedMessageHookTest(ZulipTestCase):
         do_change_user_setting(
             self.user_profile, "enable_online_push_notifications", False, acting_user=None
         )
+        self.register_push_device(self.user_profile.id)
         self.iago = self.example_user("iago")
         self.client_descriptor = self.allocate_event_queue(self.user_profile)
         self.assertTrue(self.client_descriptor.event_queue.empty())
@@ -292,6 +292,28 @@ class MissedMessageHookTest(ZulipTestCase):
         do_change_user_setting(
             self.user_profile, "enable_offline_push_notifications", False, acting_user=None
         )
+        msg_id = self.send_personal_message(self.iago, self.user_profile)
+        with mock.patch("zerver.tornado.event_queue.maybe_enqueue_notifications") as mock_enqueue:
+            missedmessage_hook(self.user_profile.id, self.client_descriptor, True)
+            mock_enqueue.assert_called_once()
+            args_dict = mock_enqueue.call_args_list[0][1]
+
+            self.assert_maybe_enqueue_notifications_call_args(
+                args_dict=args_dict,
+                message_id=msg_id,
+                user_id=self.user_profile.id,
+                dm_email_notify=True,
+                dm_push_notify=False,
+                already_notified={"email_notified": True, "push_notified": False},
+            )
+
+    def test_no_push_device_registered(self) -> None:
+        # When `enable_offline_push_notifications` is `true` but no push device registered,
+        # push notifications should not be sent.
+        do_change_user_setting(
+            self.user_profile, "enable_offline_push_notifications", True, acting_user=None
+        )
+        PushDevice.objects.all().delete()
         msg_id = self.send_personal_message(self.iago, self.user_profile)
         with mock.patch("zerver.tornado.event_queue.maybe_enqueue_notifications") as mock_enqueue:
             missedmessage_hook(self.user_profile.id, self.client_descriptor, True)
@@ -1505,67 +1527,3 @@ class EventQueueTest(ZulipTestCase):
 
         queue.prune(1)
         self.verify_to_dict_end_to_end(client)
-
-
-class SchemaMigrationsTests(ZulipTestCase):
-    def test_reformat_legacy_send_message_event(self) -> None:
-        hamlet = self.example_user("hamlet")
-        cordelia = self.example_user("cordelia")
-        othello = self.example_user("othello")
-        old_format_event = dict(
-            type="message",
-            message=1,
-            message_dict={},
-            presence_idle_user_ids=[hamlet.id, othello.id],
-        )
-        old_format_users = [
-            dict(
-                id=hamlet.id,
-                flags=["mentioned"],
-                mentioned=True,
-                online_push_enabled=True,
-                stream_push_notify=False,
-                stream_email_notify=True,
-                wildcard_mention_notify=False,
-                sender_is_muted=False,
-            ),
-            dict(
-                id=cordelia.id,
-                flags=["stream_wildcard_mentioned"],
-                mentioned=False,
-                online_push_enabled=True,
-                stream_push_notify=True,
-                stream_email_notify=False,
-                wildcard_mention_notify=True,
-                sender_is_muted=False,
-            ),
-        ]
-        notice = dict(event=old_format_event, users=old_format_users)
-
-        expected_current_format_users = [
-            dict(
-                id=hamlet.id,
-                flags=["mentioned"],
-            ),
-            dict(
-                id=cordelia.id,
-                flags=["stream_wildcard_mentioned"],
-            ),
-        ]
-
-        expected_current_format_event = dict(
-            type="message",
-            message=1,
-            message_dict={},
-            presence_idle_user_ids=[hamlet.id, othello.id],
-            online_push_user_ids=[hamlet.id, cordelia.id],
-            stream_push_user_ids=[cordelia.id],
-            stream_email_user_ids=[hamlet.id],
-            stream_wildcard_mention_user_ids=[cordelia.id],
-            muted_sender_user_ids=[],
-        )
-        with mock.patch("zerver.tornado.event_queue.process_message_event") as m:
-            process_notification(notice)
-            m.assert_called_once()
-            self.assertDictEqual(m.call_args[0][0], expected_current_format_event)
-            self.assertEqual(m.call_args[0][1], expected_current_format_users)

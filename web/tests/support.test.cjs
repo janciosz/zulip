@@ -21,10 +21,9 @@ mock_cjs("clipboard", class Clipboard {});
 
 zrequire("../src/support/support");
 
-run_test("scrub_realm", () => {
-    $.get_initialize_function()();
-    const click_handler = $("body").get_on_handler("click", "button.scrub-realm-button");
+const click_handler = $("body").get_on_handler("click", "button.scrub-realm-button");
 
+run_test("scrub_realm", () => {
     const $fake_this = $.create("fake-.scrub-realm-button");
     $fake_this.attr = (name) => {
         assert.equal(name, "data-string-id");
@@ -32,10 +31,12 @@ run_test("scrub_realm", () => {
     };
 
     let submit_form_called = false;
-    const fake_this = {to_$: () => $fake_this};
-    fake_this.form = {
-        submit() {
-            submit_form_called = true;
+    const fake_this = {
+        to_$: () => $fake_this,
+        form: {
+            submit() {
+                submit_form_called = true;
+            },
         },
     };
     const event = {

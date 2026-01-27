@@ -5,6 +5,7 @@ import assert from "minimalistic-assert";
 import * as activity_ui from "./activity_ui.ts";
 import * as blueslip from "./blueslip.ts";
 import * as compose_tooltips from "./compose_tooltips.ts";
+import * as compose_ui from "./compose_ui.ts";
 import type {MessageListData} from "./message_list_data.ts";
 import * as message_list_tooltips from "./message_list_tooltips.ts";
 import {MessageListView} from "./message_list_view.ts";
@@ -118,7 +119,7 @@ export class MessageList {
         // TODO: This property should likely just be inlined into
         // having the MessageListView code that needs to access it
         // query .data.filter directly.
-        const collapse_messages = this.data.filter.supports_collapsing_recipients();
+        const collapse_messages = this.data.filter.contains_no_partial_conversations();
 
         this.view = new MessageListView(this, collapse_messages, opts.is_node_test);
         this.is_combined_feed_view = this.data.filter.is_in_home();
@@ -451,6 +452,14 @@ export class MessageList {
         // If user narrows to a stream, don't update
         // trailing bookend if user is subscribed.
         const sub = stream_data.get_sub_by_id(stream_id);
+
+        if (sub && !stream_data.can_toggle_subscription(sub)) {
+            // If the user is not subscribed and cannot subscribe
+            // (e.g., they don't have content access to the channel),
+            // then we don't show a trailing bookend.
+            return;
+        }
+
         if (
             sub &&
             sub.subscribed &&
@@ -468,7 +477,7 @@ export class MessageList {
         const is_web_public = sub?.is_web_public;
         if (sub === undefined || sub.is_archived) {
             deactivated = true;
-        } else if (!subscribed && !this.last_message_historical) {
+        } else if (!subscribed && !this.last_message_historical && !this.empty()) {
             just_unsubscribed = true;
         }
 
@@ -512,16 +521,19 @@ export class MessageList {
         }
     }
 
-    show_edit_message($row: JQuery, $form: JQuery): void {
+    show_edit_message($row: JQuery, $form: JQuery, do_autosize: boolean): void {
         if ($row.find(".message_edit_form form").length > 0) {
             return;
         }
         $row.find(".messagebox-content").append($form);
         $row.find(".message_content, .status-message, .message_controls").hide();
         $row.find(".messagebox-content").addClass("content_edit_mode");
-        // autosize will not change the height of the textarea if the `$row` is not
-        // rendered in DOM yet. So, we call `autosize.update` post render.
-        autosize($row.find(".message_edit_content"));
+        if (do_autosize) {
+            // autosize will not change the height of the textarea if the `$row` is not
+            // rendered in DOM yet. So, we call `autosize.update` post render.
+            autosize($row.find(".message_edit_content"));
+        }
+        compose_ui.maybe_show_scrolling_formatting_buttons(".message-edit-feature-group");
     }
 
     hide_edit_message($row: JQuery): void {
@@ -536,25 +548,17 @@ export class MessageList {
     }
 
     show_edit_topic_on_recipient_row($recipient_row: JQuery, $form: JQuery): void {
-        $recipient_row.find(".topic_edit_form").append($form);
-        $recipient_row.find(".on_hover_topic_edit").hide();
-        $recipient_row.find(".edit_message_button").hide();
+        $recipient_row.find(".topic_edit").append($form);
         $recipient_row.find(".stream_topic").hide();
         $recipient_row.find(".topic_edit").show();
-        $recipient_row.find(".always_visible_topic_edit").hide();
-        $recipient_row.find(".on_hover_topic_resolve").hide();
-        $recipient_row.find(".on_hover_topic_unresolve").hide();
+        $recipient_row.find(".recipient-bar-control").hide();
     }
 
     hide_edit_topic_on_recipient_row($recipient_row: JQuery): void {
         $recipient_row.find(".stream_topic").show();
-        $recipient_row.find(".on_hover_topic_edit").show();
-        $recipient_row.find(".edit_message_button").show();
-        $recipient_row.find(".topic_edit_form").empty();
+        $recipient_row.find(".topic_edit").empty();
         $recipient_row.find(".topic_edit").hide();
-        $recipient_row.find(".always_visible_topic_edit").show();
-        $recipient_row.find(".on_hover_topic_resolve").show();
-        $recipient_row.find(".on_hover_topic_unresolve").show();
+        $recipient_row.find(".recipient-bar-control").show();
     }
 
     reselect_selected_id(): void {
@@ -581,19 +585,17 @@ export class MessageList {
         this.view.clear_rendering_state(false);
         this.view.update_render_window(this.selected_idx(), false);
 
-        if (!this.is_combined_feed_view) {
-            if (
-                this.visibly_empty() &&
-                this.data.fetch_status.has_found_oldest() &&
-                this.data.fetch_status.has_found_newest()
-            ) {
-                // Show the empty narrow message only if we're certain
-                // that the view doesn't have messages that we're
-                // waiting for the server to send us.
-                narrow_banner.show_empty_narrow_message();
-            } else {
-                narrow_banner.hide_empty_narrow_message();
-            }
+        if (
+            this.visibly_empty() &&
+            this.data.fetch_status.has_found_oldest() &&
+            this.data.fetch_status.has_found_newest()
+        ) {
+            // Show the empty narrow message only if we're certain
+            // that the view doesn't have messages that we're
+            // waiting for the server to send us.
+            narrow_banner.show_empty_narrow_message(this.data.filter);
+        } else {
+            narrow_banner.hide_empty_narrow_message();
         }
         this.rerender_view();
     }
@@ -622,7 +624,7 @@ export class MessageList {
     }
 
     all_messages(): Message[] {
-        return this.data.all_messages();
+        return this.data.all_messages_after_mute_filtering();
     }
 
     first_unread_message_id(): number | undefined {

@@ -1,9 +1,10 @@
 import re
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime
 
 from django.http import HttpRequest, HttpResponse
 from pydantic import Json
+from typing_extensions import override
 
 from zerver.decorator import log_unsupported_webhook_event, webhook_view
 from zerver.lib.exceptions import UnsupportedWebhookEventTypeError
@@ -14,9 +15,9 @@ from zerver.lib.validator import WildValue, check_bool, check_int, check_none_or
 from zerver.lib.webhooks.common import (
     OptionalUserSpecifiedTopicStr,
     check_send_webhook_message,
-    get_http_headers_from_filename,
+    default_fixture_to_headers,
+    get_event_header,
     get_setup_webhook_message,
-    validate_extract_webhook_http_header,
 )
 from zerver.lib.webhooks.git import (
     CONTENT_MESSAGE_TEMPLATE,
@@ -31,13 +32,28 @@ from zerver.lib.webhooks.git import (
     get_push_tag_event_message,
     get_release_event_message,
     get_short_sha,
+    is_branch_name_notifiable,
 )
 from zerver.models import UserProfile
 
-fixture_to_headers = get_http_headers_from_filename("HTTP_X_GITHUB_EVENT")
+fixture_to_headers = default_fixture_to_headers("HTTP_X_GITHUB_EVENT")
 
 TOPIC_FOR_DISCUSSION = "{repo} discussion #{number}: {title}"
-DISCUSSION_TEMPLATE = "{author} created [discussion #{discussion_id}]({url}) in {category}:\n\n~~~ quote\n### {title}\n{body}\n~~~"
+DISCUSSION_TEMPLATES = {
+    "created": "{sender} created [discussion #{discussion_number}]({url}) in {category}:\n\n~~~ quote\n### {title}\n{body}\n~~~",
+    "generic_action": "{sender} {action} [discussion #{discussion_number}{configured_title}]({url}).",
+    "deleted": "{sender} {action} discussion #{discussion_number}{configured_title}.",
+    "closed": "{sender} {action} [discussion #{discussion_number}{configured_title}]({url}) as {closed_reason}.",
+    "locked": "{sender} {action} [discussion #{discussion_number}{configured_title}]({url}{configured_title}){locked_reason}.",
+    "labeled": "{sender} added the {label} label to [discussion #{discussion_number}{configured_title}]({url}).",
+    "unlabeled": "{sender} removed the {label} label from [discussion #{discussion_number}{configured_title}]({url}).",
+    "category_changed": "{sender} changed the category of [discussion #{discussion_number}{configured_title}]({url}) from {old_category} to {category}.",
+    "transferred": "{sender} {action} discussion #{discussion_number}{configured_title} from {repository_name} to {new_repository_name} as [discussion #{new_discussion_number}]({url}).",
+    "answered": "{sender} marked [comment #{comment_id}]({answer_url}) as the answer:\n\n~~~ quote\n{answer_body}\n~~~",
+    "unanswered": "{sender} marked [comment #{comment_id}]({answer_url}) as not the answer.",
+    "edited_title": "{sender} edited the title of [discussion #{discussion_number}{configured_title}]({url}):\n\n~~~ quote\n### {title}\n~~~",
+    "edited_body": "{sender} edited [discussion #{discussion_number}{configured_title}]({url}):\n\n~~~ quote\n{body}\n~~~",
+}
 
 
 class Helper:
@@ -46,10 +62,12 @@ class Helper:
         request: HttpRequest,
         payload: WildValue,
         include_title: bool,
+        include_repository_name: bool,
     ) -> None:
         self.request = request
         self.payload = payload
         self.include_title = include_title
+        self.include_repository_name = include_repository_name
 
     def log_unsupported(self, event: str) -> None:
         summary = f"The '{event}' event isn't currently supported by the GitHub webhook; ignoring"
@@ -72,7 +90,7 @@ def get_opened_or_update_pull_request_body(helper: Helper) -> str:
         description = pull_request["body"].tame(check_none_or(check_string))
     target_branch = None
     base_branch = None
-    if action in ("opened", "merged"):
+    if action in ("opened", "merged", "reopened"):
         target_branch = pull_request["head"]["label"].tame(check_string)
         base_branch = pull_request["base"]["label"].tame(check_string)
 
@@ -163,9 +181,9 @@ def get_issue_body(helper: Helper) -> str:
             else issue["body"].tame(check_none_or(check_string))
         ),
         title=issue["title"].tame(check_string) if include_title else None,
-        assignee_updated=payload["assignee"]["login"].tame(check_string)
-        if "assignee" in payload
-        else None,
+        assignee_updated=(
+            payload["assignee"]["login"].tame(check_string) if "assignee" in payload else None
+        ),
     )
 
 
@@ -299,19 +317,88 @@ def get_push_commits_body(helper: Helper) -> str:
         commits_data,
         deleted=payload["deleted"].tame(check_bool),
         force_push=payload["forced"].tame(check_bool),
+        repository_name=get_repository_full_name(payload)
+        if helper.include_repository_name
+        else None,
+        repository_url=get_repository_url(payload) if helper.include_repository_name else None,
     )
+
+
+class LazyContext(dict[str, str | int]):
+    """Template rendering context for discussions."""
+
+    def __init__(self, payload: WildValue, include_title: bool) -> None:
+        super().__init__()
+        self.payload = payload
+        self.include_title = include_title
+        self.template_values: dict[str, Callable[[], str | int]] = {
+            "sender": lambda: get_sender_name(self.payload),
+            "author": lambda: self.payload["discussion"]["user"]["login"].tame(check_string),
+            "url": lambda: self.payload["discussion"]["html_url"].tame(check_string),
+            "action": lambda: self.payload["action"].tame(check_string),
+            "configured_title": lambda: f" {self.template_values['title']()}"
+            if self.include_title
+            else "",
+            "category": lambda: self.payload["discussion"]["category"]["name"].tame(check_string),
+            "title": lambda: self.payload["discussion"]["title"].tame(check_string),
+            "body": lambda: self.payload["discussion"]["body"].tame(check_string),
+            "repository_name": lambda: self.payload["repository"]["name"].tame(check_string),
+            "new_repository_name": lambda: self.payload["changes"]["new_repository"]["name"].tame(
+                check_string
+            ),
+            "discussion_number": lambda: self.payload["discussion"]["number"].tame(check_int),
+            "new_discussion_number": lambda: self.payload["changes"]["new_discussion"][
+                "number"
+            ].tame(check_int),
+            "label": lambda: self.payload["label"]["name"].tame(check_string),
+            "old_category": lambda: self.payload["changes"]["category"]["from"]["name"].tame(
+                check_string
+            ),
+            # locked_reason includes the " as " as prefix,
+            # because locked_reason could be null too, in which case,
+            # we drop this entire part from the message.
+            "locked_reason": lambda: f" as {self.payload['discussion']['active_lock_reason'].tame(check_string)}"
+            if self.payload["discussion"]["active_lock_reason"]
+            else "",
+            "closed_reason": lambda: self.payload["discussion"]["state_reason"].tame(check_string),
+            # answer_field is used to determine which payload field to use.
+            # It is either "answer" (for answered action)
+            # or "old_answer" (for unanswered action)
+            "answer_field": lambda: "old_answer"
+            if self.payload["action"].tame(check_string) == "unanswered"
+            else "answer",
+            "answer_url": lambda: self.payload[self.template_values["answer_field"]()][
+                "html_url"
+            ].tame(check_string),
+            "answer_body": lambda: self.payload[self.template_values["answer_field"]()][
+                "body"
+            ].tame(check_string),
+            "comment_id": lambda: self.payload[self.template_values["answer_field"]()]["id"].tame(
+                check_int
+            ),
+        }
+
+    @override
+    def __getitem__(self, key: str) -> str | int:
+        return self.template_values[key]()
 
 
 def get_discussion_body(helper: Helper) -> str:
     payload = helper.payload
-    return DISCUSSION_TEMPLATE.format(
-        author=get_sender_name(payload),
-        url=payload["discussion"]["html_url"].tame(check_string),
-        body=payload["discussion"]["body"].tame(check_string),
-        category=payload["discussion"]["category"]["name"].tame(check_string),
-        discussion_id=payload["discussion"]["number"].tame(check_int),
-        title=payload["discussion"]["title"].tame(check_string),
-    )
+    action = get_discussion_action(payload)
+    DISCUSSION_TEMPLATE = DISCUSSION_TEMPLATES[action]
+    context = LazyContext(payload, helper.include_title)
+    return DISCUSSION_TEMPLATE.format_map(context)
+
+
+def get_discussion_action(payload: WildValue) -> str:
+    action = payload["action"].tame(check_string)
+    if action in ("unlocked", "pinned", "unpinned", "reopened"):
+        action = "generic_action"
+    if action == "edited":
+        edited_field = "body" if "body" in payload["changes"] else "title"
+        action = f"edited_{edited_field}"
+    return action
 
 
 def get_discussion_comment_body(helper: Helper) -> str:
@@ -532,6 +619,76 @@ def get_pull_request_review_body(helper: Helper) -> str:
     )
 
 
+def get_pull_request_review_request_removed_body(helper: Helper) -> str:
+    payload = helper.payload
+
+    sender = get_sender_name(payload)
+    reviewer = payload["requested_reviewer"]["login"].tame(check_string)
+    pr_number = payload["pull_request"]["number"].tame(check_int)
+    title = payload["pull_request"]["title"].tame(check_string)
+    pr_url = payload["pull_request"]["html_url"].tame(check_string)
+
+    return f"{sender} unassigned {reviewer} from [PR #{pr_number} {title}]({pr_url})."
+
+
+def get_pull_request_converted_to_draft_body(helper: Helper) -> str:
+    payload = helper.payload
+    return get_pull_request_event_message(
+        user_name=get_sender_name(payload),
+        action="converted",
+        url=payload["pull_request"]["html_url"].tame(check_string),
+        number=payload["pull_request"]["number"].tame(check_int),
+        title=payload["pull_request"]["title"].tame(check_string),
+        suffix="to a draft",
+    )
+
+
+def get_pull_request_labeled_or_unlabeled_body(helper: Helper) -> str:
+    payload = helper.payload
+    label_name = payload["label"]["name"].tame(check_string)
+    action = payload["action"].tame(check_string)
+    sender = get_sender_name(payload)
+    pr_number = payload["pull_request"]["number"].tame(check_int)
+    pr_url = payload["pull_request"]["html_url"].tame(check_string)
+    preposition = "on" if action == "labeled" else "from"
+    action_word = "added" if action == "labeled" else "removed"
+
+    return f"{sender} {action_word} the label `{label_name}` {preposition} [PR #{pr_number}]({pr_url})."
+
+
+def get_pull_request_milestoned_or_demilestoned_body(helper: Helper) -> str:
+    payload = helper.payload
+    action = payload["action"].tame(check_string)
+
+    if action == "milestoned":
+        suffix = (
+            f"to the milestone `{payload['pull_request']['milestone']['title'].tame(check_string)}`"
+        )
+    else:
+        suffix = f"from the milestone `{payload['milestone']['title'].tame(check_string)}`"
+
+    return get_pull_request_event_message(
+        user_name=get_sender_name(payload),
+        action=action,
+        url=payload["pull_request"]["html_url"].tame(check_string),
+        number=payload["pull_request"]["number"].tame(check_int),
+        suffix=suffix,
+    )
+
+
+def get_pull_request_enqueued_or_dequeued_body(helper: Helper) -> str:
+    payload = helper.payload
+    action = payload["action"].tame(check_string)
+    return get_pull_request_event_message(
+        user_name=get_sender_name(payload),
+        action=action,
+        url=payload["pull_request"]["html_url"].tame(check_string),
+        number=payload["pull_request"]["number"].tame(check_int),
+        title=payload["pull_request"]["title"].tame(check_string),
+        suffix=("to the merge queue" if action == "enqueued" else "from the merge queue"),
+    )
+
+
 def get_pull_request_review_comment_body(helper: Helper) -> str:
     payload = helper.payload
     include_title = helper.include_title
@@ -687,17 +844,40 @@ def get_tier_changed_body(helper: Helper) -> str:
     ).rstrip()
 
 
+def get_issue_transferred_body(helper: Helper) -> str:
+    payload = helper.payload
+    template = "{sender} transferred [issue #{old_issue_number} {title}]({old_issue_url}) to [{new_repo_full_name}/#{new_issue_number}]({new_issue_url})."
+    return template.format(
+        sender=get_sender_name(payload),
+        old_issue_number=payload["issue"]["number"].tame(check_int),
+        old_issue_url=payload["issue"]["html_url"].tame(check_string),
+        title=payload["issue"]["title"].tame(check_string),
+        new_repo_full_name=payload["changes"]["new_repository"]["full_name"].tame(check_string),
+        new_issue_number=payload["changes"]["new_issue"]["number"].tame(check_int),
+        new_issue_url=payload["changes"]["new_issue"]["html_url"].tame(check_string),
+    )
+
+
+def get_issue_opened_via_transfer_body(helper: Helper) -> str:
+    payload = helper.payload
+    template = "[Issue #{new_issue_number} {title}]({new_issue_url}) was transferred from [{old_repo_full_name}#{old_issue_number}]({old_issue_url})."
+    return template.format(
+        new_issue_number=payload["issue"]["number"].tame(check_int),
+        new_issue_url=payload["issue"]["html_url"].tame(check_string),
+        title=payload["issue"]["title"].tame(check_string),
+        old_repo_full_name=payload["changes"]["old_repository"]["full_name"].tame(check_string),
+        old_issue_number=payload["changes"]["old_issue"]["number"].tame(check_int),
+        old_issue_url=payload["changes"]["old_issue"]["html_url"].tame(check_string),
+    )
+
+
 def get_subscription(payload: WildValue) -> str:
     return payload["sponsorship"]["tier"]["name"].tame(check_string)
 
 
 def get_effective_date(payload: WildValue) -> str:
     effective_date = payload["effective_date"].tame(check_string)[:10]
-    return (
-        datetime.strptime(effective_date, "%Y-%m-%d")
-        .replace(tzinfo=timezone.utc)
-        .strftime("%B %d, %Y")
-    )
+    return datetime.fromisoformat(effective_date).strftime("%B %d, %Y")
 
 
 def get_prior_subscription(payload: WildValue) -> str:
@@ -710,6 +890,10 @@ def get_repository_name(payload: WildValue) -> str:
 
 def get_repository_full_name(payload: WildValue) -> str:
     return payload["repository"]["full_name"].tame(check_string)
+
+
+def get_repository_url(payload: WildValue) -> str:
+    return payload["repository"]["html_url"].tame(check_string)
 
 
 def get_organization_name(payload: WildValue) -> str:
@@ -816,6 +1000,8 @@ EVENT_FUNCTION_MAPPER: dict[str, Callable[[Helper], str]] = {
     "issue_comment": get_issue_comment_body,
     "issue_labeled_or_unlabeled": get_issue_labeled_or_unlabeled_body,
     "issue_milestoned_or_demilestoned": get_issue_milestoned_or_demilestoned_body,
+    "issues_opened_via_transfer": get_issue_opened_via_transfer_body,
+    "issues_transferred": get_issue_transferred_body,
     "issues": get_issue_body,
     "member": get_member_body,
     "membership": get_membership_body,
@@ -829,6 +1015,11 @@ EVENT_FUNCTION_MAPPER: dict[str, Callable[[Helper], str]] = {
     "pull_request_review": get_pull_request_review_body,
     "pull_request_review_comment": get_pull_request_review_comment_body,
     "pull_request_review_requested": get_pull_request_review_requested_body,
+    "pull_request_milestoned_or_demilestoned": get_pull_request_milestoned_or_demilestoned_body,
+    "pull_request_enqueued_or_dequeued": get_pull_request_enqueued_or_dequeued_body,
+    "pull_request_labeled_or_unlabeled": get_pull_request_labeled_or_unlabeled_body,
+    "pull_request_converted_to_draft": get_pull_request_converted_to_draft_body,
+    "pull_request_review_request_removed": get_pull_request_review_request_removed_body,
     "pull_request_auto_merge": get_pull_request_auto_merge_body,
     "locked_or_unlocked_pull_request": get_locked_or_unlocked_pull_request_body,
     "push_commits": get_push_commits_body,
@@ -870,10 +1061,6 @@ IGNORED_EVENTS = [
 
 IGNORED_PULL_REQUEST_ACTIONS = [
     "approved",
-    "converted_to_draft",
-    "labeled",
-    "review_request_removed",
-    "unlabeled",
 ]
 
 IGNORED_TEAM_ACTIONS = [
@@ -901,6 +1088,7 @@ def api_github_webhook(
     branches: str | None = None,
     user_specified_topic: OptionalUserSpecifiedTopicStr = None,
     ignore_private_repositories: Json[bool] = False,
+    include_repository_name: Json[bool] = False,
 ) -> HttpResponse:
     """
     GitHub sends the event as an HTTP header.  We have our
@@ -908,7 +1096,7 @@ def api_github_webhook(
     directly to the X-GitHub-Event header's event, but we sometimes
     refine it based on the payload.
     """
-    header_event = validate_extract_webhook_http_header(request, "X-GitHub-Event", "GitHub")
+    header_event = get_event_header(request, "X-GitHub-Event", "GitHub")
 
     # Check if the repository is private and skip processing if ignore_private_repositories is True
     if (
@@ -944,6 +1132,7 @@ def api_github_webhook(
         request=request,
         payload=payload,
         include_title=user_specified_topic is not None,
+        include_repository_name=include_repository_name,
     )
     body = body_function(helper)
 
@@ -952,9 +1141,57 @@ def api_github_webhook(
 
 
 def is_empty_pull_request_review_event(payload: WildValue) -> bool:
+    # When submitting a review, GitHub has a bug where it'll send a
+    # duplicate empty "edited" event for the main review body. We ignore
+    # those, to avoid triggering duplicate notifications.
     action = payload["action"].tame(check_string)
     changes = payload.get("changes", {})
     return action == "edited" and len(changes) == 0
+
+
+PULL_REQUEST_ACTION_TO_EVENT = {
+    "opened": "opened_pull_request",
+    "reopened": "opened_pull_request",
+    "synchronize": "updated_pull_request",
+    "edited": "updated_pull_request",
+    "assigned": "assigned_or_unassigned_pull_request",
+    "unassigned": "assigned_or_unassigned_pull_request",
+    "closed": "closed_pull_request",
+    "review_requested": "pull_request_review_requested",
+    "review_request_removed": "pull_request_review_request_removed",
+    "ready_for_review": "pull_request_ready_for_review",
+    "locked": "locked_or_unlocked_pull_request",
+    "unlocked": "locked_or_unlocked_pull_request",
+    "auto_merge_enabled": "pull_request_auto_merge",
+    "auto_merge_disabled": "pull_request_auto_merge",
+    "milestoned": "pull_request_milestoned_or_demilestoned",
+    "demilestoned": "pull_request_milestoned_or_demilestoned",
+    "enqueued": "pull_request_enqueued_or_dequeued",
+    "dequeued": "pull_request_enqueued_or_dequeued",
+    "labeled": "pull_request_labeled_or_unlabeled",
+    "unlabeled": "pull_request_labeled_or_unlabeled",
+    "converted_to_draft": "pull_request_converted_to_draft",
+}
+
+ISSUE_ACTION_TO_EVENT = {
+    "labeled": "issue_labeled_or_unlabeled",
+    "unlabeled": "issue_labeled_or_unlabeled",
+    "milestoned": "issue_milestoned_or_demilestoned",
+    "demilestoned": "issue_milestoned_or_demilestoned",
+    "transferred": "issues_transferred",
+}
+
+
+def get_push_event_name(payload: WildValue, branches: str | None) -> str | None:
+    if is_merge_queue_push_event(payload):
+        return None
+    if not is_commit_push_event(payload):
+        return "push_tags"
+    if branches is not None:
+        branch = get_branch_name_from_ref(payload["ref"].tame(check_string))
+        if not is_branch_name_notifiable(branch, branches):
+            return None
+    return "push_commits"
 
 
 def get_zulip_event_name(
@@ -962,79 +1199,32 @@ def get_zulip_event_name(
     payload: WildValue,
     branches: str | None,
 ) -> str | None:
-    """
-    Usually, we return an event name that is a key in EVENT_FUNCTION_MAPPER.
-
-    We return None for an event that we know we don't want to handle.
-    """
-    if header_event == "pull_request":
-        action = payload["action"].tame(check_string)
-        if action in ("opened", "reopened"):
-            return "opened_pull_request"
-        elif action in ("synchronize", "edited"):
-            return "updated_pull_request"
-        if action in ("assigned", "unassigned"):
-            return "assigned_or_unassigned_pull_request"
-        if action == "closed":
-            return "closed_pull_request"
-        if action == "review_requested":
-            return "pull_request_review_requested"
-        if action == "ready_for_review":
-            return "pull_request_ready_for_review"
-        if action in ("locked", "unlocked"):
-            return "locked_or_unlocked_pull_request"
-        if action in ("auto_merge_enabled", "auto_merge_disabled"):
-            return "pull_request_auto_merge"
-        if action in IGNORED_PULL_REQUEST_ACTIONS:
-            return None
-    elif header_event == "pull_request_review":
-        if is_empty_pull_request_review_event(payload):
-            # When submitting a review, GitHub has a bug where it'll
-            # send a duplicate empty "edited" event for the main
-            # review body. Ignore those, to avoid triggering
-            # duplicate notifications.
-            return None
-        return "pull_request_review"
-    elif header_event == "push":
-        if is_merge_queue_push_event(payload):
-            return None
-        if is_commit_push_event(payload):
-            if branches is not None:
-                branch = get_branch_name_from_ref(payload["ref"].tame(check_string))
-                if branches.find(branch) == -1:
-                    return None
-            return "push_commits"
-        else:
-            return "push_tags"
-    elif header_event == "check_run":
-        if payload["check_run"]["status"].tame(check_string) != "completed":
-            return None
-        return header_event
-    elif header_event == "team":
-        action = payload["action"].tame(check_string)
-        if action == "edited":
-            return "team"
-        if action in IGNORED_TEAM_ACTIONS:
-            # no need to spam our logs, we just haven't implemented it yet
-            return None
-        else:
-            # this means GH has actually added new actions since September 2020,
-            # so it's a bit more cause for alarm
+    action = payload.get("action", "").tame(check_string)
+    match header_event:
+        case "pull_request":
+            if action in IGNORED_PULL_REQUEST_ACTIONS:
+                return None  # nocoverage
+            return PULL_REQUEST_ACTION_TO_EVENT.get(action)
+        case "issues":
+            if action == "opened" and payload.get("changes", {}).get("old_issue"):
+                return "issues_opened_via_transfer"
+            return ISSUE_ACTION_TO_EVENT.get(action, "issues")
+        case "pull_request_review":
+            return None if is_empty_pull_request_review_event(payload) else "pull_request_review"
+        case "push":
+            return get_push_event_name(payload, branches)
+        case "check_run":
+            status = payload["check_run"]["status"].tame(check_string)
+            return "check_run" if status == "completed" else None
+        case "team":
+            if action == "edited":
+                return "team"
+            if action in IGNORED_TEAM_ACTIONS:
+                return None
             raise UnsupportedWebhookEventTypeError(f"unsupported team action {action}")
-    elif header_event == "issues":
-        action = payload["action"].tame(check_string)
-        if action in ("labeled", "unlabeled"):
-            return "issue_labeled_or_unlabeled"
-        if action in ("milestoned", "demilestoned"):
-            return "issue_milestoned_or_demilestoned"
-        else:
-            return "issues"
-    elif header_event in EVENT_FUNCTION_MAPPER:
-        return header_event
-    elif header_event in IGNORED_EVENTS:
-        return None
-
-    complete_event = "{}:{}".format(
-        header_event, payload.get("action", "???").tame(check_string)
-    )  # nocoverage
-    raise UnsupportedWebhookEventTypeError(complete_event)
+        case _:
+            if header_event in IGNORED_EVENTS:
+                return None
+            if header_event in EVENT_FUNCTION_MAPPER:
+                return header_event
+            raise UnsupportedWebhookEventTypeError(f"{header_event}:{action or '???'}")

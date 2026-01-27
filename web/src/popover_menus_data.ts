@@ -3,23 +3,22 @@
 
 import assert from "minimalistic-assert";
 
-import * as resolved_topic from "../shared/src/resolved_topic.ts";
-
 import * as buddy_data from "./buddy_data.ts";
 import * as gear_menu_util from "./gear_menu_util.ts";
 import * as hash_util from "./hash_util.ts";
 import {$t} from "./i18n.ts";
+import * as message_delete from "./message_delete.ts";
 import * as message_edit from "./message_edit.ts";
 import * as message_lists from "./message_lists.ts";
-import * as muted_users from "./muted_users.ts";
 import * as narrow_state from "./narrow_state.ts";
 import {page_params} from "./page_params.ts";
 import * as people from "./people.ts";
+import * as resolved_topic from "./resolved_topic.ts";
 import * as settings_config from "./settings_config.ts";
 import type {ColorSchemeValues} from "./settings_config.ts";
 import * as settings_data from "./settings_data.ts";
 import * as starred_messages from "./starred_messages.ts";
-import {current_user, realm} from "./state_data.ts";
+import {current_user, realm, realm_billing} from "./state_data.ts";
 import * as stream_data from "./stream_data.ts";
 import * as sub_store from "./sub_store.ts";
 import {num_unread_for_topic} from "./unread.ts";
@@ -36,8 +35,8 @@ type ActionPopoverContext = {
     editability_menu_item: string | undefined;
     move_message_menu_item: string | undefined;
     view_source_menu_item: string | undefined;
-    should_display_hide_option: boolean;
     should_display_mark_as_unread: boolean;
+    should_display_remind_me_option: boolean;
     should_display_collapse: boolean;
     should_display_uncollapse: boolean;
     should_display_quote_message: boolean;
@@ -45,12 +44,14 @@ type ActionPopoverContext = {
     should_display_delete_option: boolean;
     should_display_read_receipts_option: boolean;
     should_display_add_reaction_option: boolean;
+    should_display_message_report_option: boolean;
 };
 
 type TopicPopoverContext = {
     stream_name: string;
     stream_id: number;
     stream_muted: boolean;
+    stream_archived: boolean;
     topic_display_name: string;
     is_empty_string_topic: boolean;
     topic_unmuted: boolean;
@@ -58,6 +59,7 @@ type TopicPopoverContext = {
     is_topic_empty: boolean;
     can_move_topic: boolean;
     can_rename_topic: boolean;
+    can_resolve_topic: boolean;
     is_realm_admin: boolean;
     topic_is_resolved: boolean;
     has_starred_messages: boolean;
@@ -65,6 +67,8 @@ type TopicPopoverContext = {
     url: string;
     visibility_policy: number | false;
     all_visibility_policies: AllVisibilityPolicies;
+    can_summarize_topics: boolean;
+    show_ai_features: boolean;
 };
 
 type VisibilityChangePopoverContext = {
@@ -93,6 +97,8 @@ type PersonalMenuContext = {
     status_emoji_info: UserStatusEmojiInfo | undefined;
     user_color_scheme: number;
     color_scheme_values: ColorSchemeValues;
+    web_font_size_px: number;
+    web_line_height_percent: number;
 };
 
 type GearMenuContext = {
@@ -103,6 +109,7 @@ type GearMenuContext = {
     is_spectator: boolean;
     is_self_hosted: boolean;
     is_development_environment: boolean;
+    is_demo_organization: boolean;
     is_plan_limited: boolean;
     is_plan_standard: boolean;
     is_plan_standard_sponsored_for_free: boolean;
@@ -122,23 +129,25 @@ type GearMenuContext = {
     show_billing: boolean;
     show_remote_billing: boolean;
     show_plans: boolean;
-    show_webathena: boolean;
     sponsorship_pending: boolean;
     user_has_billing_access: boolean;
     user_color_scheme: number;
     color_scheme_values: ColorSchemeValues;
+    web_font_size_px: number;
+    web_line_height_percent: number;
+};
+
+type BillingInfo = {
+    show_billing: boolean;
+    show_remote_billing: boolean;
+    show_plans: boolean;
 };
 
 export function get_actions_popover_content_context(message_id: number): ActionPopoverContext {
     assert(message_lists.current !== undefined);
     const message = message_lists.current.get(message_id);
     assert(message !== undefined);
-    const message_container = message_lists.current.view.message_containers.get(message.id)!;
     const not_spectator = !page_params.is_spectator;
-    const should_display_hide_option =
-        muted_users.is_user_muted(message.sender_id) &&
-        !message_container.is_hidden &&
-        not_spectator;
     const is_content_editable = message_edit.is_content_editable(message);
     const can_move_message = message_edit.can_move_message(message);
 
@@ -197,13 +206,27 @@ export function get_actions_popover_content_context(message_id: number): ActionP
 
     const conversation_time_url = hash_util.by_conversation_and_time_url(message);
 
-    const should_display_delete_option = message_edit.get_deletability(message) && not_spectator;
+    const should_display_delete_option = message_delete.get_deletability(message);
     const should_display_read_receipts_option = realm.realm_enable_read_receipts && not_spectator;
+    const should_display_remind_me_option = not_spectator;
+
+    const should_display_message_report_option = (): boolean => {
+        if (page_params.is_spectator) {
+            return false;
+        }
+        if (realm.realm_moderation_request_channel_id === -1) {
+            return false;
+        }
+
+        // You can report any message you can access
+        return true;
+    };
 
     function is_add_reaction_icon_visible(): boolean {
         assert(message_lists.current !== undefined);
         const $message_row = message_lists.current.get_row(message_id);
-        return $message_row.find(".message_controls .reaction_button").is(":visible");
+        const $reaction_button = $message_row.find(".message_controls .reaction_button");
+        return $reaction_button.length === 1 && $reaction_button.css("display") !== "none";
     }
 
     // Since we only display msg actions and star icons on windows smaller than
@@ -213,7 +236,7 @@ export function get_actions_popover_content_context(message_id: number): ActionP
         !message.is_me_message &&
         !is_add_reaction_icon_visible() &&
         not_spectator &&
-        !(stream_id && stream_data.is_stream_archived(stream_id));
+        !(stream_id && stream_data.is_stream_archived_by_id(stream_id));
 
     return {
         message_id: message.id,
@@ -221,15 +244,16 @@ export function get_actions_popover_content_context(message_id: number): ActionP
         editability_menu_item,
         move_message_menu_item,
         should_display_mark_as_unread,
+        should_display_remind_me_option,
         view_source_menu_item,
         should_display_collapse,
         should_display_uncollapse,
         should_display_add_reaction_option,
-        should_display_hide_option,
         conversation_time_url,
         should_display_delete_option,
         should_display_read_receipts_option,
         should_display_quote_message,
+        should_display_message_report_option: should_display_message_report_option(),
     };
 }
 
@@ -247,8 +271,12 @@ export function get_topic_popover_content_context({
     const topic_unmuted = user_topics.is_topic_unmuted(sub.stream_id, topic_name);
     const has_starred_messages = starred_messages.get_count_in_topic(sub.stream_id, topic_name) > 0;
     const has_unread_messages = num_unread_for_topic(sub.stream_id, topic_name) > 0;
-    const can_move_topic = settings_data.user_can_move_messages_between_streams();
-    const can_rename_topic = settings_data.user_can_move_messages_to_another_topic();
+    const can_move_topic = stream_data.user_can_move_messages_out_of_channel(sub);
+    const can_rename_topic =
+        stream_data.user_can_move_messages_within_channel(sub) &&
+        !stream_data.is_empty_topic_only_channel(sub.stream_id);
+    const can_resolve_topic = !sub.is_archived && stream_data.can_resolve_topics(sub);
+
     const visibility_policy = user_topics.get_topic_visibility_policy(sub.stream_id, topic_name);
     const all_visibility_policies = user_topics.all_visibility_policies;
     const is_spectator = page_params.is_spectator;
@@ -257,6 +285,7 @@ export function get_topic_popover_content_context({
         stream_name: sub.name,
         stream_id: sub.stream_id,
         stream_muted: sub.is_muted,
+        stream_archived: sub.is_archived,
         topic_display_name: util.get_final_topic_display_name(topic_name),
         is_empty_string_topic: topic_name === "",
         topic_unmuted,
@@ -264,6 +293,7 @@ export function get_topic_popover_content_context({
         is_topic_empty,
         can_move_topic,
         can_rename_topic,
+        can_resolve_topic,
         is_realm_admin: current_user.is_admin,
         topic_is_resolved: resolved_topic.is_resolved(topic_name),
         has_starred_messages,
@@ -271,6 +301,8 @@ export function get_topic_popover_content_context({
         url,
         visibility_policy,
         all_visibility_policies,
+        can_summarize_topics: settings_data.user_can_summarize_topics(),
+        show_ai_features: !user_settings.hide_ai_features,
     };
 }
 
@@ -321,29 +353,61 @@ export function get_personal_menu_content_context(): PersonalMenuContext {
         // user color scheme
         user_color_scheme: user_settings.color_scheme,
         color_scheme_values: settings_config.color_scheme_values,
+
+        // info density values
+        web_font_size_px: user_settings.web_font_size_px,
+        web_line_height_percent: user_settings.web_line_height_percent,
     };
 }
 
-export function get_gear_menu_content_context(): GearMenuContext {
-    const user_has_billing_access = current_user.is_billing_admin || current_user.is_owner;
-    const is_plan_standard = realm.realm_plan_type === 3;
-    const is_plan_plus = realm.realm_plan_type === 10;
+function get_billing_info(): BillingInfo {
+    const billing_info = {
+        show_remote_billing: false,
+        show_billing: false,
+        show_plans: false,
+    };
+    if (!settings_data.user_has_billing_access()) {
+        return billing_info;
+    }
+
+    const is_plan_standard =
+        realm.realm_plan_type === settings_config.realm_plan_types.standard.code;
+    const is_plan_plus = realm.realm_plan_type === settings_config.realm_plan_types.plus.code;
     const is_org_on_paid_plan = is_plan_standard || is_plan_plus;
+
+    billing_info.show_remote_billing = !page_params.corporate_enabled;
+    billing_info.show_plans = !realm.zulip_plan_is_not_limited;
+    billing_info.show_billing = is_org_on_paid_plan;
+
+    return billing_info;
+}
+
+export function get_gear_menu_content_context(): GearMenuContext {
+    const user_has_billing_access = settings_data.user_has_billing_access();
+    const is_plan_standard =
+        realm.realm_plan_type === settings_config.realm_plan_types.standard.code;
+    const is_plan_plus = realm.realm_plan_type === settings_config.realm_plan_types.plus.code;
+    const is_org_on_paid_plan = is_plan_standard || is_plan_plus;
+    const billing_info = get_billing_info();
     return {
         realm_name: realm.realm_name,
         realm_url: new URL(realm.realm_url).hostname,
         is_owner: current_user.is_owner,
         is_admin: current_user.is_admin,
         is_spectator: page_params.is_spectator,
-        is_self_hosted: realm.realm_plan_type === 1,
+        is_self_hosted: realm.realm_plan_type === settings_config.realm_plan_types.self_hosted.code,
         is_development_environment: page_params.development_environment,
-        is_plan_limited: realm.realm_plan_type === 2,
+        is_demo_organization: realm.demo_organization_scheduled_deletion_date !== undefined,
+        is_plan_limited: realm.realm_plan_type === settings_config.realm_plan_types.limited.code,
         is_plan_standard,
-        is_plan_standard_sponsored_for_free: realm.realm_plan_type === 4,
+        is_plan_standard_sponsored_for_free:
+            realm.realm_plan_type === settings_config.realm_plan_types.standard_free.code,
         is_plan_plus,
         is_org_on_paid_plan,
-        is_business_org: realm.realm_org_type === 10,
-        is_education_org: realm.realm_org_type === 30 || realm.realm_org_type === 35,
+        is_business_org: realm.realm_org_type === settings_config.all_org_type_values.business.code,
+        is_education_org:
+            realm.realm_org_type === settings_config.all_org_type_values.education_nonprofit.code ||
+            realm.realm_org_type === settings_config.all_org_type_values.education.code,
         standard_plan_name: "Zulip Cloud Standard",
         server_needs_upgrade: realm.server_needs_upgrade,
         version_display_string: gear_menu_util.version_display_string(),
@@ -353,15 +417,17 @@ export function get_gear_menu_content_context(): GearMenuContext {
         is_guest: current_user.is_guest,
         login_link: page_params.development_environment ? "/devlogin/" : "/login/",
         promote_sponsoring_zulip: page_params.promote_sponsoring_zulip,
-        show_billing: page_params.show_billing,
-        show_remote_billing: page_params.show_remote_billing,
-        show_plans: page_params.show_plans,
-        show_webathena: page_params.show_webathena,
-        sponsorship_pending: page_params.sponsorship_pending,
+        show_billing: billing_info.show_billing,
+        show_remote_billing: billing_info.show_remote_billing,
+        show_plans: billing_info.show_plans,
+        sponsorship_pending: realm_billing.has_pending_sponsorship_request,
         user_has_billing_access,
         // user color scheme
         user_color_scheme: user_settings.color_scheme,
         color_scheme_values: settings_config.color_scheme_values,
+        // information density settings
+        web_font_size_px: user_settings.web_font_size_px,
+        web_line_height_percent: user_settings.web_line_height_percent,
     };
 }
 

@@ -18,7 +18,990 @@ clients should check the `zulip_feature_level` field, present in the
 /register`](/api/register-queue) responses, to determine the API
 format used by the Zulip server that they are interacting with.
 
+## Changes in Zulip 12.0
+
+**Feature level 448**
+
+* [`GET /streams/{stream_id}/email_address`](/api/get-stream-email-address):
+  Users have access to a channel's email address only if they have permission
+  to post messages in the channel.
+
+**Feature level 447**
+
+* `PATCH /bots/{bot_id}`: Added `short_name` parameter to support updating bot's email.
+
+**Feature level 446**
+
+* [`GET /messages`](/api/get-messages),
+  [`GET /messages/matches_narrow`](/api/check-messages-match-narrow),
+  [`POST /messages/flags/narrow`](/api/update-message-flags-for-narrow),
+  [`POST /register`](/api/register-queue):
+  Added support for a new [search/narrow filter](/api/construct-narrow#changes),
+  `mentions`. This operator filters messages that contain a direct,
+  visible personal mention of the specified user.
+
+**Feature level 445**
+
+* [`GET /messages`](/api/get-messages): Added a new `date` value for
+   the `anchor` parameter, and new `anchor_date` parameter, to support
+   fetching messages around a specific date/time.
+
+**Feature level 444**
+
+* [`PATCH /settings`](/api/update-settings): Added support for bulk updating
+  settings for specified users or members of user groups using `target_users`
+  and `skip_if_already_edited` parameters.
+
+**Feature level 443**
+
+* [`GET /attachments`](/api/get-attachments), [`GET /events`](/api/get-events):
+  The `create_time` and `date_sent` fields in `attachment` objects will now
+  return UNIX timestamps in seconds. Previously, these values were returned in
+  milliseconds.
+* [`PATCH /messages/{message_id}`](/api/update-message): The `create_time` and
+  `date_sent` fields in `detached_uploads` object will now return UNIX timestamps
+  in seconds. Previously, these values were returned in milliseconds.
+
+**Feature level 442**
+
+* [`GET /events`](/api/get-events): `giphy_rating` is now used to denote
+  the common rating configured for both Tenor and GIPHY integrations.
+* [`POST /register`](/api/register-queue): Added new `tenor_api_key`
+  field, which is required to fetch GIFs using the Tenor API.
+* [`POST /register`](/api/register-queue): Renamed
+  `giphy_rating_options` to `gif_rating_options` to generalize the
+  ratings for both GIPHY and Tenor integrations. `realm_giphy_rating`
+  is now used for both the Tenor and GIPHY integrations.
+
+**Feature level 441**
+
+* [`GET /users/me/subscriptions`](/api/get-subscriptions),
+  [`GET /streams`](/api/get-streams), [`GET /events`](/api/get-events),
+  [`POST /register`](/api/register-queue): Added `can_create_topic_group`
+  field which is a [group-setting value](/api/group-setting-values) describing
+  the set of users with permissions to create new topics in the channel.
+* [`POST /users/me/subscriptions`](/api/subscribe),
+  [`PATCH /streams/{stream_id}`](/api/update-stream): Added `can_create_topic_group`
+  parameter to support setting and changing the user group whose members can create
+  new topics in the specified channel.
+
+**Feature level 440**
+
+* [`GET users/<user_id>/channels`](/api/get-user-channels)
+  Added a new endpoint to get the channels another user is subscribed to.
+
+**Feature level 439**
+
+* [`GET /events`](/api/get-events): The deprecated `update_display_settings`
+  and `update_global_notifications` event types are no longer sent to any
+  clients. These legacy event types were deprecated in Zulip 5.0 (feature
+  level 89) and replaced by the `user_settings` event type.
+
+**Feature level 438**
+
+* [`POST /register`](/api/register-queue): Added
+  `realm_owner_full_content_access` field indicating whether the
+  organization's security model allows owners to access all private
+  content in this organization.
+
+**Feature level 437**
+
+* [`GET /users`](/api/get-users), [`GET
+  /users/{user_id}`](/api/get-user), [`GET
+  /users/{email}`](/api/get-user-by-email): Fixed a bug dating to
+  feature level 232, where guest users might incorrectly receive fake
+  backwards-compatibility users in the format intended for clients
+  using `POST /register` without the `user_list_incomplete` client
+  capability.
+
+**Feature level 436**
+
+* [Message formatting](/api/message-formatting): Added new
+  specification that emoji-only messages should show enlarged emoji.
+
+**Feature level 435**
+
+* [`POST /register`](/api/register-queue): Added `server_report_message_types`
+  field which contains a list of supported report types for the [message
+  report](/help/report-a-message) feature.
+
+**Feature level 434**
+
+* [`POST /register`](/api/register-queue), [`POST /events`](/api/get-events),
+  `PATCH /realm`: Added a new `send_channel_events_messages` realm setting indicating
+  whether channel event messages are sent in the organization.
+
+**Feature level 433**
+
+* [`GET /users`](/api/get-users), [`GET /users/{user_id}`](/api/get-user),
+  [`GET /users/{email}`](/api/get-user-by-email) and
+  [`GET /users/me`](/api/get-own-user): Added `is_imported_stub` field to
+  returned user objects.
+* [`POST /register`](/api/register-queue): Added `is_imported` field
+  in the user objects returned in the `realm_users` field and in the bot
+  objects returned in `cross_realm_bots` field.
+* [`GET /events`](/api/get-events): Added `is_imported_stub` field to
+  user objects sent in `realm_user` events.
+
+**Feature level 432**
+
+* [`POST /mobile_push/register`](/api/register-push-device): Replaced
+  `push_public_key` parameter with `push_key`.
+
+**Feature level 431**
+
+* [`POST /register`](/api/register-queue), [`PATCH /settings`](/api/update-settings),
+  [`PATCH /realm/user_settings_defaults`](/api/update-realm-user-settings-defaults):
+  Added new `web_inbox_show_channel_folders` display setting,
+  controlling whether any [channel folders](/help/channel-folders)
+  configured by the organization are used to organize how conversations
+  with unread messages are displayed in the web/desktop application's
+  Inbox view.
+
+**Feature level 430**
+
+* [`GET /export/realm/consents`](/api/get-realm-export-consents): Added an
+  integer field `email_address_visibility` to the objects in the
+  `export_consents` array.
+
+**Feature level 429**
+
+* Replaced the `pm_users` field with `recipient_user_ids` in
+[E2EE mobile push notifications payload](/api/mobile-notifications)
+for group direct message. Previously, `pm_users` was included only
+for group DMs; `recipient_user_ids` is present for both 1:1 and
+group DM conversations.
+
+**Feature level 428**
+
+* [`GET /events`](/api/get-events): When a user is deactivated,
+  `peer_remove` events are now sent for archived streams as well,
+  not just unarchived ones.
+
+**Feature level 427**
+
+* [`POST /register`](/api/register-queue): `stream_creator_or_nobody`
+  value for `default_group_name` field in `server_supported_permission_settings`
+  object is renamed to `channel_creator`.
+
+**Feature level 426**
+
+* [`POST /register`](/api/register-queue): Removed the
+  `realm_is_zephyr_mirror_realm` property from the response.
+
+Feature levels 421-424 reserved for future use in 11.x maintenance
+releases.
+
+## Changes in Zulip 11.0
+
+**Feature level 421**
+
+No changes; API feature level used for the Zulip 11.0 release.
+
+**Feature level 420**
+
+* [`POST /mobile_push/e2ee/test_notification`](/api/e2ee-test-notify):
+  Added a new endpoint to send an end-to-end encrypted test push notification
+  to the user's selected mobile device or all of their mobile devices.
+
+**Feature level 419**
+
+* [`POST /register`](/api/register-queue): Added `simplified_presence_events`
+  [client capability](/api/register-queue#parameter-client_capabilities),
+  which allows clients to specify whether they support receiving the
+  `presence` event type with user presence data in the modern API format.
+* [`GET /events`](/api/get-events): Added the `presences` field to the
+  `presence` event type for clients that support the `simplified_presence_events`
+  [client capability](/api/register-queue#parameter-client_capabilities).
+  The `presences` field will have the user presence data in the modern
+  API format. For clients that don't support that client capability the
+  event will contain fields with the legacy format for user presence data.
+
+**Feature level 418**
+
+* [`GET /events`](/api/get-events): An event with `type: "channel_folder"`
+  and `op: "reorder"` is sent when channel folders are reordered.
+
+**Feature level 417**
+
+* [`POST channels/create`](/api/create-channel): Added a dedicated
+  endpoint for creating a new channel. Previously, channel creation
+  was done entirely through
+  [`POST /users/me/subscriptions`](/api/subscribe).
+
+**Feature level 416**
+
+* [`POST /invites`](/api/send-invites), [`POST
+  /invites/multiuse`](/api/create-invite-link): Added a new parameter
+  `welcome_message_custom_text` which allows the users to add a
+  Welcome Bot custom message for new users through invitations.
+
+* [`POST /register`](/api/register-queue), [`POST /events`](/api/get-events),
+  `PATCH /realm`: Added `welcome_message_custom_text` realm setting which is the
+  default custom message for the Welcome Bot when sending invitations to new users.
+
+* [`POST /realm/test_welcome_bot_custom_message`](/api/test-welcome-bot-custom-message):
+  Added new endpoint test messages with the Welcome Bot custom message. The test
+  messages are sent to the acting administrator, allowing them to preview how the
+  custom welcome message will appear to new users upon joining the organization.
+
+**Feature level 415**
+
+* [`POST /reminders`](/api/create-message-reminder): Added parameter
+  `note` to allow users to add notes to their reminders.
+* [`POST /register`](/api/register-queue): Added `max_reminder_note_length`
+  for clients to restrict the reminder note length before sending it to
+  the server.
+
+**Feature level 414**
+
+* [`POST /channel_folders/create`](/api/create-channel-folder),
+  [`GET /channel_folders`](/api/get-channel-folders),
+  [`PATCH /channel_folders/{channel_folder_id}`](/api/update-channel-folder):
+  Added a new field `order` to show in which order should channel folders be
+  displayed. The list is 0-indexed and works similar to the `order` field of
+  custom profile fields.
+* [`PATCH /channel_folders`](/api/patch-channel-folders): Added a new
+  endpoint for reordering channel folders. It accepts an array of channel
+  folder IDs arranged in the order the user desires it to be in.
+* [`GET /channel_folders`](/api/get-channel-folders): Channel folders will
+  be ordered by the `order` field instead of `id` field when being returned.
+
+**Feature level 413**
+
+* Mobile push notification payloads for APNs no longer contain the
+  `server` and `realm_id` fields, which were unused.
+* Mobile push notification payloads for FCM to remove push
+  notifications no longer contain the legacy pre-2019
+  `zulip_message_id` field; all functional clients support the newer
+  `zulip_message_ids`.
+* Mobile push notification payloads for FCM to for new messages no
+  longer contain the (unused) `content_truncated` boolean field.
+- E2EE mobile push notification payloads now have a [modernized and
+  documented format](/api/mobile-notifications).
+
+**Feature level 412**
+
+* [`POST /register`](/api/register-queue),
+  [`GET /users/me/subscriptions`](/api/get-subscriptions):
+  Added support for passing `partial` as argument to `include_subscribers`
+  parameter to get only partial subscribers data of the channel.
+* [`POST /register`](/api/register-queue),
+  [`GET /users/me/subscriptions`](/api/get-subscriptions):
+  Added `partial_subscribers` field in `subscription` objects.
+
+**Feature level 411**
+
+* [`POST /register`](/api/register-queue), [`PATCH /settings`](/api/update-settings),
+  [`PATCH /realm/user_settings_defaults`](/api/update-realm-user-settings-defaults):
+  Added new `web_left_sidebar_show_channel_folders` display setting,
+  controlling whether any [channel folders](/help/channel-folders)
+  configured by the organization are used to organize how channels
+  are displayed in the web/desktop application's left sidebar.
+
+**Feature level 410**
+
+* [`POST /register`](/api/register-queue): Added
+  `max_channel_folder_name_length` and
+  `max_channel_folder_description_length` fields to the response.
+* Mobile push notification payloads for APNs no longer contain the
+  `time` field, which was unused.
+
+**Feature level 409**
+
+* `PATCH /realm`, [`POST /register`](/api/register-queue),
+  [`GET /events`](/api/get-events): Added a new
+  `require_e2ee_push_notifications` realm setting.
+
+**Feature level 407**
+
+* [`GET /users/me/subscriptions`](/api/get-subscriptions),
+  [`GET /streams`](/api/get-streams), [`GET /events`](/api/get-events),
+  [`POST /register`](/api/register-queue): Added `can_delete_any_message_group`
+  field which is a [group-setting value](/api/group-setting-values) describing the
+  set of users with permissions to delete any message in the channel.
+* [`POST /users/me/subscriptions`](/api/subscribe),
+  [`PATCH /streams/{stream_id}`](/api/update-stream): Added
+  `can_delete_any_message_group` parameter to support setting and
+  changing the user group whose members can delete any message in the specified
+  channel.
+* `PATCH /realm`, [`POST /register`](/api/register-queue),
+  [`GET /events`](/api/get-events): Added `can_set_delete_message_policy_group`
+  realm setting, which is a [group-setting value](/api/group-setting-values)
+  describing the set of users with permission to change per-channel
+  `can_delete_any_message_group` and `can_delete_own_message_group` settings.
+* [`GET /users/me/subscriptions`](/api/get-subscriptions),
+  [`GET /streams`](/api/get-streams), [`GET /events`](/api/get-events),
+  [`POST /register`](/api/register-queue): Added `can_delete_own_message_group`
+  field which is a [group-setting value](/api/group-setting-values) describing the
+  set of users with permissions to delete the messages they have sent in the channel.
+* [`POST /users/me/subscriptions`](/api/subscribe),
+  [`PATCH /streams/{stream_id}`](/api/update-stream): Added
+  `can_delete_own_message_group` parameter to support setting and
+  changing the user group whose members can delete the messages they have sent
+  in the channel.
+- [`POST /users/{user_id}/status`](/api/update-status-for-user): Added
+  new API endpoint for an administrator to update the status for
+  another user.
+
+**Feature level 406**
+
+* [`POST /register`](/api/register-queue): Added `push_devices`
+  field to response.
+* [`GET /events`](/api/get-events): A `push_device` event is sent
+  to clients when registration to bouncer either succeeds or fails.
+* [`POST /mobile_push/register`](/api/register-push-device): Added
+  an endpoint to register a device to receive end-to-end encrypted
+  mobile push notifications.
+
+**Feature level 405**
+
+* [Message formatting](/api/message-formatting): Added new HTML
+  formatting for uploaded audio files generating a player experience.
+
+**Feature level 404**
+
+* [`GET /users/me/subscriptions`](/api/get-subscriptions),
+  [`GET /streams`](/api/get-streams), [`GET /events`](/api/get-events),
+  [`POST /register`](/api/register-queue): Added new `"empty_topic_only"`
+  option to the `topics_policy` field on Stream and Subscription
+  objects.
+* [`POST /users/me/subscriptions`](/api/subscribe),
+  [`PATCH /streams/{stream_id}`](/api/update-stream): Added new
+  `"empty_topic_only"` option to `topics_policy` parameter for
+  ["general chat" channels](/help/general-chat-channels).
+
+**Feature level 403**
+
+* [`POST /register`](/api/register-queue): Added a `url_options` object
+  to the `realm_incoming_webhook_bots` object for incoming webhook
+  integration URL parameter options. Previously, these optional URL
+  parameters were included in the `config_options` field (see feature
+  level 318 entry). The `config_options` object is now reserved for
+  configuration data that can be set when creating an bot user for a
+  specific incoming webhook integration.
+
+**Feature level 402**
+
+
+* [`GET /users/me/subscriptions`](/api/get-subscriptions),
+  [`GET /streams`](/api/get-streams), [`GET /events`](/api/get-events),
+  [`POST /register`](/api/register-queue): Added `can_resolve_topics_group`
+  which is a [group-setting value](/api/group-setting-values) describing the
+  set of users with permissions to resolve topics in the channel.
+* [`POST /users/me/subscriptions`](/api/subscribe),
+  [`PATCH /streams/{stream_id}`](/api/update-stream): Added `can_resolve_topics_group`
+  which is a [group-setting value](/api/group-setting-values) describing the
+  set of users with permissions to resolve topics in the channel.
+
+**Feature level 401**
+
+* [`POST /register`](/api/register-queue), [`PATCH
+  /settings`](/api/update-settings), [`PATCH
+  /realm/user_settings_defaults`](/api/update-realm-user-settings-defaults):
+  Added new option in user setting `web_channel_default_view`, to navigate
+  to top unread topic in channel.
+
+**Feature level 400**
+
+* [Markdown message formatting](/api/message-formatting#links-to-channels-topics-and-messages):
+  The server now prefers the latest message in a topic, not the
+  oldest, when constructing topic permalinks using the `/with/` operator.
+
+**Feature level 399**
+
+* [`GET /events`](/api/get-events):
+  Added `reminders` events sent to clients when a user creates
+  or deletes scheduled messages.
+* [`GET /reminders`](/api/get-reminders):
+  Clients can now request `/reminders` endpoint to fetch all
+  scheduled reminders.
+* [`DELETE /reminders/{reminder_id}`](/api/delete-reminder):
+  Clients can now delete a scheduled reminder.
+
+**Feature level 398**
+
+* [`POST /register`](/api/register-queue), [`PATCH /settings`](/api/update-settings),
+  [`PATCH /realm/user_settings_defaults`](/api/update-realm-user-settings-defaults):
+  Added new `web_left_sidebar_unreads_count_summary` display setting,
+  controlling whether summary unread counts are displayed in the left sidebar.
+
+**Feature level 397**
+
+* [`POST /users/me/subscriptions`](/api/subscribe): Added parameter
+  `send_new_subscription_messages` which determines whether the user
+  would like Notification Bot to notify other users who the request
+  adds to a channel.
+
+* [`POST /users/me/subscriptions`](/api/subscribe): Added
+  `new_subscription_messages_sent` to the response, which is only
+  present if `send_new_subscription_messages` was `true` in the request.
+
+* [`POST /register`](/api/register-queue): Added `max_bulk_new_subscription_messages`
+  to the response.
+
+**Feature level 396**
+
+* [`GET /users/me/subscriptions`](/api/get-subscriptions),
+  [`GET /streams`](/api/get-streams), [`GET /events`](/api/get-events),
+  [`POST /register`](/api/register-queue): Added `can_move_messages_within_channel_group`
+  field which is a [group-setting value](/api/group-setting-values) describing the
+  set of users with permissions to move messages within the channel.
+* [`POST /users/me/subscriptions`](/api/subscribe),
+  [`PATCH /streams/{stream_id}`](/api/update-stream): Added
+  `can_move_messages_within_channel_group` parameter to support setting and
+  changing the user group whose members can move messages within the specified
+  channel.
+* [`GET /users/me/subscriptions`](/api/get-subscriptions),
+  [`GET /streams`](/api/get-streams), [`GET /events`](/api/get-events),
+  [`POST /register`](/api/register-queue): Added `can_move_messages_out_of_channel_group`
+  field which is a [group-setting value](/api/group-setting-values) describing the
+  set of users with permissions to move messages out of the channel.
+* [`POST /users/me/subscriptions`](/api/subscribe),
+  [`PATCH /streams/{stream_id}`](/api/update-stream): Added
+  `can_move_messages_out_of_channel_group` parameter to support setting and
+  changing the user group whose members can move messages out of the specified
+  channel.
+
+**Feature level 395**
+
+* [Markdown message
+  formatting](/api/message-formatting#removed-features): Previously,
+  Zulip's Markdown syntax had special support for previewing Dropbox
+  albums. Dropbox albums no longer exist, and links to Dropbox folders
+  now consistently use Zulip's standard open graph preview markup.
+
+**Feature level 394**
+
+* [`POST /register`](/api/register-queue), [`GET
+  /events`](/api/get-events), [`GET /streams`](/api/get-streams),
+  [`GET /streams/{stream_id}`](/api/get-stream-by-id): Added a new
+  field `subscriber_count` to Stream and Subscription objects with the
+  total number of non-deactivated users who are subscribed to the
+  channel.
+
+**Feature level 393**
+
+* [`PATCH /messages/{message_id}`](/api/delete-message),
+  [`POST /register`](/api/register-queue), [`GET /events`](/api/get-events):
+  In `delete_message` event, all the `message_ids` will now be sorted in
+  increasing order.
+* [`PATCH /messages/{message_id}`](/api/update-message),
+  [`POST /register`](/api/register-queue), [`GET /events`](/api/get-events):
+  In `update_message` event, all the `message_ids` will now be sorted in
+  increasing order.
+
+**Feature level 392**
+
+* [`GET /users/me/subscriptions`](/api/get-subscriptions),
+  [`GET /streams`](/api/get-streams), [`GET /events`](/api/get-events),
+  [`POST /register`](/api/register-queue): Added the `topics_policy`
+  field to Stream and Subscription objects to support channel-level
+  configurations for sending messages to the empty ["general chat"
+  topic](/help/general-chat-topic).
+* [`POST /users/me/subscriptions`](/api/subscribe),
+  [`PATCH /streams/{stream_id}`](/api/update-stream): Added
+  `topics_policy` parameter to support setting and updating the
+  channel-level configuration for sending messages to the
+  empty ["general chat" topic](/help/general-chat-topic).
+* `PATCH /realm`, [`GET /events`](/api/get-events),
+  [`POST /register`](/api/register-queue): Added
+  `can_set_topics_policy_group` realm setting, which is a
+  [group-setting value](/api/group-setting-values) describing the set
+  of users with permission to change the per-channel `topics_policy`
+  setting.
+* `PATCH /realm`, [`GET /events`](/api/get-events),
+  [`POST /register`](/api/register-queue):
+  Added a new realm `topics_policy` setting for the organization's
+  default policy for sending channel messages to the empty ["general
+  chat" topic](/help/general-chat-topic).
+* [`GET /events`](/api/get-events), [`POST /register`](/api/register-queue):
+  Deprecated the realm `mandatory_topics` setting in favor of the new
+  realm `topics_policy` setting.
+* `PATCH /realm`: Removed the `mandatory_topics` parameter as it is now
+  replaced by the realm `topics_policy` setting.
+
+**Feature level 391**
+
+* [`POST /user_groups/{user_group_id}/members`](/api/update-user-group-members),
+  [`POST /user_groups/{user_group_id}/subgroups`](/api/update-user-group-subgroups):
+  Adding/removing members and subgroups to a deactivated group is now allowed.
+
+**Feature level 390**
+
+* [`GET /events`](/api/get-events): Events with `type: "navigation_view"` are
+  sent to the user when a navigation view is created, updated, or removed.
+
+* [`POST /register`](/api/register-queue): Added `navigation_views` field in
+  response.
+
+* [`GET /navigation_views`](/api/get-navigation-views): Added a new endpoint for
+  fetching all navigation views of the user.
+
+* [`POST /navigation_views`](/api/add-navigation-view): Added a new endpoint for
+  creating a new navigation view.
+
+* [`PATCH /navigation_views/{fragment}`](/api/edit-navigation-view): Added a new
+  endpoint for editing the details of a navigation view.
+
+* [`DELETE /navigation_views/{fragment}`](/api/remove-navigation-view): Added a new
+  endpoint for removing a navigation view.
+
+**Feature level 389**
+
+* [`POST /channel_folders/create`](/api/create-channel-folder): Added
+  a new endpoint for creating a new channel folder.
+* [`GET /channel_folders`](/api/get-channel-folders): Added a new endpoint
+  to get all channel folders in the realm.
+* [`PATCH /channel_folders/{channel_folder_id}`](/api/update-channel-folder):
+  Added a new endpoint to update channel folder.
+* [`POST /register`](/api/register-queue): Added `channel_folders` field to
+  response.
+* [`GET /events`](/api/get-events): An event with `type: "channel_folder"` is
+  sent to all users when a channel folder is created.
+* [`GET /users/me/subscriptions`](/api/get-subscriptions),
+  [`GET /streams`](/api/get-streams), [`GET /events`](/api/get-events),
+  [`POST /register`](/api/register-queue): Added `folder_id` field
+  to Stream and Subscription objects.
+* [`POST /users/me/subscriptions`](/api/subscribe): Added support to add
+  newly created channels to folder using `folder_id` parameter.
+* [`PATCH /streams/{stream_id}`](/api/update-stream): Added support
+  for updating folder to which the channel belongs.
+* [`GET /events`](/api/get-events): An event with `type: "channel_folder"` is
+  sent to all users when a channel folder is updated.
+* [`GET /events`](/api/get-events): `value` field in `stream/update`
+  events can have `null` when channel is removed from a folder.
+
+**Feature level 388**
+
+* [`PATCH /streams/{stream_id}`](/api/update-stream): Added
+  `is_archived` parameter to support unarchiving previously archived
+  channels.
+
+**Feature level 387**
+
+* [`GET /users`](/api/get-users): This endpoint no longer requires
+  authentication for organizations using the [public access
+  option](/help/public-access-option).
+
+**Feature level 386**
+
+* [`PATCH /user_groups/{user_group_id}`](/api/update-user-group):
+  Added support to reactivate groups by passing `deactivated`
+  parameter as `False`.
+
+**Feature level 385**
+
+* [`POST /register`](/api/register-queue), [`PATCH/settings`](/api/update-settings),
+  [`PATCH/realm/user_settings_defaults`](/api/update-realm-user-settings-defaults):
+  Added new `resolved_topic_notice_auto_read_policy` setting, which controls
+  how resolved-topic notices are marked as read for a user.
+
+**Feature level 384**
+
+* [`GET /users`](/api/get-users): Added `user_ids` query parameter to
+  fetch data only for the provided `user_ids`.
+
+**Feature level 383**
+
+* [`POST /register`](/api/register-queue), [`PATCH
+  /settings`](/api/update-settings), [`PATCH
+  /realm/user_settings_defaults`](/api/update-realm-user-settings-defaults):
+  Added new option in user setting `web_channel_default_view`, to show
+  inbox view style list of topics.
+
+**Feature level 382**
+
+* `POST /message/{message_id}/report`: Added a new endpoint for submitting
+  a moderation request for a message.
+
+**Feature level 381**
+
+* [`POST /reminders`](/api/create-message-reminder): Added a new endpoint to
+  schedule personal reminder for a message.
+
+**Feature level 380**
+
+* [`POST /register`](/api/register-queue), [`GET
+  /events`](/api/get-events): The `is_moderator` convenience field now
+  is true for organization administrators, matching how `is_admin`
+  works for organization owners.
+
+**Feature level 379**
+
+* [`PATCH /messages/{message_id}`](/api/update-message): Added
+ optional parameter `prev_content_sha256`, which clients can use to
+ prevent races with the message being edited by another client.
+
+**Feature level 378**
+
+* [`GET /events`](/api/get-events): Archiving and unarchiving
+  streams now send `update` events to clients that declared
+  the `archived_channels` client capability. `delete` and `create`
+  events are still sent to clients that did not declare
+  `archived_channels` client capability.
+* [`POST /register`](/api/register-queue): The `streams` data
+  structure now includes archived channels for clients that
+  declared the `archived_channels` client capability.
+
+**Feature level 377**
+
+* [`GET /events`](/api/get-events): When a user is deactivate, send
+  `peer_remove` event to all the subscribers of the streams that the
+  user was subscribed to.
+
+Feature levels 373-376 reserved for future use in 10.x maintenance
+releases.
+
+## Changes in Zulip 10.1
+
+**Feature level 372**
+
+* [`POST /typing`](/api/set-typing-status): The `"(no topic)"` value
+  when used for `topic` parameter is now interpreted as an empty string.
+
 ## Changes in Zulip 10.0
+
+**Feature level 371**
+
+No changes; feature level used for Zulip 10.0 release.
+
+**Feature level 370**
+
+* [`POST /messages`](/api/send-message),
+  [`POST /scheduled_messages`](/api/create-scheduled-message),
+  [`PATCH /scheduled_messages/<int:scheduled_message_id>`](/api/update-scheduled-message):
+  The `"(no topic)"` value when used for `topic` parameter is
+  now interpreted as an empty string.
+
+**Feature level 369**
+
+* [`POST /register`](/api/register-queue): Added `navigation_tour_video_url`
+  to the response.
+
+**Feature level 368**
+
+* [`GET /events`](/api/get-events): An event with `type: "saved_snippet"`
+  and `op: "update"` is sent to the current user when a saved snippet is edited.
+* [`PATCH /saved_snippets/{saved_snippet_id}`](/api/edit-saved-snippet):
+  Added a new endpoint for editing a saved snippet.
+
+**Feature level 367**
+
+* [`POST /register`](/api/register-queue), [`POST /events`](/api/get-events):
+  Added new  `can_resolve_topics_group` realm setting, which is a
+  [group-setting value](/api/group-setting-values) describing the set of
+  users with permission to resolve topics in a stream.
+
+**Feature level 366**
+
+* [`GET /messages`](/api/get-messages),
+  [`GET /messages/matches_narrow`](/api/check-messages-match-narrow),
+  [`POST /messages/flags/narrow`](/api/update-message-flags-for-narrow),
+  [`POST /register`](/api/register-queue):
+  Added a new [search/narrow filter](/api/construct-narrow),
+  `is:muted`, matching messages in topics and channels that the user
+  has [muted](/help/mute-a-topic).
+
+**Feature level 365**
+
+* [`GET /events`](/api/get-events), [`GET /messages`](/api/get-messages),
+  [`GET /messages/{message_id}`](/api/get-message): Added
+  `last_moved_timestamp` field to message objects for when the message
+  was last moved to a different channel or topic. If the message's topic
+  has only been [resolved or unresolved](/help/resolve-a-topic), then
+  the field is not present. Clients should use this field, rather than
+  parsing the message object's `edit_history` array, to display an
+  indicator that the message has been moved.
+ * [`GET /events`](/api/get-events), [`GET /messages`](/api/get-messages),
+  [`GET /messages/{message_id}`](/api/get-message): The
+  `last_edit_timestamp` field on message objects is only present if the
+  message's content has been edited. Previously, this field was present
+  if the message's content had been edited or moved to a different
+  channel or topic. Clients should use this field, rather than parsing
+  the message object's `edit_history` array, to display an indicator
+  that the message has been edited.
+
+**Feature level 364**
+
+* [`PATCH /realm/user_settings_defaults`](/api/update-realm-user-settings-defaults),
+  [`POST /register`](/api/register-queue), [`PATCH /settings`](/api/update-settings)
+  [`GET /events`](/api/get-events): Removed `dense_mode` setting.
+
+**Feature level 363**
+
+* `PATCH /realm`, [`GET /events`](/api/get-events),
+  [`POST /register`](/api/register-queue):
+  Added `can_manage_billing_group` realm setting which is a
+  [group-setting value](/api/group-setting-values) describing the set of users
+  with permission manage plans and billing for the organization.
+* [`POST /register`](/api/register-queue): Added a new `realm_billing` object
+  containing additional information about the organization's billing state,
+  such as sponsorship request status.
+* [`GET /users`](/api/get-users), [`GET /users/{user_id}`](/api/get-user),
+  [`GET /users/{email}`](/api/get-user-by-email), [`GET /users/me`](/api/get-own-user),
+  [`GET /events`](/api/get-events), [`POST /register`](/api/register-queue):
+  Removed `is_billing_admin` field from user objects, as the permission to manage
+  plans and billing in the organization is now controlled by `can_manage_billing_group`.
+
+**Feature level 362**
+
+* [`POST /users/me/subscriptions`](/api/subscribe),
+  [`DELETE /users/me/subscriptions`](/api/unsubscribe): Subscriptions
+  in archived channels can now be edited by users with the appropriate
+  permission, just like in non-archived channels.
+* [`PATCH /streams/{stream_id}`](/api/update-stream): Archived
+  channels can now be converted between public and private channels,
+  just like non-archived channels.
+* [`POST /register`](/api/register-queue): The `never_subscribed` data
+  structure now includes archived channels for clients that declared
+  the `archived_channels` client capability.
+
+**Feature level 361**
+
+* [`POST /messages/{message_id}/typing`](/api/set-typing-status-for-message-edit):
+  Renamed `POST /messages/{message_id}/typing` to
+  `POST /message_edit_typing`, passing the one `message_id` parameter
+  in the URL path, for consistency with the rest of the API.
+
+**Feature level 360**
+
+* [`GET /messages/{message_id}`](/api/get-message), [`GET
+  /messages/{message_id}/read_receipts`](/api/get-read-receipts):
+  Messages from an archived channels can now be read through these API
+  endpoints, if the channel's access control permissions permit doing
+  so.
+
+**Feature level 359**
+
+* `PATCH /bots/{bot_user_id}`: Previously, changing the owner of a bot
+  unsubscribed the bot from any channels that the new owner was not
+  subscribed to. This behavior was removed in favor of documenting the
+  security trade-off associated with giving bots read access to
+  sensitive channel content.
+
+**Feature level 358**
+
+* `PATCH /realm`, [`GET /events`](/api/get-events): Changed `allow_edit_history`
+  boolean field to `message_edit_history_visibility_policy` integer field to
+  support an intermediate field for `Moves only` edit history of messages.
+* [`POST /register`](/api/register-queue): `realm_allow_edit_history` field is
+  deprecated and has been replaced by `realm_message_edit_history_visibility_policy`.
+  The value of `realm_allow_edit_history` is set to `False` if
+  `realm_message_edit_history_visibility_policy` is configured as "None",
+  and `True` for "Moves only" or "All" message edit history.
+
+**Feature level 357**
+
+* [`GET /users/me/subscriptions`](/api/get-subscriptions),
+  [`GET /streams`](/api/get-streams), [`GET /events`](/api/get-events),
+  [`POST /register`](/api/register-queue): Added `can_subscribe_group`
+  field to Stream and Subscription objects.
+* [`POST /users/me/subscriptions`](/api/subscribe),
+  [`PATCH /streams/{stream_id}`](/api/update-stream): Added
+  `can_subscribe_group` parameter to support setting and changing the
+  user group whose members can subscribe to the specified stream.
+
+**Feature level 356**
+
+* [`GET /streams`](/api/get-streams): The new parameter
+  `include_can_access_content`, if set to True, returns all the
+  channels that the user making the request has content access to.
+* [`GET /streams`](/api/get-streams): Rename `include_all_active` to
+  `include_all` since the separate `exclude_archived` parameter is
+  what controls whether to include archived channels. The
+  `include_all` parameter is now supported for non-administrators.
+
+**Feature level 355**
+
+* [`POST /messages/flags/narrow`](/api/update-message-flags-for-narrow),
+  [`POST /messages/flags`](/api/update-message-flags):
+  Added `ignored_because_not_subscribed_channels` field in the response, which
+  is a list of the channels whose messages were skipped to mark as unread
+  because the user is not subscribed to them.
+
+**Feature level 354**
+
+* [`GET /messages`](/api/get-messages), [`GET
+  /messages/{message_id}`](/api/get-message), [`POST
+  /messages/flags/narrow`]: Users can access messages in unsubscribed
+  private channels that are accessible only via groups that grant
+  content access.
+* [`GET /messages/{message_id}/read_receipts`](/api/get-read-receipts):
+  Users can access read receipts in unsubscribed private channels that are
+  accessible only via groups that grant content access.
+* [`POST /messages/{message_id}/reactions`](/api/add-reaction),
+  [`DELETE /messages/{message_id}/reactions`](/api/remove-reaction):
+  Users can react to messages in unsubscribed private channels that are
+  accessible only via groups that grant content access.
+* `POST /submessage`: Users can interact with polls and similar
+  widgets in messages in unsubscribed private channels that are
+  accessible only via groups that grant content access.
+* [`PATCH /messages/{message_id}`](/api/update-message): Users can
+  edit messages they have posted in unsubscribed private channels that
+  are accessible only via groups that grant content access.
+* [`POST
+  /message_edit_typing`](/api/set-typing-status-for-message-edit):
+  Users can generate typing notifications when editing messages in
+  unsubscribed private channels that are accessible only via groups
+  that grant content access.
+* [`POST /messages`](/api/send-message): Users can send messages to
+  private channels with shared history without subscribing if they are
+  part of groups that grant content access and also in
+  `can_send_message_group`.
+
+**Feature level 353**
+
+* [`POST /register`](/api/register-queue), [`GET /events`](/api/get-events),
+  `PATCH /realm`: Zoom Server to Server OAuth integration added as an option
+  for the realm setting `video_chat_provider`.
+
+**Feature level 352**
+
+* `PATCH /realm`, [`POST /register`](/api/register-queue),
+  [`GET /events`](/api/get-events): Added `can_mention_many_users_group`
+  realm setting, which is a [group-setting value](/api/group-setting-values)
+  describing the set of users with permission to use wildcard mentions in large
+  channels.
+* `PATCH /realm`, [`GET /events`](/api/get-events): Removed
+  `wildcard_mention_policy` property, as the permission to use wildcard mentions
+  in large channels is now controlled by `can_mention_many_users_group` setting.
+* [`POST /register`](/api/register-queue): `realm_wildcard_mention_policy`
+  field is deprecated, having been replaced by `can_mention_many_users_group`.
+  Notably, this backwards-compatible `realm_wildcard_mention_policy` value
+  now contains the superset of the true value that best approximates the actual
+  permission setting.
+
+**Feature level 351**
+
+* [`POST /message_edit_typing`](/api/set-typing-status-for-message-edit):
+  Added a new endpoint for sending typing notification when a message is
+  being edited both in streams and direct messages.
+
+* [`GET /events`](/api/get-events): The new `typing_edit_message` event
+  is sent when a user starts editing a message.
+
+**Feature level 350**
+
+* [`POST /register`](/api/register-queue): Added
+  `server_can_summarize_topics` to the response.
+* [`POST /register`](/api/register-queue), [`POST /events`](/api/get-events),
+  `PATCH /realm`: Added `can_summarize_topics_group` realm setting which is
+  a [group-setting value](/api/group-setting-values) describing the set of
+  users with permission to use AI summarization.
+* [`PATCH /realm/user_settings_defaults`](/api/update-realm-user-settings-defaults),
+  [`POST /register`](/api/register-queue), [`PATCH /settings`](/api/update-settings):
+  Added new `hide_ai_features` option for hiding all AI features in the UI.
+
+**Feature level 349**
+
+* [`POST /users/me/subscriptions`](/api/subscribe): Users belonging to
+  `can_add_subscribers_group` should be able to add subscribers to a
+  private channel without being subscribed to it.
+* [`DELETE /users/me/subscriptions`](/api/get-subscriptions): Channel
+  administrators can now unsubscribe other users even if they are not
+  an organization administrator or part of
+  `can_remove_subscribers_group`.
+* [`PATCH /streams/{stream_id}`](/api/update-stream),
+  [`DELETE /streams/{stream_id}`](/api/archive-stream): Channel and
+  organization administrators can modify all the settings requiring
+  only metadata access without having content access to it. They
+  cannot add subscribers to the channel or change it's privacy setting
+  without having content access to it.
+* [`GET /events`](/api/get-events): All users with metadata access to
+  a channel are now notified when a relevant stream event occurs.
+  Previously, non-admin users who were channel admins or users
+  belonging to `can_add_subscribers_group` were not notified of events
+  for a private channel they were not subscribed to.
+* [`GET /events`](/api/get-events): If a user is a channel
+  administrator for a private channel they are not subscribed to. That
+  channel will now appear either in the `unsubscribed` or
+  `never_subscribed` list in subscription info.
+
+**Feature level 348**
+
+* [`POST /register`](/api/register-queue), [`POST /events`](/api/get-events),
+  `PATCH /realm`: Added `enable_guest_user_dm_warning` setting to decide
+  whether clients should show a warning when a user is composing to a
+  guest user in the organization.
+
+**Feature level 347**
+
+* [Markdown message formatting](/api/message-formatting#links-to-channels-topics-and-messages):
+  Links to topic without a specified message now use the `with`
+  operator to follow moves of topics.
+
+**Feature level 346**
+
+* [Markdown message formatting](/api/message-formatting#links-to-channels-topics-and-messages):
+  Added support for empty string as a valid topic name in syntaxes
+  for linking to topics and messages.
+
+**Feature level 345**
+
+* `POST /remotes/server/register/transfer`,
+  `POST /remotes/server/register/verify_challenge`,
+  `POST /zulip-services/verify/{access_token}/`: Added new API
+  endpoints for transferring Zulip services registrations.
+* `POST /remotes/server/register`: Added new response format for
+  hostnames that are already registered.
+
+**Feature level 344**
+
+* `PATCH /realm`, [`GET /events`](/api/get-events),
+  [`POST /register`](/api/register-queue):
+  Added two new realm settings, `can_create_bots_group` which is a
+  [group-setting value](/api/group-setting-values) describing the set of users
+  with permission to create bot users in the organization, and
+  `can_create_write_only_bots_group`  which is a
+  [group-setting value](/api/group-setting-values) describing the set of users
+  with permission to create bot users who can only send messages in the organization
+  in addition to the users who are in `can_create_bots_group`.
+* `PATCH /realm`, [`GET /events`](/api/get-events): Removed
+  `bot_creation_policy` property, as the permission to create bot users
+  in the organization is now controlled by two new realm settings,
+  `can_create_bots_group` and `can_create_write_only_bots_group`.
+
+**Feature level 343**
+
+* [`GET /events`](/api/get-events): Added a new field `stream_ids` to replace
+  `streams` in stream delete event and label `streams` as deprecated.
+
+**Feature level 342**
+
+* [`GET /users/me/subscriptions`](/api/get-subscriptions),
+  [`GET /streams`](/api/get-streams), [`GET /events`](/api/get-events),
+  [`POST /register`](/api/register-queue): Added
+  `can_add_subscribers_group` field to Stream and Subscription
+  objects.
+* [`POST /users/me/subscriptions`](/api/subscribe),
+  [`PATCH /streams/{stream_id}`](/api/update-stream): Added
+  `can_add_subscribers_group` parameter to support setting and
+  changing the user group whose members can add other subscribers
+  to the specified stream.
+* [`POST /invites`](/api/send-invites), [`POST
+  /invites/multiuse`](/api/create-invite-link): Users can now always
+  include default channels in an invite's initial subscriptions.
+
+**Feature level 341**
+
+* `PATCH /realm`, [`GET /events`](/api/get-events),
+  [`POST /register`](/api/register-queue):
+  Added `can_add_subscribers_group` realm setting which is a
+  [group-setting value](/api/group-setting-values) describing the set of users
+  with permission to add subscribers to channels in the organization.
+* [`POST /register`](/api/register-queue): Removed
+  `can_subscribe_other_users` boolean field from the response.
+* `PATCH /realm`, [`GET /events`](/api/get-events): Removed
+  `invite_to_stream_policy` property, as the permission to subscribe
+  other users to channels in the organization is now controlled by the
+  `can_add_subscribers_group` setting.
+
+**Feature level 340**
+
+[`PATCH /user_groups/{user_group_id}`](/api/update-user-group): All
+the permission settings and description can now be updated for
+deactivated groups.
 
 **Feature level 339**
 
@@ -38,11 +1021,11 @@ format used by the Zulip server that they are interacting with.
 * `POST /calls/bigbluebutton/create`: Added a `voice_only` parameter
   controlling whether the call should be voice-only, in which case we
   keep cameras disabled for this call. Now the call creator is a
-  moderator and all other joinees are viewers.
+  moderator and all other joiners are viewers.
 
 **Feature level 336**
 
-* [Markdown message formatting](/api/message-formatting#image-previews): Added
+* [Markdown message formatting](/api/message-formatting#images): Added
   `data-original-content-type` attribute to convey the type of the original
   image, and optional `data-transcoded-image` attribute for images with formats
   which are not widely supported by browsers.
@@ -87,6 +1070,10 @@ format used by the Zulip server that they are interacting with.
 * [`GET /messages/{message_id}/history`](/api/get-message-history):
   Added `allow_empty_topic_name` boolean parameter to decide whether the
   topic names in the fetched message history objects can be empty strings.
+
+* [`GET /users/me/{stream_id}/topics`](/api/get-stream-topics):
+  Added `allow_empty_topic_name` boolean parameter to decide whether the
+  topic names in the fetched `topics` array can be empty strings.
 
 * [`POST /register`](/api/register-queue): For clients that don't support
   the `empty_topic_name` [client capability](/api/register-queue#parameter-client_capabilities),
@@ -150,9 +1137,11 @@ format used by the Zulip server that they are interacting with.
 
 * [`PATCH /realm/user_settings_defaults`](/api/update-realm-user-settings-defaults),
   [`POST /register`](/api/register-queue), [`PATCH /settings`](/api/update-settings):
-  Added new `web_suggest_update_timezone` option to decide whether the user should be
-  shown an alert offering to update their profile time zone to the time zone of the
-  browser in case they differ.
+  Added new `web_suggest_update_timezone` user setting to indicate whether
+  the user should be shown an alert, offering to update their [profile
+  time zone](/help/change-your-timezone), when the time displayed for the
+  profile time zone differs from the current time displayed by the time
+  zone configured on their device.
 
 **Feature level 328**
 
@@ -250,10 +1239,14 @@ format used by the Zulip server that they are interacting with.
 
 **Feature level 318**
 
-* [`POST /register`](/api/register-queue): Updated
-  `realm_incoming_webhook_bots` with a new `config_options` key,
-  defining which options should be offered when creating URLs for this
-  integration.
+* [`POST /register`](/api/register-queue): Renamed the `config` object in the
+  `realm_incoming_webhook_bots` object to `config_options`. This object now
+  includes details about optional URL parameters that can be configured when
+  [generating a URL](/help/generate-integration-url) for an incoming webhook
+  integration. Previously, this object was reserved for key-value pairs that
+  indicated that a bot user could be created with additional configuration
+  data (such as an API key) for that incoming webhook integration, but this
+  functionality has not been implemented for any existing integrations.
 
 **Feature level 317**
 
@@ -505,7 +1498,7 @@ format used by the Zulip server that they are interacting with.
 * [`DELETE /saved_snippets/{saved_snippet_id}`](/api/delete-saved-snippet): Added
   a new endpoint for deleting saved snippets.
 
-**Feature level 296**:
+**Feature level 296**
 
 * [`POST /register`](/api/register-queue), [`GET /events`](/api/get-events),
   [`POST /realm/profile_fields`](/api/create-custom-profile-field),
@@ -601,7 +1594,7 @@ format used by the Zulip server that they are interacting with.
 **Feature level 287**
 
 * [Markdown message
-  formatting](/api/message-formatting#image-previews): Added
+  formatting](/api/message-formatting#images): Added
   `data-original-dimensions` attributes to placeholder images
   (`image-loading-placeholder`), containing the dimensions of the
   original image. This change was also backported to the Zulip 9.x
@@ -623,10 +1616,10 @@ format used by the Zulip server that they are interacting with.
 
 * [`GET /events`](/api/get-events), [`GET /messages`](/api/get-messages),
   [`GET /messages/{message_id}`](/api/get-message),
-  [`POST /zulip-outgoing-webhook`](/api/zulip-outgoing-webhooks): Removed
-  the `prev_rendered_content_version` field from the `edit_history` object
-  within message objects and the `update_message` event type as it is an
-  internal server implementation detail not used by any client.
+  [outgoing webhook payloads](/api/outgoing-webhook-payload#zulip-format):
+  Removed the `prev_rendered_content_version` field from the `edit_history`
+  object within message objects and the `update_message` event type as it
+  is an internal server implementation detail not used by any client.
 
 **Feature level 283**
 
@@ -669,18 +1662,20 @@ format used by the Zulip server that they are interacting with.
   now contains the superset of the true value that best approximates the actual
   permission setting.
 
-Feature levels 278-279 are reserved for future use in 9.x maintenance
+Feature level 279 is reserved for future use in 9.x maintenance
 releases.
 
-## Changes in Zulip 9.0
+## Changes in Zulip 9.2
 
 **Feature level 278**
 
 * [Markdown message
-  formatting](/api/message-formatting#image-previews): Added
+  formatting](/api/message-formatting#images): Added
   `data-original-dimensions` attributes to placeholder images
   (`image-loading-placeholder`), containing the dimensions of the
   original image. Backported change from feature level 287.
+
+## Changes in Zulip 9.0
 
 **Feature level 277**
 
@@ -688,7 +1683,7 @@ No changes; feature level used for Zulip 9.0 release.
 
 **Feature level 276**
 
-* [Markdown message formatting](/api/message-formatting#image-previews):
+* [Markdown message formatting](/api/message-formatting#images):
   Image preview elements not contain a `data-original-dimensions`
   attribute containing the dimensions of the original image.
 
@@ -2150,7 +3145,7 @@ No changes; feature level used for Zulip 5.0 release.
 * [`GET /events`](/api/get-events): Updated `update_message` event type
   to always include `edit_timestamp` and `user_id` fields. If the event
   only updates the rendering of the message, then the `user_id` field
-  will be present, but with a value of null as the update was not the
+  will be present, but with a value of `null`, as the update was not the
   result of a user interaction.
 
 **Feature level 113**
@@ -2158,7 +3153,7 @@ No changes; feature level used for Zulip 5.0 release.
 * `GET /realm/emoji`, `POST /realm/emoji/{emoji_name}`, [`GET
   /events`](/api/get-events), [`POST /register`](/api/register-queue):
   The `still_url` field for custom emoji objects is now always
-  present, with a value of null for non-animated emoji. Previously, it
+  present, with a value of `null` for non-animated emoji. Previously, it
   only was present for animated emoji.
 
 **Feature level 112**
@@ -3083,9 +4078,9 @@ No changes; feature level used for Zulip 3.0 release.
   subscriber data.
 * [`GET /users/me/subscriptions`](/api/get-subscriptions):
   Stream-level notification settings like `push_notifications` were
-  changed to be nullable boolean fields (true/false/null), with `null`
-  meaning that the stream inherits the organization-level default.
-  Previously, the only values were true/false.  A client communicates
+  changed to be nullable boolean fields (`true`/`false`/`null`), with
+  `null` meaning that the stream inherits the organization-level default.
+  Previously, the only values were `true` or `false`. A client communicates
   support for this feature using `client_capabilities`.
 * [`GET /users/me/subscriptions`](/api/get-subscriptions): Added
   `wildcard_mentions_notify` notification setting, with the same

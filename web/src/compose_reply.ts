@@ -1,22 +1,21 @@
 import $ from "jquery";
 import assert from "minimalistic-assert";
 import type * as tippy from "tippy.js";
-import {z} from "zod";
-
-import * as fenced_code from "../shared/src/fenced_code.ts";
 
 import * as channel from "./channel.ts";
 import * as compose_actions from "./compose_actions.ts";
+import * as compose_paste from "./compose_paste.ts";
 import * as compose_recipient from "./compose_recipient.ts";
 import * as compose_state from "./compose_state.ts";
 import * as compose_ui from "./compose_ui.ts";
-import * as copy_and_paste from "./copy_and_paste.ts";
+import * as copy_messages from "./copy_messages.ts";
+import * as fenced_code from "./fenced_code.ts";
 import * as hash_util from "./hash_util.ts";
 import {$t} from "./i18n.ts";
 import * as inbox_ui from "./inbox_ui.ts";
 import * as inbox_util from "./inbox_util.ts";
 import * as message_lists from "./message_lists.ts";
-import type {Message} from "./message_store.ts";
+import {type Message, single_message_content_schema} from "./message_store.ts";
 import * as narrow_state from "./narrow_state.ts";
 import * as people from "./people.ts";
 import * as recent_view_ui from "./recent_view_ui.ts";
@@ -126,7 +125,7 @@ export let respond_to_message = (opts: {
 
     let stream_id: number | undefined;
     let topic = "";
-    let pm_recipient: string | undefined = "";
+    let private_message_recipient_ids: number[] | undefined;
     if (msg_type === "stream") {
         assert(message.type === "stream");
         stream_id = message.stream_id;
@@ -135,16 +134,16 @@ export let respond_to_message = (opts: {
         // reply_to for direct messages is everyone involved, so for
         // personals replies we need to set the direct message
         // recipient to just the sender
-        pm_recipient = people.get_by_user_id(message.sender_id).email;
+        private_message_recipient_ids = [message.sender_id];
     } else {
-        pm_recipient = people.pm_reply_to(message);
+        private_message_recipient_ids = people.pm_with_user_ids(message);
     }
 
     compose_actions.start({
         message_type: msg_type,
         stream_id,
         topic,
-        ...(pm_recipient !== undefined && {private_message_recipient: pm_recipient}),
+        ...(private_message_recipient_ids !== undefined && {private_message_recipient_ids}),
         ...(opts.trigger !== undefined && {trigger: opts.trigger}),
         is_reply: true,
         keep_composebox_empty: opts.keep_composebox_empty,
@@ -181,7 +180,7 @@ export let selection_within_message_id = (
     if (!selection.toString()) {
         return undefined;
     }
-    const {start_id, end_id} = copy_and_paste.analyze_selection(selection);
+    const {start_id, end_id} = copy_messages.analyze_selection(selection);
     if (start_id === end_id) {
         return start_id;
     }
@@ -230,7 +229,7 @@ function get_quote_target(opts: {message_id?: number; quote_content?: string | u
 }
 
 export function quote_message(opts: {
-    message_id: number;
+    message_id?: number;
     quote_content?: string | undefined;
     keep_composebox_empty?: boolean;
     reply_type?: "personal";
@@ -255,27 +254,26 @@ export function quote_message(opts: {
             topic = message.topic;
             stream_id = message.stream_id;
         }
-
+        compose_state.set_is_processing_forward_message(true);
         compose_actions.start({
             message_type: message.type,
             topic,
             keep_composebox_empty: opts.keep_composebox_empty,
             content: quoting_placeholder,
             stream_id,
-            private_message_recipient: people.pm_reply_to(message) ?? "",
+            private_message_recipient_ids: [],
         });
         compose_recipient.toggle_compose_recipient_dropdown();
     } else {
         if ($textarea.attr("id") === "compose-textarea" && !compose_state.has_message_content()) {
-            // The user has not started typing a message,
-            // but is quoting into the compose box,
-            // so we will re-open the compose box.
-            // (If you did re-open the compose box, you
-            // are prone to glitches where you select the
-            // text, plus it's a complicated codepath that
-            // can have other unintended consequences.)
+            // Whether or not the compose box is open, it's empty, so
+            // we start a new message replying to the quoted message.
             respond_to_message({
                 ...opts,
+                // Critically, we pass the message_id of the message we
+                // just quoted, to avoid incorrectly replying to an
+                // unrelated selected message in interleaved views.
+                message_id,
                 keep_composebox_empty: true,
             });
         }
@@ -289,6 +287,7 @@ export function quote_message(opts: {
         //     ```quote
         //     message content
         //     ```
+        // Keep syntax in sync with zerver/lib/reminders.py
         let content = $t(
             {defaultMessage: "{username} [said]({link_to_message}):"},
             {
@@ -321,10 +320,20 @@ export function quote_message(opts: {
 
     void channel.get({
         url: "/json/messages/" + message_id,
-        data: {allow_empty_topic_name: true},
+        data: {allow_empty_topic_name: true, apply_markdown: false},
         success(raw_data) {
-            const data = z.object({raw_content: z.string()}).parse(raw_data);
-            replace_content(message, data.raw_content);
+            const data = single_message_content_schema.parse(raw_data);
+            assert(data.message.content_type === "text/x-markdown");
+            replace_content(message, data.message.content);
+        },
+        error() {
+            compose_ui.replace_syntax(
+                quoting_placeholder,
+                $t({defaultMessage: "[Error fetching message content.]"}),
+                $textarea,
+                opts.forward_message,
+            );
+            compose_ui.autosize_textarea($textarea);
         },
     });
 }
@@ -373,7 +382,7 @@ function get_range_intersection_with_element(range: Range, element: Node): Range
     return intersection;
 }
 
-export function get_message_selection(selection = window.getSelection()): string {
+export let get_message_selection = (selection = window.getSelection()): string => {
     assert(selection !== null);
     let selected_message_content_raw = "";
 
@@ -411,11 +420,15 @@ export function get_message_selection(selection = window.getSelection()): string
         } else {
             continue;
         }
-        const markdown_text = copy_and_paste.paste_handler_converter(html_to_convert);
+        const markdown_text = compose_paste.paste_handler_converter(html_to_convert);
         selected_message_content_raw = selected_message_content_raw + "\n" + markdown_text;
     }
     selected_message_content_raw = selected_message_content_raw.trim();
     return selected_message_content_raw;
+};
+
+export function rewire_get_message_selection(value: typeof get_message_selection): void {
+    get_message_selection = value;
 }
 
 export function initialize(): void {

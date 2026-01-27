@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 
 const _ = require("lodash");
 
+const {make_realm} = require("./lib/example_realm.cjs");
 const {mock_esm, zrequire} = require("./lib/namespace.cjs");
 const {run_test} = require("./lib/test.cjs");
 
@@ -39,21 +40,45 @@ const unread = zrequire("unread");
 
 const REALM_EMPTY_TOPIC_DISPLAY_NAME = "test general chat";
 
-set_realm({realm_empty_topic_display_name: REALM_EMPTY_TOPIC_DISPLAY_NAME});
+set_realm(make_realm({realm_empty_topic_display_name: REALM_EMPTY_TOPIC_DISPLAY_NAME}));
 
 const general = {
     stream_id: 556,
     name: "general",
 };
 
-stream_data.add_sub(general);
+stream_data.add_sub_for_tests(general);
 
 function get_list_info(zoom, search) {
     const stream_id = general.stream_id;
     const zoomed = zoom === undefined ? false : zoom;
     const search_term = search === undefined ? "" : search;
-    return topic_list_data.get_list_info(stream_id, zoomed, search_term);
+    return topic_list_data.get_list_info(stream_id, zoomed, (topics) =>
+        topic_list_data.filter_topics_by_search_term(topics, search_term),
+    );
 }
+
+test("filter_topics_by_search_term with resolved topics_state", () => {
+    const topic_names = ["topic 1", "✔ resolved topic", "topic 2"];
+    const search_term = "";
+
+    // Filter for resolved topics.
+    let topics_state = "is:resolved";
+
+    let result = topic_list_data.filter_topics_by_search_term(
+        topic_names,
+        search_term,
+        topics_state,
+    );
+
+    assert.deepEqual(result, ["✔ resolved topic"]);
+
+    // Filter for unresolved topics.
+    topics_state = "-is:resolved";
+    result = topic_list_data.filter_topics_by_search_term(topic_names, search_term, topics_state);
+
+    assert.deepEqual(result, ["topic 1", "topic 2"]);
+});
 
 function test(label, f) {
     run_test(label, (helpers) => {
@@ -100,6 +125,9 @@ test("get_list_info w/real stream_topic_history", ({override}) => {
     assert.equal(list_info.more_topics_unreads, 0);
     assert.equal(list_info.more_topics_have_unread_mention_messages, false);
     assert.equal(list_info.num_possible_topics, 11);
+
+    // The topic link is not a permalink since the topic has no
+    // messages sent yet.
     assert.deepEqual(list_info.items[0], {
         topic_name: "topic 11",
         topic_resolved_prefix: "",
@@ -137,7 +165,7 @@ test("get_list_info w/real stream_topic_history", ({override}) => {
         topic_resolved_prefix: "✔ ",
         is_empty_string_topic: false,
         unread: 0,
-        url: "#narrow/channel/556-general/topic/.E2.9C.94.20topic.209",
+        url: `#narrow/channel/556-general/topic/.E2.9C.94.20topic.209/with/${1000 + 9}`,
     });
 
     assert.deepEqual(list_info.items[1], {
@@ -153,7 +181,7 @@ test("get_list_info w/real stream_topic_history", ({override}) => {
         topic_resolved_prefix: "",
         is_empty_string_topic: false,
         unread: 0,
-        url: "#narrow/channel/556-general/topic/topic.208",
+        url: `#narrow/channel/556-general/topic/topic.208/with/${1000 + 8}`,
     });
 
     // Empty string as topic name.
@@ -178,7 +206,7 @@ test("get_list_info w/real stream_topic_history", ({override}) => {
         topic_resolved_prefix: "",
         is_empty_string_topic: true,
         unread: 0,
-        url: "#narrow/channel/556-general/topic/",
+        url: "#narrow/channel/556-general/topic//with/2025",
     });
 
     // If we zoom in, our results are based on topic filter.
@@ -191,16 +219,23 @@ test("get_list_info w/real stream_topic_history", ({override}) => {
     assert.equal(list_info.num_possible_topics, 11);
 
     add_topic_message("After Brooklyn", 1008);
-    add_topic_message("Catering", 1009);
+    add_topic_message("Delhi", 1009);
 
     // When topic search input is not empty, we show topics
     // based on the search term.
-    const search_term = "b,c";
+    let search_term = "b,d";
     list_info = get_list_info(zoomed, search_term);
     assert.equal(list_info.items.length, 2);
     assert.equal(list_info.more_topics_unreads, 0);
     assert.equal(list_info.more_topics_have_unread_mention_messages, false);
     assert.equal(list_info.num_possible_topics, 2);
+
+    // Verify empty string topic shows up for "general" search term.
+    search_term = "general";
+    list_info = get_list_info(zoomed, search_term);
+    assert.equal(list_info.items.length, 1);
+    assert.equal(list_info.items[0].topic_name, "");
+    assert.equal(list_info.items[0].topic_display_name, REALM_EMPTY_TOPIC_DISPLAY_NAME);
 });
 
 test("get_list_info unreads", ({override}) => {

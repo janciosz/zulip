@@ -1,14 +1,15 @@
-import $ from "jquery";
 import assert from "minimalistic-assert";
-import {z} from "zod";
+import * as z from "zod/mini";
 
 import {all_messages_data} from "./all_messages_data.ts";
 import * as blueslip from "./blueslip.ts";
 import * as channel from "./channel.ts";
 import * as compose_closed_ui from "./compose_closed_ui.ts";
-import * as compose_recipient from "./compose_recipient.ts";
+import * as compose_validate from "./compose_validate.ts";
 import * as direct_message_group_data from "./direct_message_group_data.ts";
-import {Filter} from "./filter.ts";
+import * as emoji_frequency from "./emoji_frequency.ts";
+import type {Filter} from "./filter.ts";
+import * as filter_util from "./filter_util.ts";
 import * as message_feed_loading from "./message_feed_loading.ts";
 import * as message_feed_top_notices from "./message_feed_top_notices.ts";
 import * as message_helper from "./message_helper.ts";
@@ -22,14 +23,15 @@ import * as message_viewport from "./message_viewport.ts";
 import * as narrow_banner from "./narrow_banner.ts";
 import {page_params} from "./page_params.ts";
 import * as people from "./people.ts";
+import * as popup_banners from "./popup_banners.ts";
 import * as recent_view_ui from "./recent_view_ui.ts";
+import {narrow_operator_schema} from "./state_data.ts";
 import type {NarrowTerm} from "./state_data.ts";
-import {narrow_term_schema} from "./state_data.ts";
 import * as stream_data from "./stream_data.ts";
 import * as stream_list from "./stream_list.ts";
-import * as ui_report from "./ui_report.ts";
+import * as util from "./util.ts";
 
-const response_schema = z.object({
+export const response_schema = z.object({
     anchor: z.number(),
     found_newest: z.boolean(),
     found_oldest: z.boolean(),
@@ -126,9 +128,10 @@ export function fetch_more_if_required_for_current_msg_list(
     if (has_found_oldest && has_found_newest && message_lists.current.visibly_empty()) {
         // Even after loading more messages, we have
         // no messages to display in this narrow.
-        narrow_banner.show_empty_narrow_message();
-        compose_closed_ui.update_buttons_for_private();
-        compose_recipient.check_posting_policy_for_compose_box();
+        narrow_banner.show_empty_narrow_message(message_lists.current.data.filter);
+        message_lists.current.update_trailing_bookend();
+        compose_closed_ui.maybe_update_buttons_for_dm_recipient();
+        compose_validate.validate_and_update_send_button_status();
     }
 
     if (looking_for_old_msgs && !has_found_oldest) {
@@ -146,7 +149,7 @@ function process_result(data: MessageFetchResponse, opts: MessageFetchOptions): 
     const raw_messages = data.messages;
 
     const messages = raw_messages.map((raw_message) =>
-        message_helper.process_new_message(raw_message),
+        message_helper.process_new_server_message(raw_message),
     );
     const has_found_oldest = opts.msg_list?.data.fetch_status.has_found_oldest() ?? false;
     const has_found_newest = opts.msg_list?.data.fetch_status.has_found_newest() ?? false;
@@ -260,7 +263,14 @@ function handle_operators_supporting_id_based_api(narrow_parameter: string): str
     // operators, such as "pm-with" and "stream", are not included here.
     const operators_supporting_ids = new Set(["dm"]);
     const operators_supporting_id = new Set(["id", "channel", "sender", "dm-including"]);
-    const parsed_narrow_data = z.array(narrow_term_schema).parse(JSON.parse(narrow_parameter));
+    const raw_narrow_term_array_schema = z.array(
+        z.object({
+            negated: z.optional(z.boolean()),
+            operator: z.string(),
+            operand: z.string(),
+        }),
+    );
+    const parsed_narrow_data = raw_narrow_term_array_schema.parse(JSON.parse(narrow_parameter));
 
     const narrow_terms: {
         operator: string;
@@ -268,13 +278,20 @@ function handle_operators_supporting_id_based_api(narrow_parameter: string): str
         negated?: boolean | undefined;
     }[] = [];
     for (const raw_term of parsed_narrow_data) {
+        // NOTE: `narrow_term` should be of type `NarrowTerm` but
+        // before we enforce that we need to add type support for
+        // different `operand` types in `NarrowTerm` which will eventually
+        // lead to most of the type conversion below becoming unnecessary.
         const narrow_term: {
             operator: string;
             operand: number[] | number | string;
             negated?: boolean | undefined;
         } = raw_term;
 
-        const canonical_operator = Filter.canonicalize_operator(raw_term.operator);
+        const parsed_narrow_operator = narrow_operator_schema.parse(
+            raw_term.operator.toLowerCase(),
+        );
+        const canonical_operator = filter_util.canonicalize_operator(parsed_narrow_operator);
 
         if (operators_supporting_ids.has(canonical_operator)) {
             const user_ids_array = people.emails_strings_to_user_ids_array(raw_term.operand);
@@ -317,7 +334,46 @@ function handle_operators_supporting_id_based_api(narrow_parameter: string): str
     return JSON.stringify(narrow_terms);
 }
 
-function get_parameters_for_message_fetch_api(opts: MessageFetchOptions): MessageFetchAPIParams {
+export function get_narrow_for_message_fetch(filter: Filter): string {
+    let narrow_data: NarrowTerm[] = [];
+    for (const term of filter.public_terms()) {
+        if (term.operator === "dm-including") {
+            for (const operand of term.operand.split(",")) {
+                narrow_data.push({
+                    ...term,
+                    operand,
+                });
+            }
+        } else {
+            narrow_data.push(term);
+        }
+    }
+
+    if (page_params.narrow !== undefined) {
+        narrow_data = [...narrow_data, ...page_params.narrow];
+    }
+    if (page_params.is_spectator) {
+        const web_public_narrow: NarrowTerm[] = [
+            {operator: "channels", operand: "web-public", negated: false},
+        ];
+        // This logic is not ideal in that, in theory, an existing `channels`
+        // operator could be present, but not in a useful way. We don't attempt
+        // to validate the narrow is compatible with spectators here; the server
+        // will return an error if appropriate.
+        narrow_data = [...narrow_data, ...web_public_narrow];
+    }
+
+    let narrow_param_string = "";
+    if (narrow_data.length > 0) {
+        narrow_param_string = JSON.stringify(narrow_data);
+        narrow_param_string = handle_operators_supporting_id_based_api(narrow_param_string);
+    }
+    return narrow_param_string;
+}
+
+export function get_parameters_for_message_fetch_api(
+    opts: MessageFetchOptions,
+): MessageFetchAPIParams {
     if (typeof opts.anchor === "number") {
         // Messages that have been locally echoed messages have
         // floating point temporary IDs, which is intended to be a.
@@ -338,26 +394,17 @@ function get_parameters_for_message_fetch_api(opts: MessageFetchOptions): Messag
         blueslip.error("Message list data is undefined!");
     }
 
-    let narrow_data = msg_list_data.filter.public_terms();
-    if (page_params.narrow !== undefined) {
-        narrow_data = [...narrow_data, ...page_params.narrow];
-    }
-    if (page_params.is_spectator) {
-        const web_public_narrow: NarrowTerm[] = [
-            {operator: "channels", operand: "web-public", negated: false},
-        ];
-        // This logic is not ideal in that, in theory, an existing `channels`
-        // operator could be present, but not in a useful way. We don't attempt
-        // to validate the narrow is compatible with spectators here; the server
-        // will return an error if appropriate.
-        narrow_data = [...narrow_data, ...web_public_narrow];
-    }
-    if (narrow_data.length > 0) {
-        const narrow_param_string = JSON.stringify(narrow_data);
-        data.narrow = handle_operators_supporting_id_based_api(narrow_param_string);
+    const narrow = get_narrow_for_message_fetch(msg_list_data.filter);
+    if (narrow !== "") {
+        data.narrow = narrow;
     }
     return data;
 }
+
+// We keep track of the load messages timeout at a module level
+// to prevent multiple load messages requests from the error codepath
+// from stacking up by cancelling the previous timeout.
+let load_messages_timeout: ReturnType<typeof setTimeout> | undefined;
 
 export function load_messages(opts: MessageFetchOptions, attempt = 1): void {
     const data = get_parameters_for_message_fetch_api(opts);
@@ -377,22 +424,23 @@ export function load_messages(opts: MessageFetchOptions, attempt = 1): void {
         });
     }
 
+    if (load_messages_timeout !== undefined) {
+        clearTimeout(load_messages_timeout);
+    }
+
     void channel.get({
         url: "/json/messages",
         data,
         success(raw_data) {
-            if (!$("#connection-error").hasClass("get-events-error")) {
-                ui_report.hide_error($("#connection-error"));
-            }
+            popup_banners.close_connection_error_popup_banner("message_fetch");
             const data = response_schema.parse(raw_data);
             get_messages_success(data, opts);
         },
         error(xhr) {
-            if (xhr.status === 400 && !$("#connection-error").hasClass("get-events-error")) {
-                // We successfully reached the server, so hide the
-                // connection error notice, even if the request failed
-                // for other reasons.
-                ui_report.hide_error($("#connection-error"));
+            if (xhr.status === 400) {
+                // Even though the request failed, we did reach the
+                // server, and can hide the connection error notice.
+                popup_banners.close_connection_error_popup_banner("message_fetch");
             }
 
             if (
@@ -422,7 +470,7 @@ export function load_messages(opts: MessageFetchOptions, attempt = 1): void {
                     !opts.msg_list.is_combined_feed_view &&
                     opts.msg_list.visibly_empty()
                 ) {
-                    narrow_banner.show_empty_narrow_message();
+                    narrow_banner.show_empty_narrow_message(opts.msg_list.data.filter);
                 }
 
                 // TODO: This should probably do something explicit with
@@ -432,31 +480,16 @@ export function load_messages(opts: MessageFetchOptions, attempt = 1): void {
                 return;
             }
 
-            ui_report.show_error($("#connection-error"));
-
-            // We need to respect the server's rate-limiting headers, but beyond
-            // that, we also want to avoid contributing to a thundering herd if
-            // the server is giving us 500s/502s.
-            //
-            // So we do the maximum of the retry-after header and an exponential
-            // backoff with ratio 2 and half jitter. Starts at 1-2s and ends at
-            // 16-32s after 5 failures.
-            const backoff_scale = Math.min(2 ** attempt, 32);
-            const backoff_delay_secs = ((1 + Math.random()) / 2) * backoff_scale;
-            let rate_limit_delay_secs = 0;
-            const rate_limited_error_schema = z.object({
-                "retry-after": z.number(),
-                code: z.literal("RATE_LIMIT_HIT"),
+            const delay_secs = util.get_retry_backoff_seconds(xhr, attempt, true);
+            popup_banners.open_connection_error_popup_banner({
+                caller: "message_fetch",
+                retry_delay_secs: delay_secs,
+                on_retry_callback() {
+                    load_messages(opts, attempt + 1);
+                },
             });
-            const parsed = rate_limited_error_schema.safeParse(xhr.responseJSON);
-            if (xhr.status === 429 && parsed?.success && parsed?.data) {
-                // Add a bit of jitter to the required delay suggested by the
-                // server, because we may be racing with other copies of the web
-                // app.
-                rate_limit_delay_secs = parsed.data["retry-after"] + Math.random() * 0.5;
-            }
-            const delay_secs = Math.max(backoff_delay_secs, rate_limit_delay_secs);
-            setTimeout(() => {
+
+            load_messages_timeout = setTimeout(() => {
                 load_messages(opts, attempt + 1);
             }, delay_secs * 1000);
         },
@@ -682,6 +715,7 @@ export function initialize(finished_initial_fetch: () => void): void {
 
         if (data.found_oldest) {
             initial_backfill_for_all_messages_done = true;
+            emoji_frequency.initialize_frequently_used_emojis();
             return;
         }
 
@@ -695,11 +729,13 @@ export function initialize(finished_initial_fetch: () => void): void {
             latest_message.timestamp < fetch_target_day_timestamp
         ) {
             initial_backfill_for_all_messages_done = true;
+            emoji_frequency.initialize_frequently_used_emojis();
             return;
         }
 
         if (all_messages_data.num_items() >= consts.maximum_initial_backfill_size) {
             initial_backfill_for_all_messages_done = true;
+            emoji_frequency.initialize_frequently_used_emojis();
             return;
         }
 

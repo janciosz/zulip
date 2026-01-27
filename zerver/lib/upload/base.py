@@ -2,17 +2,24 @@ import os
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
-from typing import IO, Any
+from typing import IO, Any, Protocol
 
 import pyvips
 
 from zerver.models import Realm, UserProfile
 
 
+class ReadableStream(Protocol):
+    def read(self, size: int = -1) -> bytes: ...
+
+    def close(self) -> None: ...
+
+
 @dataclass
 class StreamingSourceWithSize:
     size: int
-    source: pyvips.Source
+    vips_source: pyvips.Source
+    reader: Callable[[], ReadableStream]
 
 
 class ZulipUploadBackend:
@@ -30,16 +37,18 @@ class ZulipUploadBackend:
         content_type: str,
         file_data: bytes,
         user_profile: UserProfile | None,
+        target_realm: Realm | None,
     ) -> None:
         raise NotImplementedError
 
     def save_attachment_contents(self, path_id: str, filehandle: IO[bytes]) -> None:
         raise NotImplementedError
 
-    def attachment_vips_source(self, path_id: str) -> StreamingSourceWithSize:
+    def attachment_source(self, path_id: str) -> StreamingSourceWithSize:
         raise NotImplementedError
 
-    def delete_message_attachment(self, path_id: str) -> bool:
+    def delete_message_attachment(self, path_id: str) -> None:
+        """This must delete the attachment, any adjacent .info files, and any thumbnails."""
         raise NotImplementedError
 
     def delete_message_attachments(self, path_ids: list[str]) -> None:
@@ -125,5 +134,5 @@ class ZulipUploadBackend:
     ) -> str:
         raise NotImplementedError
 
-    def delete_export_tarball(self, export_path: str) -> str | None:
+    def delete_export_tarball(self, export_path: str) -> None:
         raise NotImplementedError

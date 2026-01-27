@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 set -eu
 
-version=2.5.0
+# This should be kept in sync with puppet/zulip/manifests/common.pp
+version=2.8.0
 arch="$(uname -m)"
 
 case $arch in
     x86_64)
         tarball="tusd_linux_amd64"
-        sha256=f4cbdb8d228b28f46c3e7b9e29e5db262e7416f7ca1033c6c5e8186cf6c7381c
+        sha256=e13c8adc9bed4c993a72f60140f688736058d2c3f4a18fb6e59ca26e829fb93b
         ;;
 
     aarch64)
         tarball="tusd_linux_arm64"
-        sha256=b2101951789857765d64c33d672a38b5825946163aa058b208fc862867cdc405
+        sha256=089eb6d144df7cc5e10ac611a18f407308aedb3f9024a78fa01cb60ba99005a9
         ;;
 esac
 

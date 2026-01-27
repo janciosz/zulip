@@ -1,6 +1,7 @@
 import logging
 from collections.abc import Collection, Sequence
 from datetime import datetime, timedelta
+from email.utils import format_datetime as email_format_datetime
 from typing import Any
 
 from django.conf import settings
@@ -29,7 +30,12 @@ from zerver.lib.email_validation import (
 from zerver.lib.exceptions import InvitationError
 from zerver.lib.invites import notify_invites_changed
 from zerver.lib.queue import queue_event_on_commit
-from zerver.lib.send_email import FromAddress, clear_scheduled_invitation_emails, send_future_email
+from zerver.lib.send_email import (
+    FromAddress,
+    clear_scheduled_invitation_emails,
+    maybe_remove_from_suppression_list,
+    send_future_email,
+)
 from zerver.lib.timestamp import datetime_to_timestamp
 from zerver.lib.utils import assert_is_not_none
 from zerver.models import (
@@ -192,6 +198,7 @@ def do_invite_users(
     invite_expires_in_minutes: int | None,
     include_realm_default_subscriptions: bool,
     invite_as: int = PreregistrationUser.INVITE_AS["MEMBER"],
+    welcome_message_custom_text: str | None = None,
 ) -> list[tuple[str, str, bool]]:
     num_invites = len(invitee_emails)
 
@@ -245,7 +252,7 @@ def do_invite_users(
     but we still need to make sure they're not
     gonna conflict with existing users
     """
-    error_dict = get_existing_user_errors(realm, good_emails)
+    error_dict = get_existing_user_errors(realm, good_emails, allow_inactive_mirror_dummies=True)
 
     skipped: list[tuple[str, str, bool]] = []
     for email in error_dict:
@@ -279,6 +286,7 @@ def do_invite_users(
             realm=realm,
             include_realm_default_subscriptions=include_realm_default_subscriptions,
             notify_referrer_on_join=notify_referrer_on_join,
+            welcome_message_custom_text=welcome_message_custom_text,
         )
         prereg_user.save()
         stream_ids = [stream.id for stream in streams]
@@ -381,12 +389,14 @@ def do_create_multiuse_invite_link(
     include_realm_default_subscriptions: bool,
     streams: Sequence[Stream] = [],
     user_groups: Sequence[NamedUserGroup] = [],
+    welcome_message_custom_text: str | None = None,
 ) -> str:
     realm = referred_by.realm
     invite = MultiuseInvite.objects.create(
         realm=realm,
         referred_by=referred_by,
         include_realm_default_subscriptions=include_realm_default_subscriptions,
+        welcome_message_custom_text=welcome_message_custom_text,
     )
     if streams:
         invite.streams.set(streams)
@@ -449,6 +459,7 @@ def do_send_user_invite_email(
     if confirmation is None:
         confirmation = prereg_user.confirmation.get()
 
+    maybe_remove_from_suppression_list(prereg_user.email)
     event = {
         "template_prefix": "zerver/emails/invitation",
         "to_emails": [prereg_user.email],
@@ -462,6 +473,7 @@ def do_send_user_invite_email(
             "corporate_enabled": settings.CORPORATE_ENABLED,
         },
         "realm_id": realm.id,
+        "date": email_format_datetime(event_time),
     }
     queue_event_on_commit("email_senders", event)
 

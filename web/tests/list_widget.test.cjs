@@ -44,10 +44,7 @@ const ListWidget = zrequire("list_widget");
 // in the real code.
 
 function make_container() {
-    const $container = {};
-    $container.attr = noop;
-    $container.empty = noop;
-    $container.data = noop;
+    const $container = {attr: noop, empty: noop, data: noop};
 
     // Make our append function just set a field we can
     // check in our tests.
@@ -59,10 +56,7 @@ function make_container() {
 }
 
 function make_scroll_container() {
-    const $scroll_container = {};
-    $scroll_container[0] = {};
-
-    $scroll_container.cleared = false;
+    const $scroll_container = {[0]: {}, cleared: false};
 
     // Capture the scroll callback so we can call it in
     // our tests.
@@ -83,9 +77,7 @@ function make_scroll_container() {
 }
 
 function make_sort_container() {
-    const $sort_container = {};
-
-    $sort_container.cleared = false;
+    const $sort_container = {cleared: false};
 
     $sort_container.on = (ev, sel, f) => {
         assert.equal(ev, "click.list_widget_sort");
@@ -102,9 +94,7 @@ function make_sort_container() {
 }
 
 function make_filter_element() {
-    const $element = {};
-
-    $element.cleared = false;
+    const $element = {cleared: false, clear_button_elem_cleared: false};
 
     $element.on = (ev, f) => {
         assert.equal(ev, "input.list_widget_filter");
@@ -114,6 +104,23 @@ function make_filter_element() {
     $element.off = (ev) => {
         assert.equal(ev, "input.list_widget_filter");
         $element.cleared = true;
+    };
+
+    const clear_input_element = {};
+
+    clear_input_element.on = (ev, f) => {
+        assert.equal(ev, "click");
+        clear_input_element.f = f;
+    };
+
+    clear_input_element.off = (ev) => {
+        assert.equal(ev, "click");
+        $element.clear_button_elem_cleared = true;
+    };
+
+    $element.siblings = (selector) => {
+        assert.equal(selector, ".clear-filter");
+        return clear_input_element;
     };
 
     return $element;
@@ -135,6 +142,20 @@ function make_search_input() {
             };
             f.call(elem);
         };
+    };
+
+    const clear_search_button_element = {
+        on(event, f) {
+            assert.equal(event, "click");
+            $element.simulate_clear_search = () => {
+                f.call();
+            };
+        },
+    };
+
+    $element.siblings = (selector) => {
+        assert.equal(selector, ".clear-filter");
+        return clear_search_button_element;
     };
 
     return $element;
@@ -280,6 +301,13 @@ run_test("filtering", () => {
     assert.deepEqual(widget.get_current_list(), ["dog", "egg", "grape"]);
     expected_html = "<div>dog</div><div>egg</div><div>grape</div>";
     assert.deepEqual($container.$appended_data.html(), expected_html);
+
+    $search_input.simulate_clear_search();
+    assert.deepEqual(widget.get_current_list(), list);
+
+    // Reset the search input value to test that list is updated correctly.
+    $search_input.val = () => "g";
+    $search_input.simulate_input_event();
 
     // We can insert new data into the widget.
     const new_data = ["greta", "faye", "gary", "frank", "giraffe", "fox"];
@@ -488,6 +516,105 @@ run_test("sorting", () => {
     assert.ok(cleared);
     expected_html = html_for([ellen, alice, bob, cal, dave]);
     assert.deepEqual($container.$appended_data.html(), expected_html);
+});
+
+run_test("Apply consecutive sorts", () => {
+    const $container = make_container();
+    const $scroll_container = make_scroll_container();
+    const $sort_container = make_sort_container();
+
+    let cleared;
+    $container.empty = () => {
+        cleared = true;
+    };
+
+    const alice = {name: "alice", salary: 50};
+    const bob = {name: "bob", salary: 40};
+    const cal = {name: "cal", salary: 30};
+    const dave = {name: "dave", salary: 20};
+    const ellen = {name: "ellen", salary: 95};
+    const bob_2 = {name: "bob", salary: 20};
+    const cal_2 = {name: "cal", salary: 60};
+
+    const list = [alice, bob, cal, dave, ellen, bob_2, cal_2];
+
+    const opts = {
+        name: "sorting-list",
+        $parent_container: $sort_container,
+        modifier_html: (item) => div(item.name) + div(item.salary),
+        get_item: (item) => item,
+        filter: {
+            predicate: () => true,
+        },
+        sort_fields: {
+            ...ListWidget.generic_sort_functions("alphabetic", ["name"]),
+            ...ListWidget.generic_sort_functions("numeric", ["salary"]),
+        },
+        $simplebar_container: $scroll_container,
+    };
+
+    function html_for(people) {
+        return people.map((item) => opts.modifier_html(item)).join("");
+    }
+
+    ListWidget.create($container, list, opts);
+
+    let button_opts;
+    let $button;
+    let expected_html;
+
+    // Apply sorting by salary first, then by name
+    button_opts = {
+        sort_type: "numeric",
+        prop_name: "salary",
+        list_name: "my-list",
+        active: false,
+    };
+
+    $button = sort_button(button_opts);
+
+    $sort_container.f.apply($button);
+
+    button_opts = {
+        sort_type: "alphabetic",
+        prop_name: "name",
+        list_name: "my-list",
+        active: false,
+    };
+
+    $button = sort_button(button_opts);
+
+    $sort_container.f.apply($button);
+
+    assert.ok(cleared);
+    assert.ok($button.siblings_deactivated);
+
+    expected_html = html_for([alice, bob_2, bob, cal, cal_2, dave, ellen]);
+    assert.deepEqual($container.$appended_data.html(), expected_html);
+
+    // Apply sorting by salary again, the previous sort by salary should be removed
+    button_opts = {
+        sort_type: "numeric",
+        prop_name: "salary",
+        list_name: "my-list",
+        active: false,
+    };
+
+    $button = sort_button(button_opts);
+
+    cleared = false;
+    $sort_container.f.apply($button);
+    assert.ok(cleared);
+    expected_html = html_for([bob_2, dave, cal, bob, alice, cal_2, ellen]);
+    assert.deepEqual($container.$appended_data.html(), expected_html);
+    assert.ok(!$button.hasClass("descend"));
+
+    // Hit the salary field again to reverse the salary sorting
+    cleared = false;
+    $sort_container.f.apply($button);
+    assert.ok(cleared);
+    expected_html = html_for([ellen, cal_2, alice, bob, cal, bob_2, dave]);
+    assert.deepEqual($container.$appended_data.html(), expected_html);
     assert.ok($button.hasClass("descend"));
 });
 
@@ -561,12 +688,14 @@ run_test("clear_event_handlers", () => {
     assert.equal($sort_container.cleared, false);
     assert.equal($scroll_container.cleared, false);
     assert.equal($filter_element.cleared, false);
+    assert.equal($filter_element.clear_button_elem_cleared, false);
 
     // The second time we'll clear the old events.
     ListWidget.create($container, list, opts);
     assert.equal($sort_container.cleared, true);
     assert.equal($scroll_container.cleared, true);
     assert.equal($filter_element.cleared, true);
+    assert.equal($filter_element.clear_button_elem_cleared, true);
 });
 
 run_test("sort helpers", () => {
@@ -623,12 +752,7 @@ run_test("replace_list_data w/filter update", () => {
 });
 
 run_test("opts.get_item", () => {
-    const items = {};
-
-    items[1] = "one";
-    items[2] = "two";
-    items[3] = "three";
-    items[4] = "four";
+    const items = {[1]: "one", [2]: "two", [3]: "three", [4]: "four"};
 
     const list = [1, 2, 3, 4];
 

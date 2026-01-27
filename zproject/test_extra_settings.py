@@ -31,7 +31,6 @@ DATABASES["default"] = {
     "USER": "zulip_test",
     "PASSWORD": LOCAL_DATABASE_PASSWORD,
     "HOST": "localhost",
-    "SCHEMA": "zulip",
     "ENGINE": "django.db.backends.postgresql",
     "TEST_NAME": "django_zulip_tests",
     "OPTIONS": {
@@ -54,6 +53,9 @@ if "RUNNING_OPENAPI_CURL_TEST" in os.environ:
 
 if "GENERATE_STRIPE_FIXTURES" in os.environ:
     GENERATE_STRIPE_FIXTURES = True
+
+if "GENERATE_LITELLM_FIXTURES" in os.environ:
+    GENERATE_LITELLM_FIXTURES = True
 
 if "BAN_CONSOLE_OUTPUT" in os.environ:
     BAN_CONSOLE_OUTPUT = True
@@ -191,6 +193,9 @@ SOCIAL_AUTH_OIDC_ENABLED_IDPS: dict[str, OIDCIdPConfigDict] = {
 SOCIAL_AUTH_OIDC_FULL_NAME_VALIDATED = True
 
 
+VIDEO_ZOOM_SERVER_TO_SERVER_ACCOUNT_ID = "account_id"
+VIDEO_ZOOM_API_URL = "https://api.zoom.us"
+VIDEO_ZOOM_OAUTH_URL = "https://zoom.example.com"
 VIDEO_ZOOM_CLIENT_ID = "client_id"
 VIDEO_ZOOM_CLIENT_SECRET = "client_secret"
 
@@ -200,7 +205,9 @@ BIG_BLUE_BUTTON_URL = "https://bbb.example.com/bigbluebutton/"
 # By default two factor authentication is disabled in tests.
 # Explicitly set this to True within tests that must have this on.
 TWO_FACTOR_AUTHENTICATION_ENABLED = False
+
 DEVELOPMENT_DISABLE_PUSH_BOUNCER_DOMAIN_CHECK = False
+ZULIP_SERVICES_URL = f"http://push.{EXTERNAL_HOST}"
 
 # Disable all Zulip services by default. Tests can activate them by
 # overriding settings explicitly when they want to enable something,
@@ -290,3 +297,11 @@ RESOLVE_TOPIC_UNDO_GRACE_PERIOD_SECONDS = 0
 KATEX_SERVER = False
 
 ROOT_DOMAIN_LANDING_PAGE = False
+
+# Disable verifying webhook signatures in tests by default.
+# Tests that intend to verify webhook signatures should override this setting.
+VERIFY_WEBHOOK_SIGNATURES = False
+
+AUTH_LDAP_USER_ATTR_MAP = {
+    "full_name": "cn",
+}

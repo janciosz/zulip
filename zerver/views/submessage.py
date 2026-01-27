@@ -22,11 +22,11 @@ def process_submessage(
     request: HttpRequest,
     user_profile: UserProfile,
     *,
+    content: str,
     message_id: Json[int],
     msg_type: str,
-    content: str,
 ) -> HttpResponse:
-    message = access_message(user_profile, message_id, lock_message=True)
+    message = access_message(user_profile, message_id, lock_message=True, is_modifying_message=True)
 
     verify_submessage_sender(
         message_id=message.id,

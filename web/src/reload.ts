@@ -1,23 +1,33 @@
 import $ from "jquery";
 import assert from "minimalistic-assert";
-import {z} from "zod";
+import * as z from "zod/mini";
 
 import * as blueslip from "./blueslip.ts";
+import * as channel from "./channel.ts";
 import * as compose_state from "./compose_state.ts";
-import {csrf_token} from "./csrf.ts";
 import * as drafts from "./drafts.ts";
 import * as hash_util from "./hash_util.ts";
 import type {LocalStorage} from "./localstorage.ts";
 import {localstorage} from "./localstorage.ts";
 import * as message_lists from "./message_lists.ts";
 import {page_params} from "./page_params.ts";
+import * as popup_banners from "./popup_banners.ts";
+import type {ReloadingReason} from "./popup_banners.ts";
 import * as reload_state from "./reload_state.ts";
-import * as ui_report from "./ui_report.ts";
 import * as util from "./util.ts";
 
 // Read https://zulip.readthedocs.io/en/latest/subsystems/hashchange-system.html
 
-const token_metadata_schema = z.object({url: z.string(), timestamp: z.number()});
+let server_reachable_check_failures = 0;
+
+export const reload_metadata_schema = z.object({
+    hash: z.string(),
+    message_view_pointer: z.optional(z.number()),
+    message_view_scroll_offset: z.optional(z.number()),
+    compose_active_draft_id: z.optional(z.string()),
+    compose_active_draft_send_immediately: z.optional(z.boolean()),
+    timestamp: z.number(),
+});
 
 const reload_hooks: (() => void)[] = [];
 
@@ -31,7 +41,21 @@ function call_reload_hooks(): void {
     }
 }
 
-function preserve_state(send_after_reload: boolean, save_compose: boolean): void {
+// Exported for tests
+export let reset_reload_timeout: ((trigger: "compose_start" | "compose_end") => void) | undefined;
+
+export function maybe_reset_pending_reload_timeout(trigger: "compose_start" | "compose_end"): void {
+    if (!reload_state.is_pending()) {
+        return;
+    }
+
+    reset_reload_timeout?.(trigger);
+}
+
+function preserve_state(
+    compose_active_draft_send_immediately: boolean,
+    save_compose: boolean,
+): void {
     if (!localstorage.supported()) {
         // If local storage is not supported by the browser, we can't
         // save the browser's position across reloads (since there's
@@ -50,45 +74,32 @@ function preserve_state(send_after_reload: boolean, save_compose: boolean): void
         return;
     }
 
-    let url = "#reload:send_after_reload=" + Number(send_after_reload);
-    assert(csrf_token !== undefined);
-    url += "+csrf_token=" + encodeURIComponent(csrf_token);
-
-    if (save_compose) {
-        const msg_type = compose_state.get_message_type();
-        if (msg_type === "stream") {
-            const stream_id = compose_state.stream_id();
-            url += "+msg_type=stream";
-            if (stream_id) {
-                url += "+stream_id=" + encodeURIComponent(stream_id);
-            }
-            url += "+topic=" + encodeURIComponent(compose_state.topic());
-        } else if (msg_type === "private") {
-            url += "+msg_type=private";
-            url += "+recipient=" + encodeURIComponent(compose_state.private_message_recipient());
-        }
-
-        if (msg_type) {
-            url += "+msg=" + encodeURIComponent(compose_state.message_content());
-            const draft_id = drafts.update_draft();
-            if (draft_id) {
-                url += "+draft_id=" + encodeURIComponent(draft_id);
-            }
-        }
+    let draft_id: string | undefined;
+    if (save_compose && compose_state.get_message_type()) {
+        draft_id = drafts.update_draft({force_save: true});
+        assert(draft_id !== undefined);
     }
-
+    let message_view_pointer: number | undefined;
+    let message_view_scroll_offset: number | undefined;
     if (message_lists.current !== undefined) {
         const narrow_pointer = message_lists.current.selected_id();
         if (narrow_pointer !== -1) {
-            url += "+narrow_pointer=" + narrow_pointer;
+            message_view_pointer = narrow_pointer;
         }
         const $narrow_row = message_lists.current.selected_row();
         if ($narrow_row.length > 0) {
-            url += "+narrow_offset=" + $narrow_row.get_offset_to_window().top;
+            message_view_scroll_offset = $narrow_row.get_offset_to_window().top;
         }
     }
 
-    url += hash_util.build_reload_url();
+    const reload_data: z.infer<typeof reload_metadata_schema> = {
+        compose_active_draft_send_immediately,
+        compose_active_draft_id: draft_id,
+        message_view_pointer,
+        message_view_scroll_offset,
+        hash: hash_util.get_reload_hash(),
+        timestamp: Date.now(),
+    };
 
     // Delete unused states that have been around for a while.
     const ls = localstorage();
@@ -99,25 +110,18 @@ function preserve_state(send_after_reload: boolean, save_compose: boolean): void
     // others) which is passed via the URL to the browser (post
     // reloading).  The token is a key into local storage, where we
     // marshall and store the URL.
-    //
-    // TODO: Remove the now-unnecessary URL-encoding logic above and
-    // just pass the actual data structures through local storage.
     const token = util.random_int(0, 1024 * 1024 * 1024 * 1024);
-    const metadata: z.infer<typeof token_metadata_schema> = {
-        url,
-        timestamp: Date.now(),
-    };
-    ls.set("reload:" + token, metadata);
+    ls.set("reload:" + token, reload_data);
     window.location.replace("#reload:" + token);
 }
 
 export function is_stale_refresh_token(token_metadata: unknown, now: number): boolean {
-    const parsed = token_metadata_schema.safeParse(token_metadata);
-    // TODO/compatibility: the metadata was changed from a string
-    // to a map containing the string and a timestamp. For now we'll
-    // delete all tokens that only contain the url. Remove this
-    // early return once you can no longer directly upgrade from
-    // Zulip 5.x to the current version.
+    const parsed = reload_metadata_schema.safeParse(token_metadata);
+    // TODO/compatibility(12.0): The metadata format was rewritten in
+    // the 12.0 development branch in 2025. We garbage-collect reload
+    // tokens in the old format if they are more than a week stale. We
+    // can delete the parsing logic for the old format once it's no
+    // longer possible to directly upgrade from 11.x to main.
     if (!parsed.success) {
         return true;
     }
@@ -142,7 +146,7 @@ function delete_stale_tokens(ls: LocalStorage): void {
 function do_reload_app(
     send_after_reload: boolean,
     save_compose: boolean,
-    message_html: string,
+    reason: ReloadingReason,
 ): void {
     if (reload_state.is_in_progress()) {
         blueslip.log("do_reload_app: Doing nothing since reload_in_progress");
@@ -157,7 +161,7 @@ function do_reload_app(
     }
 
     // TODO: We need a better API for showing messages.
-    ui_report.message(message_html, $("#reloading-application"));
+    popup_banners.open_reloading_application_banner(reason);
     blueslip.log("Starting server requested page reload");
     reload_state.set_state_to_in_progress();
 
@@ -198,78 +202,125 @@ export function initiate({
     immediate = false,
     save_compose = true,
     send_after_reload = false,
-    message_html = "Reloading ...",
+    reason = "reload",
+}: {
+    immediate?: boolean;
+    save_compose?: boolean;
+    send_after_reload?: boolean;
+    reason?: ReloadingReason;
 }): void {
-    if (immediate) {
-        do_reload_app(send_after_reload, save_compose, message_html);
-    }
-
-    if (reload_state.is_pending() || reload_state.is_in_progress()) {
+    if (reload_state.is_in_progress()) {
+        // If we're already attempting to reload, there's nothing to do.
         return;
     }
-    reload_state.set_state_to_pending();
 
-    // We're now planning to execute a reload of the browser, usually
-    // to get an updated version of the Zulip web app code.  Because in
-    // most cases all browsers will be receiving this notice at the
-    // same or similar times, we need to randomize the time that we do
-    // this in order to avoid a thundering herd overloading the server.
-    //
-    // Additionally, we try to do this reload at a time the user will
-    // not notice.  So completely idle clients will reload first;
-    // those will an open compose box will wait until the message has
-    // been sent (or until it's clear the user isn't likely to send it).
-    //
-    // And then we unconditionally reload sometime after 30 minutes
-    // even if there is continued activity, because we don't support
-    // old JavaScript versions against newer servers and eventually
-    // letting that situation continue will lead to users seeing bugs.
-    //
-    // It's a little odd that how this timeout logic works with
-    // compose box resets including the random variance, but that
-    // makes it simple to reason about: We know that reloads will be
-    // spread over at least 5 minutes in all cases.
-
-    let idle_control: ReturnType<JQuery["idle"]>;
-    const random_variance = util.random_int(0, 1000 * 60 * 5);
-    const unconditional_timeout = 1000 * 60 * 30 + random_variance;
-    const composing_idle_timeout = 1000 * 60 * 7 + random_variance;
-    const basic_idle_timeout = 1000 * 60 * 1 + random_variance;
-
-    function reload_from_idle(): void {
-        do_reload_app(false, save_compose, message_html);
+    if (reload_state.is_pending() && !immediate) {
+        // If we're already pending and the caller is not requesting
+        // an immediate reload, there's nothing to do.
+        return;
     }
 
-    // Make sure we always do a reload eventually after
-    // unconditional_timeout.  Because we save cursor location and
-    // compose state when reloading, we expect this to not be
-    // particularly disruptive.
-    setTimeout(reload_from_idle, unconditional_timeout);
+    // In order to avoid races with the user's device connecting to
+    // the internet due to a network change while the device was
+    // suspended, we fetch a cheap unauthenticated API endpoint and
+    // only initiate the reload if we get a success response from the
+    // server.
+    void channel.get({
+        url: "/compatibility",
+        success() {
+            server_reachable_check_failures = 0;
+            if (immediate) {
+                do_reload_app(send_after_reload, save_compose, reason);
+                // We don't expect do_reload_app to return, but if it
+                // does, the fallthrough logic seems fine.
+            }
 
-    function compose_done_handler(): void {
-        // If the user sends their message or otherwise closes
-        // compose, we return them to the not-composing timeouts.
-        idle_control.cancel();
-        idle_control = $(document).idle({idle: basic_idle_timeout, onIdle: reload_from_idle});
-        $(document).off("compose_canceled.zulip compose_finished.zulip", compose_done_handler);
-        $(document).on("compose_started.zulip", compose_started_handler);
-    }
-    function compose_started_handler(): void {
-        // If the user stops being idle and starts composing a
-        // message, switch to the compose-open timeouts.
-        idle_control.cancel();
-        idle_control = $(document).idle({idle: composing_idle_timeout, onIdle: reload_from_idle});
-        $(document).off("compose_started.zulip", compose_started_handler);
-        $(document).on("compose_canceled.zulip compose_finished.zulip", compose_done_handler);
-    }
+            if (reload_state.is_pending()) {
+                // If we're already pending, don't set the timers a second time.
+                return;
+            }
 
-    if (compose_state.composing()) {
-        idle_control = $(document).idle({idle: composing_idle_timeout, onIdle: reload_from_idle});
-        $(document).on("compose_canceled.zulip compose_finished.zulip", compose_done_handler);
-    } else {
-        idle_control = $(document).idle({idle: basic_idle_timeout, onIdle: reload_from_idle});
-        $(document).on("compose_started.zulip", compose_started_handler);
-    }
+            reload_state.set_state_to_pending();
+
+            // We're now planning to execute a reload of the browser, usually
+            // to get an updated version of the Zulip web app code.  Because in
+            // most cases all browsers will be receiving this notice at the
+            // same or similar times, we need to randomize the time that we do
+            // this in order to avoid a thundering herd overloading the server.
+            //
+            // Additionally, we try to do this reload at a time the user will
+            // not notice.  So completely idle clients will reload first;
+            // those will an open compose box will wait until the message has
+            // been sent (or until it's clear the user isn't likely to send it).
+            //
+            // And then we unconditionally reload sometime after 30 minutes
+            // even if there is continued activity, because we don't support
+            // old JavaScript versions against newer servers and eventually
+            // letting that situation continue will lead to users seeing bugs.
+            //
+            // It's a little odd that how this timeout logic works with
+            // compose box resets including the random variance, but that
+            // makes it simple to reason about: We know that reloads will be
+            // spread over at least 5 minutes in all cases.
+
+            let idle_control: ReturnType<JQuery["idle"]>;
+            const random_variance = util.random_int(0, 1000 * 60 * 5);
+            const unconditional_timeout = 1000 * 60 * 30 + random_variance;
+            const composing_idle_timeout = 1000 * 60 * 7 + random_variance;
+            const basic_idle_timeout = 1000 * 60 * 1 + random_variance;
+
+            function reload_from_idle(): void {
+                do_reload_app(false, save_compose, reason);
+            }
+
+            // Make sure we always do a reload eventually after
+            // unconditional_timeout.  Because we save cursor location and
+            // compose state when reloading, we expect this to not be
+            // particularly disruptive.
+            setTimeout(reload_from_idle, unconditional_timeout);
+
+            reset_reload_timeout = function (trigger: "compose_start" | "compose_end"): void {
+                idle_control.cancel();
+                if (trigger === "compose_start") {
+                    // If the user stops being idle and starts composing a
+                    // message, switch to the compose-open timeouts.
+                    idle_control = $(document).idle({
+                        idle: composing_idle_timeout,
+                        onIdle: reload_from_idle,
+                    });
+                } else {
+                    // If the user sends their message or otherwise closes
+                    // compose, we return them to the not-composing timeouts.
+                    idle_control = $(document).idle({
+                        idle: basic_idle_timeout,
+                        onIdle: reload_from_idle,
+                    });
+                }
+            };
+
+            if (compose_state.composing()) {
+                idle_control = $(document).idle({
+                    idle: composing_idle_timeout,
+                    onIdle: reload_from_idle,
+                });
+            } else {
+                idle_control = $(document).idle({
+                    idle: basic_idle_timeout,
+                    onIdle: reload_from_idle,
+                });
+            }
+        },
+        error(xhr) {
+            server_reachable_check_failures += 1;
+            const retry_delay_secs = util.get_retry_backoff_seconds(
+                xhr,
+                server_reachable_check_failures,
+            );
+            setTimeout(() => {
+                initiate({immediate, save_compose, send_after_reload, reason});
+            }, retry_delay_secs * 1000);
+        },
+    });
 }
 
 window.addEventListener("beforeunload", () => {

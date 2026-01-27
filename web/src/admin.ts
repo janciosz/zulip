@@ -6,9 +6,11 @@ import render_settings_organization_settings_tip from "../templates/settings/org
 
 import * as bot_data from "./bot_data.ts";
 import * as demo_organizations_ui from "./demo_organizations_ui.ts";
-import {$t, get_language_name, language_list} from "./i18n.ts";
+import {$t, language_list} from "./i18n.ts";
+import * as information_density from "./information_density.ts";
 import {page_params} from "./page_params.ts";
 import * as people from "./people.ts";
+import {postprocess_content} from "./postprocess_content.ts";
 import {realm_user_settings_defaults} from "./realm_user_settings_defaults.ts";
 import * as settings from "./settings.ts";
 import * as settings_bots from "./settings_bots.ts";
@@ -24,6 +26,7 @@ import * as settings_toggle from "./settings_toggle.ts";
 import * as settings_users from "./settings_users.ts";
 import {current_user, realm} from "./state_data.ts";
 import {the} from "./util.ts";
+import * as util from "./util.ts";
 
 const admin_settings_label = {
     // Organization profile
@@ -31,26 +34,34 @@ const admin_settings_label = {
         defaultMessage: "Advertise organization in the Zulip communities directory",
     }),
     // Organization settings
-    realm_allow_edit_history: $t({defaultMessage: "Enable message edit history"}),
-    realm_mandatory_topics: $t({defaultMessage: "Require topics in channel messages"}),
     realm_new_stream_announcements_stream: $t({defaultMessage: "New channel announcements"}),
     realm_signup_announcements_stream: $t({defaultMessage: "New user announcements"}),
     realm_zulip_update_announcements_stream: $t({defaultMessage: "Zulip update announcements"}),
+    realm_moderation_request_channel: $t({defaultMessage: "Moderation requests"}),
     realm_inline_image_preview: $t({
         defaultMessage: "Show previews of uploaded and linked images and videos",
     }),
     realm_inline_url_embed_preview: $t({defaultMessage: "Show previews of linked websites"}),
     realm_send_welcome_emails: $t({defaultMessage: "Send emails introducing Zulip to new users"}),
+    realm_require_e2ee_push_notifications: $t({
+        defaultMessage: "Require end-to-end encryption for push notification content",
+    }),
     realm_message_content_allowed_in_email_notifications: $t({
         defaultMessage: "Allow message content in message notification emails",
     }),
     realm_enable_spectator_access: $t({
         defaultMessage: "Allow creating web-public channels (visible to anyone on the Internet)",
     }),
+    realm_send_channel_events_messages: $t({
+        defaultMessage: "Send automated messages for channel events",
+    }),
     realm_digest_emails_enabled: $t({
         defaultMessage: "Send weekly digest emails to inactive users",
     }),
     realm_default_code_block_language: $t({defaultMessage: "Default language for code blocks"}),
+    realm_enable_welcome_message_custom_text: $t({
+        defaultMessage: "Send a custom Welcome Bot message to new users",
+    }),
 
     // Organization permissions
     realm_require_unique_names: $t({defaultMessage: "Require unique names"}),
@@ -73,6 +84,9 @@ const admin_settings_label = {
     realm_enable_guest_user_indicator: $t({
         defaultMessage: "Display “(guest)” after names of guest users",
     }),
+    realm_enable_guest_user_dm_warning: $t({
+        defaultMessage: "Warn when composing a DM to a guest",
+    }),
 };
 
 function insert_tip_box(): void {
@@ -89,6 +103,8 @@ function insert_tip_box(): void {
         .not("#admin-bot-list")
         .not("#admin-invites-list")
         .not("#admin-user-list")
+        .not("#admin-active-users-list")
+        .not("#admin-deactivated-users-list")
         .prepend($(tip_box_html));
 }
 
@@ -121,10 +137,10 @@ export function build_page(): void {
         realm_night_logo_url = realm.realm_logo_url;
     }
 
-    let giphy_help_link = "/help/animated-gifs-from-giphy";
-    if (realm.giphy_api_key === "") {
-        giphy_help_link =
-            "https://zulip.readthedocs.io/en/latest/production/giphy-gif-integration.html";
+    let gif_help_link = "/help/animated-gifs";
+    if (realm.giphy_api_key === "" && realm.tenor_api_key === "") {
+        gif_help_link =
+            "https://zulip.readthedocs.io/en/latest/production/gif-picker-integrations.html";
     }
 
     const options = {
@@ -135,35 +151,47 @@ export function build_page(): void {
         realm_org_type: realm.realm_org_type,
         realm_available_video_chat_providers: realm.realm_available_video_chat_providers,
         server_jitsi_server_url: realm.server_jitsi_server_url,
-        giphy_rating_options: realm.giphy_rating_options,
-        giphy_api_key_empty: realm.giphy_api_key === "",
-        realm_description: realm.realm_description,
+        gif_rating_options: realm.gif_rating_options,
+        gif_api_key_empty: realm.giphy_api_key === "" && realm.tenor_api_key === "",
+        realm_description_text: realm.realm_description,
+        realm_description_html: postprocess_content(page_params.realm_rendered_description),
         realm_inline_image_preview: realm.realm_inline_image_preview,
         server_inline_image_preview: realm.server_inline_image_preview,
         realm_inline_url_embed_preview: realm.realm_inline_url_embed_preview,
         server_inline_url_embed_preview: realm.server_inline_url_embed_preview,
         realm_authentication_methods: realm.realm_authentication_methods,
         realm_name_changes_disabled: realm.realm_name_changes_disabled,
+        server_name_changes_disabled: realm.server_name_changes_disabled,
         realm_require_unique_names: realm.realm_require_unique_names,
         realm_email_changes_disabled: realm.realm_email_changes_disabled,
         realm_avatar_changes_disabled: realm.realm_avatar_changes_disabled,
+        server_avatar_changes_disabled: realm.server_avatar_changes_disabled,
         can_add_emojis: settings_data.user_can_add_custom_emoji(),
-        can_create_new_bots: settings_bots.can_create_new_bots(),
+        can_create_new_bots: settings_bots.can_create_incoming_webhooks(),
         realm_message_content_edit_limit_minutes:
             settings_components.get_realm_time_limits_in_minutes(
                 "realm_message_content_edit_limit_seconds",
+            ),
+        realm_move_messages_between_streams_limit_minutes:
+            settings_components.get_realm_time_limits_in_minutes(
+                "realm_move_messages_between_streams_limit_seconds",
+            ),
+        realm_move_messages_within_stream_limit_minutes:
+            settings_components.get_realm_time_limits_in_minutes(
+                "realm_move_messages_within_stream_limit_seconds",
             ),
         realm_message_content_delete_limit_minutes:
             settings_components.get_realm_time_limits_in_minutes(
                 "realm_message_content_delete_limit_seconds",
             ),
         realm_message_retention_days: realm.realm_message_retention_days,
-        realm_allow_edit_history: realm.realm_allow_edit_history,
+        realm_message_edit_history_visibility_policy:
+            realm.realm_message_edit_history_visibility_policy,
         realm_allow_message_editing: realm.realm_allow_message_editing,
         language_list,
-        realm_default_language_name: get_language_name(realm.realm_default_language),
         realm_default_language_code: realm.realm_default_language,
         realm_waiting_period_threshold: realm.realm_waiting_period_threshold,
+        realm_moderation_request_channel_id: realm.realm_moderation_request_channel_id,
         realm_new_stream_announcements_stream_id: realm.realm_new_stream_announcements_stream_id,
         realm_signup_announcements_stream_id: realm.realm_signup_announcements_stream_id,
         realm_zulip_update_announcements_stream_id:
@@ -178,12 +206,19 @@ export function build_page(): void {
         realm_logo_url: realm.realm_logo_url,
         realm_night_logo_source: realm.realm_night_logo_source,
         realm_night_logo_url,
-        realm_mandatory_topics: realm.realm_mandatory_topics,
+        realm_topics_policy: realm.realm_topics_policy,
+        realm_topics_policy_values: settings_config.get_realm_topics_policy_values(),
+        empty_string_topic_display_name: util.get_final_topic_display_name(""),
         realm_send_welcome_emails: realm.realm_send_welcome_emails,
+        realm_enable_welcome_message_custom_text:
+            realm.realm_welcome_message_custom_text.length > 0,
+        realm_welcome_message_custom_text: realm.realm_welcome_message_custom_text,
+        realm_require_e2ee_push_notifications: realm.realm_require_e2ee_push_notifications,
         realm_message_content_allowed_in_email_notifications:
             realm.realm_message_content_allowed_in_email_notifications,
         realm_enable_spectator_access: realm.realm_enable_spectator_access,
         settings_send_digest_emails: realm.settings_send_digest_emails,
+        realm_send_channel_events_messages: realm.realm_send_channel_events_messages,
         realm_digest_emails_enabled: realm.realm_digest_emails_enabled,
         realm_digest_weekday: realm.realm_digest_weekday,
         development: page_params.development_environment,
@@ -194,14 +229,14 @@ export function build_page(): void {
         msg_edit_limit_dropdown_values: settings_config.msg_edit_limit_dropdown_values,
         msg_delete_limit_dropdown_values: settings_config.msg_delete_limit_dropdown_values,
         msg_move_limit_dropdown_values: settings_config.msg_move_limit_dropdown_values,
-        bot_creation_policy_values: settings_bots.bot_creation_policy_values,
         email_address_visibility_values: settings_config.email_address_visibility_values,
         waiting_period_threshold_dropdown_values:
             settings_config.waiting_period_threshold_dropdown_values,
+        message_edit_history_visibility_policy_values:
+            settings_config.message_edit_history_visibility_policy_values,
         can_create_multiuse_invite: settings_data.user_can_create_multiuse_invite(),
         can_invite_users_by_email: settings_data.user_can_invite_users_by_email(),
         realm_invite_required: realm.realm_invite_required,
-        can_create_user_groups: settings_data.user_can_create_user_groups(),
         policy_values: settings_config.common_policy_values,
         ...settings_org.get_organization_settings_options(),
         demote_inactive_streams_values: settings_config.demote_inactive_streams_values,
@@ -212,10 +247,11 @@ export function build_page(): void {
         web_stream_unreads_count_display_policy_values:
             settings_config.web_stream_unreads_count_display_policy_values,
         web_animate_image_previews_values: settings_config.web_animate_image_previews_values,
+        resolved_topic_notice_auto_read_policy_values:
+            settings_config.resolved_topic_notice_auto_read_policy_values,
         color_scheme_values: settings_config.color_scheme_values,
         web_home_view_values: settings_config.web_home_view_values,
         settings_object: realm_user_settings_defaults,
-        information_section_checkbox_group: settings_config.information_section_checkbox_group,
         information_density_settings: settings_config.get_information_density_preferences(),
         settings_render_only: settings_config.get_settings_render_only(),
         settings_label: settings_config.realm_user_settings_defaults_labels,
@@ -247,18 +283,30 @@ export function build_page(): void {
         automatically_unmute_topics_in_muted_streams_policy_values:
             settings_config.automatically_follow_or_unmute_topics_policy_values,
         realm_enable_guest_user_indicator: realm.realm_enable_guest_user_indicator,
+        realm_enable_guest_user_dm_warning: realm.realm_enable_guest_user_dm_warning,
         active_user_list_dropdown_widget_name: settings_users.active_user_list_dropdown_widget_name,
         deactivated_user_list_dropdown_widget_name:
             settings_users.deactivated_user_list_dropdown_widget_name,
-        giphy_help_link,
+        gif_help_link,
         ...get_realm_level_notification_settings(),
+        all_bots_list_dropdown_widget_name: settings_bots.all_bots_list_dropdown_widget_name,
+        your_bots_list_dropdown_widget_name: settings_bots.your_bots_list_dropdown_widget_name,
+        group_setting_labels: settings_config.all_group_setting_labels.realm,
+        server_can_summarize_topics: realm.server_can_summarize_topics,
+        is_plan_self_hosted:
+            realm.realm_plan_type === settings_config.realm_plan_types.self_hosted.code,
+        has_billing_access: settings_data.user_has_billing_access(),
+        web_line_height_percent_display_value:
+            information_density.get_string_display_value_for_line_height(
+                realm_user_settings_defaults.web_line_height_percent,
+            ),
     };
 
     const rendered_admin_tab = render_admin_tab(options);
     $("#settings_content .organization-box").html(rendered_admin_tab);
     $("#settings_content .alert").removeClass("show");
 
-    settings_bots.update_bot_settings_tip($("#admin-bot-settings-tip"), true);
+    settings_bots.update_bot_settings_tip($("#admin-bot-settings-tip"));
     settings_invites.update_invite_user_panel();
     insert_tip_box();
 
@@ -267,25 +315,30 @@ export function build_page(): void {
         demo_organizations_ui.handle_demo_organization_conversion();
     }
 
-    $("#id_realm_bot_creation_policy").val(realm.realm_bot_creation_policy);
-
     $("#id_realm_digest_weekday").val(realm.realm_digest_weekday);
 
-    const is_plan_plus = realm.realm_plan_type === 10;
-    const is_plan_self_hosted = realm.realm_plan_type === 1;
+    const is_plan_plus = realm.realm_plan_type === settings_config.realm_plan_types.plus.code;
+    const is_plan_self_hosted =
+        realm.realm_plan_type === settings_config.realm_plan_types.self_hosted.code;
     if (current_user.is_admin && !(is_plan_plus || is_plan_self_hosted)) {
         $("#realm_can_access_all_users_group_widget").prop("disabled", true);
-        const opts = {
-            content: $t({
+
+        const opts: {content?: string} = {};
+        if (settings_data.user_has_billing_access()) {
+            opts.content = $t({
                 defaultMessage: "This feature is available on Zulip Cloud Plus. Upgrade to access.",
-            }),
-        };
+            });
+        } else {
+            opts.content = $t({
+                defaultMessage: "This feature is available on Zulip Cloud Plus.",
+            });
+        }
 
         tippy.default(the($("#realm_can_access_all_users_group_widget_container")), opts);
     }
 }
 
-export function launch(section: string, user_settings_tab: string | undefined): void {
+export function launch(section: string, settings_tab: string | undefined): void {
     settings_sections.reset_sections();
 
     settings.open_settings_overlay();
@@ -293,7 +346,10 @@ export function launch(section: string, user_settings_tab: string | undefined): 
         settings_panel_menu.org_settings.set_current_tab(section);
     }
     if (section === "users") {
-        settings_panel_menu.org_settings.set_user_settings_tab(user_settings_tab);
+        settings_panel_menu.org_settings.set_user_settings_tab(settings_tab);
+    }
+    if (section === "bots") {
+        settings_panel_menu.org_settings.set_bot_settings_tab(settings_tab);
     }
     settings_toggle.goto("organization");
 }

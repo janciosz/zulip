@@ -2,6 +2,7 @@
 
 const assert = require("node:assert/strict");
 
+const {make_realm} = require("./lib/example_realm.cjs");
 const example_settings = require("./lib/example_settings.cjs");
 const {mock_esm, zrequire} = require("./lib/namespace.cjs");
 const {make_stub} = require("./lib/stub.cjs");
@@ -13,10 +14,13 @@ const browser_history = mock_esm("../src/browser_history");
 const color_data = mock_esm("../src/color_data");
 const compose_recipient = mock_esm("../src/compose_recipient");
 const dialog_widget = mock_esm("../src/dialog_widget");
+const message_live_update = mock_esm("../src/message_live_update");
+const settings_streams = mock_esm("../src/settings_streams");
 const stream_color_events = mock_esm("../src/stream_color_events");
 const stream_list = mock_esm("../src/stream_list");
 const stream_muting = mock_esm("../src/stream_muting");
 const stream_settings_api = mock_esm("../src/stream_settings_api");
+const stream_settings_data = mock_esm("../src/stream_settings_data");
 const onboarding_steps = mock_esm("../src/onboarding_steps");
 const stream_settings_ui = mock_esm("../src/stream_settings_ui", {
     update_settings_for_subscribed: noop,
@@ -39,11 +43,21 @@ mock_esm("../src/settings_notifications", {
 mock_esm("../src/overlays", {
     streams_open: () => true,
 });
+const settings_config = zrequire("settings_config");
+mock_esm("../src/user_settings", {
+    user_settings: {
+        web_channel_default_view: settings_config.web_channel_default_view_values.channel_feed.code,
+    },
+});
+
+const stream_ui_updates = mock_esm("../src/stream_ui_updates");
+const user_group_edit = mock_esm("../src/user_group_edit");
 const user_profile = mock_esm("../src/user_profile");
 
 const {Filter} = zrequire("../src/filter");
 const activity_ui = zrequire("activity_ui");
 const {buddy_list} = zrequire("buddy_list");
+const compose_state = zrequire("compose_state");
 const narrow_state = zrequire("narrow_state");
 const peer_data = zrequire("peer_data");
 const people = zrequire("people");
@@ -52,7 +66,7 @@ const stream_create = zrequire("stream_create");
 const stream_data = zrequire("stream_data");
 const stream_events = zrequire("stream_events");
 
-const realm = {};
+const realm = make_realm();
 set_current_user({});
 set_realm(realm);
 
@@ -77,6 +91,8 @@ const dev_help = {
     stream_id: 2,
     is_muted: true,
     invite_only: false,
+    can_administer_channel_group: 1,
+    can_remove_subscribers_group: 1,
 };
 
 const frontend = {
@@ -86,6 +102,8 @@ const frontend = {
     stream_id: 101,
     is_muted: true,
     invite_only: false,
+    can_administer_channel_group: 1,
+    can_remove_subscribers_group: 1,
 };
 
 function narrow_to_frontend() {
@@ -112,8 +130,9 @@ test("update_property", ({override}) => {
         "server_supported_permission_settings",
         example_settings.server_supported_permission_settings,
     );
+    override(user_group_edit, "update_stream_setting_in_permissions_panel", noop);
     const sub = {...frontend};
-    stream_data.add_sub(sub);
+    stream_data.add_sub_for_tests(sub);
 
     const stream_id = sub.stream_id;
 
@@ -261,6 +280,19 @@ test("update_property", ({override}) => {
         assert.equal(args.val, 20);
     }
 
+    // Test stream topics_policy change event
+    {
+        const stub = make_stub();
+        override(stream_settings_ui, "update_topics_policy_setting", stub.f);
+        override(compose_recipient, "update_topic_inputbox_on_topics_policy_change", noop);
+        override(compose_recipient, "update_compose_area_placeholder_text", noop);
+        stream_events.update_property(stream_id, "topics_policy", "allow_topics_policy");
+        assert.equal(stub.num_calls, 1);
+        const args = stub.get_args("sub", "val");
+        assert.equal(args.sub.stream_id, stream_id);
+        assert.equal(args.val, "allow_topics_policy");
+    }
+
     // Test stream can_remove_subscribers_group change event
     {
         const stub = make_stub();
@@ -277,12 +309,147 @@ test("update_property", ({override}) => {
     {
         const stub = make_stub();
         override(stream_settings_ui, "update_stream_permission_group_setting", stub.f);
+        override(stream_settings_data, "get_sub_for_settings", () => ({
+            can_add_subscribers: false,
+            ...sub,
+        }));
+        const update_add_subscriptions_elements_stub = make_stub();
+        override(
+            stream_ui_updates,
+            "update_add_subscriptions_elements",
+            update_add_subscriptions_elements_stub.f,
+        );
         stream_events.update_property(stream_id, "can_administer_channel_group", 3);
         assert.equal(stub.num_calls, 1);
+        assert.equal(update_add_subscriptions_elements_stub.num_calls, 1);
         const args = stub.get_args("setting_name", "sub", "val");
         assert.equal(args.setting_name, "can_administer_channel_group");
         assert.equal(args.sub.stream_id, stream_id);
         assert.equal(args.val, 3);
+    }
+
+    // Test stream can_resolve_topics_group change event
+    {
+        const stub = make_stub();
+        override(stream_settings_ui, "update_stream_permission_group_setting", stub.f);
+        override(message_live_update, "rerender_messages_view", noop);
+        stream_events.update_property(stream_id, "can_resolve_topics_group", 3);
+        assert.equal(stub.num_calls, 1);
+        const args = stub.get_args("setting_name", "sub", "val");
+        assert.equal(args.setting_name, "can_resolve_topics_group");
+        assert.equal(args.sub.stream_id, stream_id);
+        assert.equal(args.val, 3);
+    }
+
+    // Test stream can_create_topic_group change event
+    {
+        const stub = make_stub();
+        override(stream_settings_ui, "update_stream_permission_group_setting", stub.f);
+        const update_history_public_to_subscribers_state_stub = make_stub();
+        override(
+            stream_ui_updates,
+            "update_history_public_to_subscribers_state",
+            update_history_public_to_subscribers_state_stub.f,
+        );
+        stream_events.update_property(stream_id, "can_create_topic_group", 3);
+        assert.equal(stub.num_calls, 1);
+        assert.equal(update_history_public_to_subscribers_state_stub.num_calls, 1);
+    }
+
+    // Test stream can_subscribe_group change event
+    {
+        const stub = make_stub();
+        override(stream_settings_ui, "update_stream_permission_group_setting", stub.f);
+        const update_subscription_elements_stub = make_stub();
+        override(
+            stream_settings_ui,
+            "update_subscription_elements",
+            update_subscription_elements_stub.f,
+        );
+        stream_events.update_property(stream_id, "can_subscribe_group", 3);
+        assert.equal(stub.num_calls, 1);
+        assert.equal(update_subscription_elements_stub.num_calls, 1);
+        let args = stub.get_args("setting_name", "sub", "val");
+        assert.equal(args.setting_name, "can_subscribe_group");
+        assert.equal(args.sub.stream_id, stream_id);
+        assert.equal(args.val, 3);
+        args = update_subscription_elements_stub.get_args("sub");
+        assert.equal(args.sub, sub);
+    }
+
+    // Update channel folder
+    {
+        const stub = make_stub();
+        override(stream_settings_ui, "update_channel_folder", stub.f);
+        stream_events.update_property(stream_id, "folder_id", 3);
+        assert.equal(stub.num_calls, 1);
+        const args = stub.get_args("sub", "value");
+        assert.equal(args.sub.stream_id, stream_id);
+        assert.equal(args.value, 3);
+    }
+
+    // Test archiving stream
+    {
+        stream_data.subscribe_myself(sub);
+
+        const stub = make_stub();
+        override(stream_settings_ui, "update_settings_for_archived_and_unarchived", stub.f);
+        override(settings_streams, "update_default_streams_table", noop);
+        override(message_live_update, "rerender_messages_view", noop);
+
+        narrow_to_frontend();
+        let bookend_updates = 0;
+        override(message_lists.current, "update_trailing_bookend", () => {
+            bookend_updates += 1;
+        });
+
+        let removed_sidebar_rows = 0;
+        override(stream_list, "remove_sidebar_row", () => {
+            removed_sidebar_rows += 1;
+        });
+
+        compose_state.set_stream_id(stream_id);
+
+        stream_events.update_property(stream_id, "is_archived", true);
+
+        assert.ok(stream_data.is_stream_archived_by_id(stream_id));
+        assert.ok(stream_data.is_subscribed(stream_id));
+
+        const args = stub.get_args("sub");
+        assert.equal(args.sub.stream_id, stream_id);
+
+        assert.equal(bookend_updates, 1);
+        assert.equal(removed_sidebar_rows, 1);
+    }
+
+    // Test unarchiving stream
+    {
+        const stub = make_stub();
+        override(stream_settings_ui, "update_settings_for_archived_and_unarchived", stub.f);
+        override(message_live_update, "rerender_messages_view", noop);
+
+        let bookend_updates = 0;
+        override(message_lists.current, "update_trailing_bookend", () => {
+            bookend_updates += 1;
+        });
+
+        let added_sidebar_rows = 0;
+        override(stream_list, "add_sidebar_row", () => {
+            added_sidebar_rows += 1;
+        });
+
+        compose_state.set_stream_id(stream_id);
+
+        // Unarchive the stream
+        stream_events.update_property(stream_id, "is_archived", false);
+        assert.ok(!stream_data.is_stream_archived_by_id(stream_id));
+        assert.ok(stream_data.is_subscribed(stream_id));
+
+        const args = stub.get_args("sub");
+        assert.equal(args.sub.stream_id, stream_id);
+
+        assert.equal(bookend_updates, 1);
+        assert.equal(added_sidebar_rows, 1);
     }
 
     // Test deprecated properties for coverage.
@@ -301,7 +468,7 @@ test("marked_(un)subscribed (early return)", () => {
 
 test("marked_subscribed (normal)", ({override}) => {
     const sub = {...frontend};
-    stream_data.add_sub(sub);
+    stream_data.add_sub_for_tests(sub);
     override(stream_color_events, "update_stream_color", noop);
     override(buddy_list, "populate", noop);
     activity_ui.set_cursor_and_filter();
@@ -352,7 +519,7 @@ test("marked_subscribed (color)", ({override}) => {
         is_muted: true,
         invite_only: false,
     };
-    stream_data.add_sub(sub);
+    stream_data.add_sub_for_tests(sub);
 
     override(color_data, "pick_color", () => "green");
     override(user_profile, "update_user_profile_streams_list_for_users", noop);
@@ -375,7 +542,7 @@ test("marked_subscribed (color)", ({override}) => {
 
 test("marked_subscribed (emails)", ({override}) => {
     const sub = {...frontend};
-    stream_data.add_sub(sub);
+    stream_data.add_sub_for_tests(sub);
     override(stream_color_events, "update_stream_color", noop);
 
     // Test assigning subscriber emails
@@ -394,7 +561,10 @@ test("marked_subscribed (emails)", ({override}) => {
 
     const user_ids = [15, 20, 25, me.user_id];
     stream_events.mark_subscribed(sub, user_ids, "");
-    assert.deepEqual(new Set(peer_data.get_subscribers(sub.stream_id)), new Set(user_ids));
+    assert.deepEqual(
+        new Set(peer_data.get_subscriber_ids_assert_loaded(sub.stream_id)),
+        new Set(user_ids),
+    );
     assert.ok(stream_data.is_subscribed(sub.stream_id));
 
     const args = subs_stub.get_args("sub");
@@ -404,7 +574,7 @@ test("marked_subscribed (emails)", ({override}) => {
 test("mark_unsubscribed (update_settings_for_unsubscribed)", ({override}) => {
     // Test unsubscribe
     const sub = {...dev_help};
-    stream_data.add_sub(sub);
+    stream_data.add_sub_for_tests(sub);
     stream_data.subscribe_myself(sub);
 
     const stub = make_stub();
@@ -424,7 +594,7 @@ test("mark_unsubscribed (update_settings_for_unsubscribed)", ({override}) => {
 
 test("mark_unsubscribed (render_title_area)", ({override}) => {
     const sub = {...frontend, subscribed: true};
-    stream_data.add_sub(sub);
+    stream_data.add_sub_for_tests(sub);
 
     // Test update bookend and remove done event
     narrow_to_frontend();
@@ -452,24 +622,6 @@ test("mark_unsubscribed (render_title_area)", ({override}) => {
     message_lists.current = undefined;
 });
 
-test("remove_deactivated_user_from_all_streams", () => {
-    stream_data.add_sub(dev_help);
-    const subs_stub = make_stub();
-    stream_settings_ui.update_subscribers_ui = subs_stub.f;
-
-    // assert starting state
-    assert.ok(!stream_data.is_user_subscribed(dev_help.stream_id, george.user_id));
-
-    // verify that deactivating user should unsubscribe user from all streams
-    peer_data.add_subscriber(dev_help.stream_id, george.user_id);
-    assert.ok(stream_data.is_user_subscribed(dev_help.stream_id, george.user_id));
-
-    stream_events.remove_deactivated_user_from_all_streams(george.user_id);
-
-    // verify that we issue a call to update subscriber count/list UI
-    assert.equal(subs_stub.num_calls, 1);
-});
-
 test("process_subscriber_update", ({override, override_rewire}) => {
     const subsStub = make_stub();
     stream_settings_ui.update_subscribers_ui = subsStub.f;
@@ -483,15 +635,15 @@ test("process_subscriber_update", ({override, override_rewire}) => {
     const userIds = [104, 2, 3];
     // Sample stream IDs
     const streamIds = [1, 2, 3];
-    stream_data.add_sub({
+    stream_data.add_sub_for_tests({
         stream_id: 1,
         name: "Rome",
     });
-    stream_data.add_sub({
+    stream_data.add_sub_for_tests({
         stream_id: 2,
         name: "Denmark",
     });
-    stream_data.add_sub({
+    stream_data.add_sub_for_tests({
         stream_id: 3,
         name: "Paris",
     });
@@ -513,7 +665,7 @@ test("process_subscriber_update", ({override, override_rewire}) => {
 test("marked_subscribed (new channel creation)", ({override}) => {
     stream_create.set_name(frontend.name);
     const sub = {...frontend};
-    stream_data.add_sub(sub);
+    stream_data.add_sub_for_tests(sub);
 
     const go_to_location_stub = make_stub();
     override(browser_history, "go_to_location", go_to_location_stub.f);

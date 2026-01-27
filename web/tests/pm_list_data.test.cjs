@@ -2,11 +2,20 @@
 
 const assert = require("node:assert/strict");
 
+const {make_realm} = require("./lib/example_realm.cjs");
+const {make_message_list} = require("./lib/message_list.cjs");
 const {mock_esm, zrequire} = require("./lib/namespace.cjs");
 const {run_test} = require("./lib/test.cjs");
 const blueslip = require("./lib/zblueslip.cjs");
 
-const unread = mock_esm("../src/unread");
+const unread = mock_esm("../src/unread", {
+    num_unread_mentions_for_user_ids_strings(user_ids_string) {
+        if (user_ids_string === "103") {
+            return true;
+        }
+        return false;
+    },
+});
 
 mock_esm("../src/settings_data", {
     user_can_access_all_other_users: () => true,
@@ -17,7 +26,6 @@ mock_esm("../src/user_status", {
     }),
 });
 
-const {Filter} = zrequire("filter");
 const narrow_state = zrequire("narrow_state");
 const people = zrequire("people");
 const pm_conversations = zrequire("pm_conversations");
@@ -26,7 +34,7 @@ const message_lists = zrequire("message_lists");
 const {set_realm} = zrequire("state_data");
 const {initialize_user_settings} = zrequire("user_settings");
 
-set_realm({});
+set_realm(make_realm());
 initialize_user_settings({user_settings: {}});
 
 const alice = {
@@ -84,12 +92,7 @@ function test(label, f) {
 }
 
 function set_pm_with_filter(emails) {
-    const active_filter = new Filter([{operator: "dm", operand: emails}]);
-    message_lists.set_current({
-        data: {
-            filter: active_filter,
-        },
-    });
+    message_lists.set_current(make_message_list([{operator: "dm", operand: emails}]));
 }
 
 function check_list_info(list, length, more_unread, recipients_array) {
@@ -112,7 +115,9 @@ test("get_conversations", ({override}) => {
     const expected_data = [
         {
             is_bot: false,
+            is_current_user: true,
             is_active: false,
+            includes_deactivated_user: false,
             is_group: false,
             is_zero: false,
             recipients: "Me Myself",
@@ -123,18 +128,22 @@ test("get_conversations", ({override}) => {
             status_emoji_info: {
                 emoji_code: "20",
             },
+            has_unread_mention: true,
         },
         {
             recipients: "Alice, Bob",
+            is_current_user: false,
             user_ids_string: "101,102",
             unread: 1,
             is_zero: false,
             is_active: false,
+            includes_deactivated_user: false,
             url: "#narrow/dm/101,102-group",
             user_circle_class: undefined,
             is_group: true,
             is_bot: false,
             status_emoji_info: undefined,
+            has_unread_mention: false,
         },
     ];
 
@@ -159,11 +168,14 @@ test("get_conversations", ({override}) => {
         unread: 0,
         is_zero: true,
         is_active: true,
+        includes_deactivated_user: false,
+        is_current_user: false,
         url: "#narrow/dm/106-Iago",
         status_emoji_info: {emoji_code: "20"},
         user_circle_class: "user-circle-offline",
         is_group: false,
         is_bot: false,
+        has_unread_mention: false,
     });
     set_pm_with_filter("iago@zulip.com");
     pm_data = pm_list_data.get_conversations();
@@ -195,26 +207,32 @@ test("get_conversations bot", ({override}) => {
         {
             recipients: "Outgoing webhook",
             user_ids_string: "314",
+            is_current_user: false,
             unread: 1,
             is_zero: false,
             is_active: false,
+            includes_deactivated_user: false,
             url: "#narrow/dm/314-Outgoing-webhook",
             status_emoji_info: undefined,
             user_circle_class: "user-circle-offline",
             is_group: false,
             is_bot: true,
+            has_unread_mention: false,
         },
         {
             recipients: "Alice, Bob",
             user_ids_string: "101,102",
+            is_current_user: false,
             unread: 1,
             is_zero: false,
             is_active: false,
+            includes_deactivated_user: false,
             url: "#narrow/dm/101,102-group",
             user_circle_class: undefined,
             status_emoji_info: undefined,
             is_group: true,
             is_bot: false,
+            has_unread_mention: false,
         },
     ];
 
@@ -225,12 +243,7 @@ test("get_conversations bot", ({override}) => {
 test("get_active_user_ids_string", () => {
     assert.equal(pm_list_data.get_active_user_ids_string(), undefined);
 
-    const stream_filter = new Filter([{operator: "stream", operand: "test"}]);
-    message_lists.set_current({
-        data: {
-            filter: stream_filter,
-        },
-    });
+    message_lists.set_current(make_message_list([{operator: "stream", operand: "test"}]));
     assert.equal(pm_list_data.get_active_user_ids_string(), undefined);
 
     set_pm_with_filter("bob@zulip.com,alice@zulip.com");
@@ -410,4 +423,97 @@ test("get_list_info_no_unread_messages", ({override}) => {
         "Me Myself",
         "Alice",
     ]);
+});
+
+test("get_list_info_deactivated_users", ({override}) => {
+    override(unread, "num_unread_for_user_ids_string", () => 0);
+
+    // Set up recent direct message conversations.
+    pm_conversations.recent.insert([alice.user_id], 1);
+    pm_conversations.recent.insert([me.user_id], 2);
+    pm_conversations.recent.insert([bob.user_id], 3);
+    pm_conversations.recent.insert([zoe.user_id], 4);
+    pm_conversations.recent.insert([cardelio.user_id], 5);
+
+    // Deactivate Bob.
+    const bob_from_people = people.get_by_user_id(bob.user_id);
+    people.deactivate(bob_from_people);
+
+    // When only 5 direct message conversations are present
+    // and Bob is deactivated, we should show only 4.
+    let list_info = pm_list_data.get_list_info(false);
+    // Verify that Bob (deactivated) is not included.
+    check_list_info(list_info, 4, 0, ["Cardelio", "Zoe", "Me Myself", "Alice"]);
+
+    // Set up more conversations than max_conversations_to_show
+    // (which is 8), including one recent group conversation that
+    // involves Bob who has been deactivated.
+    pm_conversations.recent.insert([zoe.user_id, cardelio.user_id], 6);
+    pm_conversations.recent.insert([bob.user_id, cardelio.user_id], 7);
+    pm_conversations.recent.insert([alice.user_id, iago.user_id], 8);
+    pm_conversations.recent.insert([alice.user_id, cardelio.user_id], 9);
+    pm_conversations.recent.insert([zoe.user_id, iago.user_id], 10);
+    pm_conversations.recent.insert([iago.user_id], 11);
+    pm_conversations.recent.insert([alice.user_id, zoe.user_id], 12);
+    pm_conversations.recent.insert([cardelio.user_id, iago.user_id], 13);
+
+    // There are 13 total conversations, 2 involve Bob and are excluded.
+    // From the remaining 11 conversantions latest 8 are included.
+    list_info = pm_list_data.get_list_info(false);
+    // Verify that Bob (deactivated) is not included.
+    check_list_info(list_info, 8, 0, [
+        "Cardelio, Iago",
+        "Alice, Zoe",
+        "Iago",
+        "Iago, Zoe",
+        "Alice, Cardelio",
+        "Alice, Iago",
+        "Cardelio, Zoe",
+        "Cardelio",
+    ]);
+
+    // Zooming in should reveal all direct message conversations including
+    // the conversations with Bob.
+    list_info = pm_list_data.get_list_info(true);
+    check_list_info(list_info, 13, 0, [
+        "Cardelio, Iago",
+        "Alice, Zoe",
+        "Iago",
+        "Iago, Zoe",
+        "Alice, Cardelio",
+        "Alice, Iago",
+        "Bob, Cardelio",
+        "Cardelio, Zoe",
+        "Cardelio",
+        "Zoe",
+        "Bob",
+        "Me Myself",
+        "Alice",
+    ]);
+
+    override(unread, "num_unread_for_user_ids_string", () => 1);
+
+    // Verify with unread messages that conversations with Bob are still
+    // not shown in the unzoomed case, and the unread count for more
+    // conversations is updated for those 2 conversations.
+    list_info = pm_list_data.get_list_info(false);
+    assert.deepEqual(list_info.conversations_to_be_shown.length, 11);
+    assert.deepEqual(list_info.more_conversations_unread_count, 2);
+    // Verify that Bob (deactivated) is not included.
+    check_list_info(list_info, 11, 2, [
+        "Cardelio, Iago",
+        "Alice, Zoe",
+        "Iago",
+        "Iago, Zoe",
+        "Alice, Cardelio",
+        "Alice, Iago",
+        "Cardelio, Zoe",
+        "Cardelio",
+        "Zoe",
+        "Me Myself",
+        "Alice",
+    ]);
+
+    // Reactivate Bob to not affect other tests.
+    people.add_active_user(bob);
 });

@@ -1,5 +1,5 @@
-import Handlebars from "handlebars/runtime.js";
 import _ from "lodash";
+import * as z from "zod/mini";
 
 import * as blueslip from "./blueslip.ts";
 import {$t} from "./i18n.ts";
@@ -104,7 +104,7 @@ export function normalize_recipients(recipients: string): string {
         .split(",")
         .map((s) => s.trim().toLowerCase())
         .filter((s) => s.length > 0)
-        .sort()
+        .toSorted()
         .join(",");
 }
 
@@ -236,7 +236,7 @@ export function sorted_ids(ids: number[]): number[] {
     return id_list;
 }
 
-export function set_match_data(target: Message, source: MatchedMessage): void {
+export function set_match_data(target: Message, source: MatchedMessage | RawMessage): void {
     target.match_subject = source.match_subject;
     target.match_content = source.match_content;
 }
@@ -281,6 +281,9 @@ export function canonicalize_channel_synonyms(text: string): string {
     return text;
 }
 
+export function prefix_match({value, search_term}: {value: string; search_term: string}): boolean {
+    return filter_by_word_prefix_match([value], search_term, (s) => s).length === 1;
+}
 export function filter_by_word_prefix_match<T>(
     items: T[],
     search_term: string,
@@ -440,29 +443,12 @@ export function format_array_as_list(
     return list_formatter.format(array);
 }
 
-export function format_array_as_list_with_highlighted_elements(
+export function format_array_as_list_with_conjunction(
     array: string[],
-    style: Intl.ListFormatStyle,
-    type: Intl.ListFormatType,
+    // long uses "and", narrow uses commas.
+    join_strategy: "long" | "narrow",
 ): string {
-    // If Intl.ListFormat is not supported
-    if (Intl.ListFormat === undefined) {
-        return array.map((item) => `<b>${Handlebars.Utils.escapeExpression(item)}</b>`).join(", ");
-    }
-
-    // Use Intl.ListFormat to format the array as a Internationalized list.
-    const list_formatter = new Intl.ListFormat(user_settings.default_language, {style, type});
-
-    const formatted_parts = list_formatter.formatToParts(array);
-    return formatted_parts
-        .map((part) => {
-            if (part.type === "element") {
-                // Only highlight the values passed in array and not commas, etc.
-                return `<b>${Handlebars.Utils.escapeExpression(part.value)}</b>`;
-            }
-            return part.value;
-        })
-        .join("");
+    return format_array_as_list(array, join_strategy, "conjunction");
 }
 
 // Returns the remaining time in milliseconds from the start_time and duration.
@@ -536,12 +522,88 @@ export function compare_a_b<T>(a: T, b: T): number {
     return -1;
 }
 
-export function get_final_topic_display_name(topic_display_name: string): string {
-    if (topic_display_name === "") {
+export function get_final_topic_display_name(topic_name: string): string {
+    if (topic_name === "") {
         if (realm.realm_empty_topic_display_name === "general chat") {
             return $t({defaultMessage: "general chat"});
         }
         return realm.realm_empty_topic_display_name;
     }
-    return topic_display_name;
+    return topic_name;
+}
+
+export function is_topic_name_considered_empty(topic: string): boolean {
+    // NOTE: Use this check only when realm.realm_topics_policy is set to disable_empty_topic.
+    topic = topic.trim();
+    // When the topic is mandatory in a realm via realm_topics_policy, the topic
+    // can't be an empty string, "(no topic)", or the displayed topic name for empty string.
+    if (topic === "" || topic === "(no topic)" || topic === get_final_topic_display_name("")) {
+        return true;
+    }
+    return false;
+}
+
+export let get_retry_backoff_seconds = (
+    xhr: JQuery.jqXHR<unknown> | undefined,
+    attempts: number,
+    tighter_backoff = false,
+): number => {
+    // We need to respect the server's rate-limiting headers, but beyond
+    // that, we also want to avoid contributing to a thundering herd if
+    // the server is giving us 500/502 responses.
+    //
+    // We do the maximum of the retry-after header and an exponential
+    // backoff.
+    let backoff_scale: number;
+    if (tighter_backoff) {
+        // Starts at 1-2s and ends at 16-32s after enough failures.
+        backoff_scale = Math.min(2 ** attempts, 32);
+    } else {
+        // Starts at 1-2s and ends at 45-90s after enough failures.
+        backoff_scale = Math.min(2 ** ((attempts + 1) / 2), 90);
+    }
+    // Add a bit jitter to backoff scale.
+    const backoff_delay_secs = ((1 + Math.random()) / 2) * backoff_scale;
+    let rate_limit_delay_secs = 0;
+    const rate_limited_error_schema = z.object({
+        "retry-after": z.number(),
+        code: z.literal("RATE_LIMIT_HIT"),
+    });
+    const parsed = rate_limited_error_schema.safeParse(xhr?.responseJSON);
+    if (xhr?.status === 429 && parsed?.success && parsed?.data) {
+        // Add a bit of jitter to the required delay suggested by the
+        // server, because we may be racing with other copies of the web
+        // app.
+        rate_limit_delay_secs = parsed.data["retry-after"] + Math.random() * 0.5;
+    }
+    return Math.max(backoff_delay_secs, rate_limit_delay_secs);
+};
+
+export function rewire_get_retry_backoff_seconds(value: typeof get_retry_backoff_seconds): void {
+    get_retry_backoff_seconds = value;
+}
+
+export async function sha256_hash(text: string): Promise<string | undefined> {
+    // The Web Crypto API is only available in secure contexts (HTTPS or localhost).
+    if (!window.isSecureContext) {
+        return undefined;
+    }
+
+    const encoder = new TextEncoder();
+    const data = encoder.encode(text);
+    const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+    const hashArray = [...new Uint8Array(hashBuffer)];
+    const hashHex = hashArray.map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    return hashHex;
+}
+
+// This should only be used in loops with small collections, since it
+// runs in linear time.
+export function unique_array_insert<T>(array: T[], new_item: T): void {
+    for (const item of array) {
+        if (_.isEqual(item, new_item)) {
+            return;
+        }
+    }
+    array.push(new_item);
 }

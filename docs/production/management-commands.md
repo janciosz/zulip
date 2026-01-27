@@ -121,9 +121,9 @@ There are dozens of useful management commands under
   to one or more users.
 - `./manage.py change_realm_subdomain`: Change subdomain of a realm.
 - `./manage.py change_user_email`: Change a user's email address.
-- `./manage.py change_user_role`: Can change are user's role
+- `./manage.py change_user_role`: Can change a user's role
   (easier done [via the
-  UI](https://zulip.com/help/change-a-users-role)) or give bots the
+  UI](https://zulip.com/help/user-roles)) or give bots the
   `can_forge_sender` permission, which is needed for certain special API features.
 - `./manage.py export_single_user`: does a limited version of the [main
   export tools](export-and-import.md) containing just
@@ -138,7 +138,7 @@ There are dozens of useful management commands under
   For most purposes, deactivating users is preferred, since that does not
   alter message history for other users.
   See the `./manage.py delete_user --help` documentation for details.
-- `./manage.py clear_auth_rate_limit_history`: If a user failed authentication
+- `./manage.py reset_authentication_attempt_count`: If a user failed authentication
   attempts too many times and further attempts are disallowed by the rate limiter,
   this can be used to reset the limit.
 
@@ -186,6 +186,6 @@ upgrade.
 [writing-bots]: https://zulip.com/api/writing-bots
 [integrations]: https://zulip.com/integrations
 [zulip-api]: https://zulip.com/api/rest
-[webhook-integrations]: https://zulip.com/api/incoming-webhooks-overview
+[webhook-integrations]: ../webhooks/incoming-webhooks-overview.md
 [management-commands-dev]: ../subsystems/management-commands.md
 [django-management]: https://docs.djangoproject.com/en/5.0/ref/django-admin/#django-admin-and-manage-py

@@ -19,8 +19,8 @@ def add_reaction(
     user_profile: UserProfile,
     message_id: int,
     *,
-    emoji_name: str,
     emoji_code: str | None = None,
+    emoji_name: str,
     reaction_type: str | None = None,
 ) -> HttpResponse:
     check_add_reaction(user_profile, message_id, emoji_name, emoji_code, reaction_type)
@@ -36,19 +36,16 @@ def remove_reaction(
     user_profile: UserProfile,
     message_id: int,
     *,
-    emoji_name: str | None = None,
     emoji_code: str | None = None,
+    emoji_name: str | None = None,
     reaction_type: str = "unicode_emoji",
 ) -> HttpResponse:
-    message = access_message(user_profile, message_id, lock_message=True)
+    message = access_message(user_profile, message_id, lock_message=True, is_modifying_message=True)
 
     if emoji_code is None:
         if emoji_name is None:
             raise JsonableError(
-                _(
-                    "At least one of the following arguments "
-                    "must be present: emoji_name, emoji_code"
-                )
+                _("At least one of the following arguments must be present: emoji_name, emoji_code")
             )
         # A correct full Zulip client implementation should always
         # pass an emoji_code, because of the corner cases discussed in

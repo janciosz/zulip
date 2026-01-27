@@ -85,7 +85,7 @@ async function test_reply_by_click_prepopulates_private_message_recipient(
     await private_message.click();
     await page.waitForSelector("#private_message_recipient", {visible: true});
     const email = await common.get_internal_email_from_name(page, common.fullname.cordelia);
-    assert(email !== undefined);
+    assert.ok(email !== undefined);
     await common.pm_recipient.expect(page, email);
     await close_compose_box(page);
 }
@@ -240,4 +240,4 @@ async function compose_tests(page: Page): Promise<void> {
     await test_markdown_preview(page);
 }
 
-common.run_test(compose_tests);
+await common.run_test(compose_tests);

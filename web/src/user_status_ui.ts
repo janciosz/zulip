@@ -18,6 +18,7 @@ let default_status_messages_and_emoji_info: {status_text: string; emoji: EmojiRe
 export function set_selected_emoji_info(emoji_info: Partial<UserStatusEmojiInfo>): void {
     selected_emoji_info = {...emoji_info};
     rebuild_status_emoji_selector_ui(selected_emoji_info);
+    toggle_clear_status_button();
 }
 export function input_field(): JQuery<HTMLInputElement> {
     return $<HTMLInputElement>("#set-user-status-modal input.user-status");
@@ -40,6 +41,7 @@ export function open_user_status_modal(): void {
         html_body: rendered_set_status_overlay,
         html_submit_button: $t_html({defaultMessage: "Save"}),
         id: "set-user-status-modal",
+        loading_spinner: true,
         on_click: submit_new_status,
         post_render: user_status_post_render,
         on_shown() {
@@ -92,22 +94,22 @@ export function update_button(): void {
     }
 }
 
-export function toggle_clear_message_button(): void {
-    if (input_field().val() !== "" || selected_emoji_info.emoji_name) {
-        $("#clear_status_message_button").prop("disabled", false);
-    } else {
-        $("#clear_status_message_button").prop("disabled", true);
-    }
-}
-
 export function clear_message(): void {
     const $field = input_field();
     $field.val("");
-    $("#clear_status_message_button").prop("disabled", true);
+    toggle_clear_status_button();
 }
 
 export function user_status_picker_open(): boolean {
     return $("#set-user-status-modal").length > 0;
+}
+
+export function toggle_clear_status_button(): void {
+    if (input_field().val() === "" && !selected_emoji_info.emoji_name) {
+        $("#clear_status_message_button").hide();
+    } else {
+        $("#clear_status_message_button").show();
+    }
 }
 
 function emoji_status_fields_changed(
@@ -144,7 +146,7 @@ function user_status_post_render(): void {
     set_selected_emoji_info(old_emoji_info);
     const $field = input_field();
     $field.val(old_status_text);
-    toggle_clear_message_button();
+    toggle_clear_status_button();
 
     const $button = submit_button();
     $button.prop("disabled", true);
@@ -159,11 +161,11 @@ function user_status_post_render(): void {
                 (status) => status.status_text === user_status_value,
             )?.emoji ?? {};
         set_selected_emoji_info(emoji_info);
-        toggle_clear_message_button();
+        toggle_clear_status_button();
         update_button();
     });
 
-    input_field().on("keypress", (event) => {
+    input_field().on("keydown", (event) => {
         if (keydown_util.is_enter_event(event)) {
             event.preventDefault();
 
@@ -173,7 +175,7 @@ function user_status_post_render(): void {
 
     input_field().on("keyup", () => {
         update_button();
-        toggle_clear_message_button();
+        toggle_clear_status_button();
     });
 
     $("#clear_status_message_button").on("click", () => {

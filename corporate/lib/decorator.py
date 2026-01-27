@@ -123,7 +123,9 @@ def authenticated_remote_realm_management_endpoint(
                 url = append_url_query_string(url, query)
 
             # Return error for AJAX requests with url.
-            if request.headers.get("x-requested-with") == "XMLHttpRequest":  # nocoverage
+            if (
+                request.get_preferred_type(["application/json", "text/html"]) != "text/html"
+            ):  # nocoverage
                 return session_expired_ajax_response(url)
 
             return HttpResponseRedirect(url)
@@ -200,14 +202,16 @@ def authenticated_remote_server_management_endpoint(
             # That means that we can do it universally whether the user has an expired
             # identity_dict, or just lacks any form of authentication info at all - there
             # are no security concerns since this is just a local redirect.
-            url = reverse("remote_billing_legacy_server_login")
             page_type = get_next_page_param_from_request_path(request)
-            if page_type is not None:
-                query = urlencode({"next_page": page_type})
-                url = append_url_query_string(url, query)
+            url = reverse(
+                "remote_billing_legacy_server_login",
+                query=None if page_type is None else {"next_page": page_type},
+            )
 
             # Return error for AJAX requests with url.
-            if request.headers.get("x-requested-with") == "XMLHttpRequest":  # nocoverage
+            if (
+                request.get_preferred_type(["application/json", "text/html"]) != "text/html"
+            ):  # nocoverage
                 return session_expired_ajax_response(url)
 
             return HttpResponseRedirect(url)

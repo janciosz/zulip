@@ -1,9 +1,7 @@
 import assert from "minimalistic-assert";
 
-import * as resolved_topic from "../shared/src/resolved_topic.ts";
-
-import * as hash_util from "./hash_util.ts";
 import * as narrow_state from "./narrow_state.ts";
+import * as resolved_topic from "./resolved_topic.ts";
 import * as stream_topic_history from "./stream_topic_history.ts";
 import * as sub_store from "./sub_store.ts";
 import * as unread from "./unread.ts";
@@ -55,8 +53,7 @@ function choose_topics(
             stream_id,
             topic_name,
         );
-        const [topic_resolved_prefix, topic_display_name] =
-            resolved_topic.display_parts(topic_name);
+        const [topic_resolved_prefix, topic_bare_name] = resolved_topic.display_parts(topic_name);
         // Important: Topics are lower-case in this set.
         const contains_unread_mention = topic_choice_state.topics_with_unread_mentions.has(
             topic_name.toLowerCase(),
@@ -128,15 +125,15 @@ function choose_topics(
             stream_id,
             topic_name,
             topic_resolved_prefix,
-            topic_display_name: util.get_final_topic_display_name(topic_display_name),
-            is_empty_string_topic: topic_display_name === "",
+            topic_display_name: util.get_final_topic_display_name(topic_bare_name),
+            is_empty_string_topic: topic_bare_name === "",
             unread: num_unread,
             is_zero: num_unread === 0,
             is_muted: is_topic_muted,
             is_followed: is_topic_followed,
             is_unmuted_or_followed: is_topic_unmuted_or_followed,
             is_active_topic,
-            url: hash_util.by_stream_topic_url(stream_id, topic_name),
+            url: stream_topic_history.channel_topic_permalink_hash(stream_id, topic_name),
             contains_unread_mention,
         };
 
@@ -157,12 +154,58 @@ type TopicListInfo = {
     more_topics_unread_count_muted: boolean;
 };
 
+export function filter_topics_by_search_term(
+    topic_names: string[],
+    search_term: string,
+    topics_state = "",
+): string[] {
+    if (search_term === "" && topics_state === "") {
+        return topic_names;
+    }
+
+    const word_separator_regex = /[\s/:_-]/; // Use -, _, :, / as word separators in addition to spaces.
+    const empty_string_topic_display_name = util.get_final_topic_display_name("");
+    topic_names = util.filter_by_word_prefix_match(
+        topic_names,
+        search_term,
+        (topic) => (topic === "" ? empty_string_topic_display_name : topic),
+        word_separator_regex,
+    );
+
+    if (topics_state === "is:resolved") {
+        topic_names = topic_names.filter((name) => resolved_topic.is_resolved(name));
+    } else if (topics_state === "-is:resolved") {
+        topic_names = topic_names.filter((name) => !resolved_topic.is_resolved(name));
+    }
+
+    return topic_names;
+}
+
+export function get_filtered_topic_names(
+    stream_id: number,
+    filter_topics: (topic_names: string[]) => string[],
+): string[] {
+    const topic_names = stream_topic_history.get_recent_topic_names(stream_id);
+    const narrowed_topic = narrow_state.topic();
+
+    // If the user is viewing a topic with no messages, include
+    // the topic name to the beginning of the list of topics.
+    if (
+        stream_id === narrow_state.stream_id() &&
+        narrowed_topic !== undefined &&
+        !contains_topic(topic_names, narrowed_topic)
+    ) {
+        topic_names.unshift(narrowed_topic);
+    }
+
+    return filter_topics(topic_names);
+}
+
 export function get_list_info(
     stream_id: number,
     zoomed: boolean,
-    search_term: string,
+    filter_topics: (topic_names: string[]) => string[],
 ): TopicListInfo {
-    const narrowed_topic = narrow_state.topic();
     const topic_choice_state: TopicChoiceState = {
         items: [],
         topics_selected: 0,
@@ -178,25 +221,7 @@ export function get_list_info(
     assert(sub !== undefined);
     const stream_muted = sub.is_muted;
 
-    let topic_names = stream_topic_history.get_recent_topic_names(stream_id);
-
-    if (
-        stream_id === narrow_state.stream_id() &&
-        narrowed_topic &&
-        !contains_topic(topic_names, narrowed_topic)
-    ) {
-        topic_names.unshift(narrowed_topic);
-    }
-
-    if (zoomed) {
-        const word_separator_regex = /[\s/:_-]/; // Use -, _, :, / as word separators in addition to spaces.
-        topic_names = util.filter_by_word_prefix_match(
-            topic_names,
-            search_term,
-            (topic) => topic,
-            word_separator_regex,
-        );
-    }
+    const topic_names = get_filtered_topic_names(stream_id, filter_topics);
 
     if (stream_muted && !zoomed) {
         const unmuted_or_followed_topics = topic_names.filter((topic) =>

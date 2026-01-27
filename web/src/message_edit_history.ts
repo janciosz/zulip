@@ -1,6 +1,6 @@
 import $ from "jquery";
 import assert from "minimalistic-assert";
-import {z} from "zod";
+import * as z from "zod/mini";
 
 import render_message_edit_history from "../templates/message_edit_history.hbs";
 import render_message_history_overlay from "../templates/message_history_overlay.hbs";
@@ -8,6 +8,7 @@ import render_message_history_overlay from "../templates/message_history_overlay
 import {exit_overlay} from "./browser_history.ts";
 import * as channel from "./channel.ts";
 import {$t, $t_html} from "./i18n.ts";
+import * as lightbox from "./lightbox.ts";
 import * as loading from "./loading.ts";
 import * as message_lists from "./message_lists.ts";
 import type {Message} from "./message_store.ts";
@@ -17,6 +18,7 @@ import {page_params} from "./page_params.ts";
 import * as people from "./people.ts";
 import * as rendered_markdown from "./rendered_markdown.ts";
 import * as rows from "./rows.ts";
+import {message_edit_history_visibility_policy_values} from "./settings_config.ts";
 import * as spectators from "./spectators.ts";
 import {realm} from "./state_data.ts";
 import {get_recipient_bar_color} from "./stream_color.ts";
@@ -24,8 +26,10 @@ import {get_color} from "./stream_data.ts";
 import * as sub_store from "./sub_store.ts";
 import * as timerender from "./timerender.ts";
 import * as ui_report from "./ui_report.ts";
+import * as util from "./util.ts";
 
 type EditHistoryEntry = {
+    initial_entry_for_move_history: boolean;
     edited_at_time: string;
     edited_by_notice: string;
     timestamp: number; // require to set data-message-id for overlay message row
@@ -33,8 +37,10 @@ type EditHistoryEntry = {
     recipient_bar_color: string | undefined;
     body_to_render: string | undefined;
     topic_edited: boolean | undefined;
-    prev_topic: string | undefined;
-    new_topic: string | undefined;
+    prev_topic_display_name: string | undefined;
+    new_topic_display_name: string | undefined;
+    is_empty_string_prev_topic: boolean | undefined;
+    is_empty_string_new_topic: boolean | undefined;
     stream_changed: boolean | undefined;
     prev_stream: string | undefined;
     prev_stream_id: number | undefined;
@@ -48,13 +54,13 @@ const server_message_history_schema = z.object({
             rendered_content: z.string(),
             timestamp: z.number(),
             topic: z.string(),
-            user_id: z.number().or(z.null()),
-            prev_topic: z.string().optional(),
-            stream: z.number().optional(),
-            prev_stream: z.number().optional(),
-            prev_content: z.string().optional(),
-            prev_rendered_content: z.string().optional(),
-            content_html_diff: z.string().optional(),
+            user_id: z.nullable(z.number()),
+            prev_topic: z.optional(z.string()),
+            stream: z.optional(z.number()),
+            prev_stream: z.optional(z.number()),
+            prev_content: z.optional(z.string()),
+            prev_rendered_content: z.optional(z.string()),
+            content_html_diff: z.optional(z.string()),
         }),
     ),
 });
@@ -109,7 +115,20 @@ function hide_loading_indicator(): void {
 }
 
 export function fetch_and_render_message_history(message: Message): void {
-    $("#message-edit-history-overlay-container").html(render_message_history_overlay());
+    assert(message_lists.current !== undefined);
+    const message_container = message_lists.current.view.message_containers.get(message.id);
+    assert(message_container !== undefined);
+    const move_history_only =
+        realm.realm_message_edit_history_visibility_policy ===
+        message_edit_history_visibility_policy_values.moves_only.code;
+    $("#message-edit-history-overlay-container").html(
+        render_message_history_overlay({
+            moved: message_container.moved,
+            edited: message_container.edited,
+            move_history_only,
+        }),
+    );
+    $("#message-edit-history-overlay-container").attr("data-message-id", message.id);
     open_overlay();
     show_loading_indicator();
     void channel.get({
@@ -119,6 +138,13 @@ export function fetch_and_render_message_history(message: Message): void {
             allow_empty_topic_name: true,
         },
         success(raw_data) {
+            if (
+                !overlays.message_edit_history_open() ||
+                $("#message-edit-history-overlay-container").attr("data-message-id") !==
+                    String(message.id)
+            ) {
+                return;
+            }
             const data = server_message_history_schema.parse(raw_data);
 
             const content_edit_history: EditHistoryEntry[] = [];
@@ -138,37 +164,54 @@ export function fetch_and_render_message_history(message: Message): void {
                 let edited_by_notice;
                 let body_to_render;
                 let topic_edited;
-                let prev_topic;
-                let new_topic;
+                let prev_topic_display_name;
+                let new_topic_display_name;
+                let is_empty_string_prev_topic;
+                let is_empty_string_new_topic;
                 let stream_changed;
                 let prev_stream;
                 let prev_stream_id;
+                let initial_entry_for_move_history = false;
 
                 if (index === 0) {
                     edited_by_notice = $t({defaultMessage: "Posted by {full_name}"}, {full_name});
-                    body_to_render = msg.rendered_content;
-                } else if (msg.prev_topic && msg.prev_content) {
+                    if (move_history_only) {
+                        // If message history is limited to moves only, then we
+                        // display the original topic and channel for the message.
+                        initial_entry_for_move_history = true;
+                        new_topic_display_name = util.get_final_topic_display_name(msg.topic);
+                    } else {
+                        // Otherwise, we display the original message content.
+                        body_to_render = msg.rendered_content;
+                    }
+                } else if (msg.prev_topic !== undefined && msg.prev_content) {
                     edited_by_notice = $t({defaultMessage: "Edited by {full_name}"}, {full_name});
                     body_to_render = msg.content_html_diff;
                     topic_edited = true;
-                    prev_topic = msg.prev_topic;
-                    new_topic = msg.topic;
-                } else if (msg.prev_topic && msg.prev_stream) {
+                    prev_topic_display_name = util.get_final_topic_display_name(msg.prev_topic);
+                    new_topic_display_name = util.get_final_topic_display_name(msg.topic);
+                    is_empty_string_prev_topic = msg.prev_topic === "";
+                    is_empty_string_new_topic = msg.topic === "";
+                } else if (msg.prev_topic !== undefined && msg.prev_stream) {
                     edited_by_notice = $t({defaultMessage: "Moved by {full_name}"}, {full_name});
                     topic_edited = true;
-                    prev_topic = msg.prev_topic;
-                    new_topic = msg.topic;
+                    prev_topic_display_name = util.get_final_topic_display_name(msg.prev_topic);
+                    new_topic_display_name = util.get_final_topic_display_name(msg.topic);
+                    is_empty_string_prev_topic = msg.prev_topic === "";
+                    is_empty_string_new_topic = msg.topic === "";
                     stream_changed = true;
                     prev_stream_id = msg.prev_stream;
                     prev_stream = get_display_stream_name(msg.prev_stream);
                     if (prev_stream_item !== null) {
                         prev_stream_item.new_stream = get_display_stream_name(msg.prev_stream);
                     }
-                } else if (msg.prev_topic) {
+                } else if (msg.prev_topic !== undefined) {
                     edited_by_notice = $t({defaultMessage: "Moved by {full_name}"}, {full_name});
                     topic_edited = true;
-                    prev_topic = msg.prev_topic;
-                    new_topic = msg.topic;
+                    prev_topic_display_name = util.get_final_topic_display_name(msg.prev_topic);
+                    new_topic_display_name = util.get_final_topic_display_name(msg.topic);
+                    is_empty_string_prev_topic = msg.prev_topic === "";
+                    is_empty_string_new_topic = msg.topic === "";
                 } else if (msg.prev_stream) {
                     edited_by_notice = $t({defaultMessage: "Moved by {full_name}"}, {full_name});
                     stream_changed = true;
@@ -183,6 +226,7 @@ export function fetch_and_render_message_history(message: Message): void {
                     body_to_render = msg.content_html_diff;
                 }
                 const item: EditHistoryEntry = {
+                    initial_entry_for_move_history,
                     edited_at_time,
                     edited_by_notice,
                     timestamp: msg.timestamp,
@@ -190,8 +234,10 @@ export function fetch_and_render_message_history(message: Message): void {
                     recipient_bar_color: undefined,
                     body_to_render,
                     topic_edited,
-                    prev_topic,
-                    new_topic,
+                    prev_topic_display_name,
+                    new_topic_display_name,
+                    is_empty_string_prev_topic,
+                    is_empty_string_new_topic,
                     stream_changed,
                     prev_stream,
                     prev_stream_id,
@@ -214,6 +260,7 @@ export function fetch_and_render_message_history(message: Message): void {
             // entries in reverse chronological order.
             if (message.is_stream) {
                 // Start with the message's current location.
+                let stream_display_name: string = get_display_stream_name(message.stream_id);
                 let stream_color: string = get_color(message.stream_id);
                 let recipient_bar_color: string = get_recipient_bar_color(stream_color);
                 for (const edit_history_entry of content_edit_history.toReversed()) {
@@ -224,9 +271,17 @@ export function fetch_and_render_message_history(message: Message): void {
                         // prior to this event, the message must have been in
                         // edit_history_event.prev_stream_id; fetch its color.
                         assert(edit_history_entry.prev_stream_id !== undefined);
+                        stream_display_name = get_display_stream_name(
+                            edit_history_entry.prev_stream_id,
+                        );
                         stream_color = get_color(edit_history_entry.prev_stream_id);
                         recipient_bar_color = get_recipient_bar_color(stream_color);
                     }
+                }
+                if (move_history_only) {
+                    // If message history is limited to moves only, then we
+                    // display the original topic and channel for the message.
+                    content_edit_history[0]!.new_stream = stream_display_name;
                 }
             }
             const rendered_list_html = render_message_edit_history({
@@ -243,6 +298,23 @@ export function fetch_and_render_message_history(message: Message): void {
                 .each(function () {
                     rendered_markdown.update_elements($(this));
                 });
+
+            // When an image is deleted before thumbnailing is completed, we can
+            // end up with the loading spinner HTML syntax stuck in message edit
+            // history indefinitely. Mask this by replacing thumbnailing loading
+            // spinners in edit history with the deleted image placeholder.
+            $("#message-history-overlay")
+                .find("img.image-loading-placeholder")
+                .each(function () {
+                    const $img = $(this);
+                    $img.attr("src", "/static/images/errors/image-not-exist.png");
+                    $img.attr(
+                        "alt",
+                        $t({defaultMessage: "This file does not exist or has been deleted."}),
+                    );
+                    $img.removeClass("image-loading-placeholder");
+                });
+
             const first_element_id = content_edit_history[0]!.timestamp;
             messages_overlay_ui.set_initial_element(
                 String(first_element_id),
@@ -280,39 +352,55 @@ export function handle_keyboard_events(event_key: string): void {
 }
 
 export function initialize(): void {
-    $("body").on("mouseenter", ".message_edit_notice", (e) => {
-        if (realm.realm_allow_edit_history) {
+    $("body").on("mouseenter", ".message_edit_notice, .edit-notifications", (e) => {
+        if (
+            realm.realm_message_edit_history_visibility_policy !==
+            message_edit_history_visibility_policy_values.never.code
+        ) {
             $(e.currentTarget).addClass("message_edit_notice_hover");
         }
     });
 
-    $("body").on("mouseleave", ".message_edit_notice", (e) => {
-        if (realm.realm_allow_edit_history) {
+    $("body").on("mouseleave", ".message_edit_notice, .edit-notifications", (e) => {
+        if (
+            realm.realm_message_edit_history_visibility_policy !==
+            message_edit_history_visibility_policy_values.never.code
+        ) {
             $(e.currentTarget).removeClass("message_edit_notice_hover");
         }
     });
 
-    $("body").on("click", ".message_edit_notice", function (this: HTMLElement, e) {
-        e.stopPropagation();
-        e.preventDefault();
+    $("body").on(
+        "click",
+        ".message_edit_notice, .edit-notifications",
+        function (this: HTMLElement, e) {
+            e.stopPropagation();
+            e.preventDefault();
 
-        const message_id = rows.id($(this).closest(".message_row"));
-        assert(message_lists.current !== undefined);
-        const $row = message_lists.current.get_row(message_id);
-        const row_id = rows.id($row);
-        const message = message_lists.current.get(row_id);
-        assert(message !== undefined);
+            const message_id = rows.id($(this).closest(".message_row"));
+            assert(message_lists.current !== undefined);
+            const $row = message_lists.current.get_row(message_id);
+            const row_id = rows.id($row);
+            const message = message_lists.current.get(row_id);
+            assert(message !== undefined);
 
-        if (page_params.is_spectator) {
-            spectators.login_to_access();
-            return;
-        }
+            if (page_params.is_spectator) {
+                spectators.login_to_access();
+                return;
+            }
 
-        if (realm.realm_allow_edit_history) {
-            fetch_and_render_message_history(message);
-            $("#message-history-overlay .exit-sign").trigger("focus");
-        }
-    });
+            if (
+                realm.realm_message_edit_history_visibility_policy ===
+                    message_edit_history_visibility_policy_values.always.code ||
+                (realm.realm_message_edit_history_visibility_policy ===
+                    message_edit_history_visibility_policy_values.moves_only.code &&
+                    message.last_moved_timestamp !== undefined)
+            ) {
+                fetch_and_render_message_history(message);
+                $("#message-history-overlay .exit-sign").trigger("focus");
+            }
+        },
+    );
 
     $("body").on(
         "focus",
@@ -321,4 +409,23 @@ export function initialize(): void {
             messages_overlay_ui.activate_element(this, keyboard_handling_context);
         },
     );
+
+    $("body").on("click", "#message-history-overlay .message_edit_history_content", (e) => {
+        const $img = $(e.target).closest("img");
+        if ($img.length > 0) {
+            e.stopPropagation();
+            e.preventDefault();
+            overlays.close_overlay("message_edit_history");
+            lightbox.handle_inline_media_element_click($img, true);
+            return;
+        }
+
+        const $video = $(e.target).closest("video");
+        if ($video.length > 0) {
+            e.stopPropagation();
+            e.preventDefault();
+            overlays.close_overlay("message_edit_history");
+            lightbox.handle_inline_media_element_click($video, true);
+        }
+    });
 }

@@ -10,13 +10,13 @@ import "../setup.ts";
 import "../reload.ts";
 import "../templates.ts";
 import "../zulip_test.ts";
+import "../inputs.ts";
 
 // Import styles
 import "tippy.js/dist/tippy.css";
 // Adds color inheritance to the borders when using the default CSS Arrow.
 // https://atomiks.github.io/tippyjs/v6/themes/#arrow-border
 import "tippy.js/dist/border.css";
-import "tippy.js/themes/light-border.css";
 import "katex/dist/katex.css";
 import "flatpickr/dist/flatpickr.css";
 import "flatpickr/dist/plugins/confirmDate/confirmDate.css";
@@ -26,6 +26,8 @@ import "../../styles/typeahead.css";
 import "../../styles/app_variables.css";
 import "../../styles/tooltips.css";
 import "../../styles/buttons.css";
+import "../../styles/inputs.css";
+import "../../styles/banners.css";
 import "../../styles/components.css";
 import "../../styles/app_components.css";
 import "../../styles/rendered_markdown.css";
@@ -58,6 +60,9 @@ import "../../styles/widgets.css";
 import "../../styles/print.css";
 import "../../styles/inbox.css";
 import "../../styles/color_picker.css";
+import "../../styles/animate.css";
+import "@uppy/core/css/style.min.css";
+import "@uppy/image-editor/css/style.min.css";
 
 // This should be last.
 import "../ui_init.js";

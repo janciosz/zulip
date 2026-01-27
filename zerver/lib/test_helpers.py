@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import IO, TYPE_CHECKING, Any, TypeVar, Union, cast
 from unittest import mock
 from unittest.mock import patch
+from urllib.parse import urlsplit
 
 import boto3.session
 import fakeldap
@@ -17,12 +18,13 @@ import ldap
 import orjson
 from django.conf import settings
 from django.contrib.auth.models import AnonymousUser
+from django.contrib.sessions.backends.base import SessionBase
 from django.db.migrations.state import StateApps
-from django.http import HttpRequest, HttpResponse, HttpResponseRedirect
+from django.http import HttpRequest, HttpResponse
 from django.http.request import QueryDict
 from django.http.response import HttpResponseBase
 from django.test import override_settings
-from django.urls import URLResolver
+from django.urls import URLResolver, resolve
 from moto.core.decorator import mock_aws
 from mypy_boto3_s3.service_resource import Bucket
 from typing_extensions import ParamSpec, override
@@ -33,17 +35,19 @@ from zerver.lib import cache
 from zerver.lib.avatar import avatar_url
 from zerver.lib.cache import get_cache_backend
 from zerver.lib.db import Params, Query, TimeTrackingCursor
-from zerver.lib.integrations import WEBHOOK_INTEGRATIONS
+from zerver.lib.integrations import INCOMING_WEBHOOK_INTEGRATIONS
 from zerver.lib.per_request_cache import flush_per_request_caches
 from zerver.lib.rate_limiter import RateLimitedIPAddr, rules
 from zerver.lib.request import RequestNotes
 from zerver.lib.types import AnalyticsDataUploadLevel
 from zerver.lib.upload.s3 import S3UploadBackend
+from zerver.lib.url_redirects import REDIRECTED_TO_HELP_DOCUMENTATION
 from zerver.models import Client, Message, RealmUserDefault, Subscription, UserMessage, UserProfile
 from zerver.models.clients import clear_client_cache, get_client
 from zerver.models.realms import get_realm
 from zerver.models.streams import get_stream
 from zerver.tornado.handlers import AsyncDjangoHandler, allocate_handler_id
+from zerver.views.auth import log_into_subdomain
 from zilencer.models import RemoteZulipServer
 from zproject.backends import ExternalAuthDataDict, ExternalAuthResult
 
@@ -395,11 +399,18 @@ class HostRequestMock(HttpRequest):
         self.user = user_profile or AnonymousUser()
         self._body = orjson.dumps(post_data)
         self.content_type = ""
+        self.session = SessionBase()
+
+        # Mock parse_client() in middleware.py
+        if meta_data and "HTTP_USER_AGENT" in meta_data:
+            client = meta_data["HTTP_USER_AGENT"]
+        else:
+            client = ""
 
         RequestNotes.set_notes(
             self,
             RequestNotes(
-                client_name="",
+                client_name=client,
                 log_data={},
                 tornado_handler_id=None if tornado_handler is None else tornado_handler.handler_id,
                 client=get_client(client_name) if client_name is not None else None,
@@ -561,7 +572,8 @@ def write_instrumentation_reports(full_suite: bool, include_webhooks: bool) -> N
             # This endpoint only returns 500 and 404 codes, so it doesn't get picked up
             # by find_pattern above and therefore needs to be exempt.
             "self-hosted-billing/not-configured/",
-            *(webhook.url for webhook in WEBHOOK_INTEGRATIONS if not include_webhooks),
+            *(redirect.old_url.lstrip("/") for redirect in REDIRECTED_TO_HELP_DOCUMENTATION),
+            *(webhook.url for webhook in INCOMING_WEBHOOK_INTEGRATIONS if not include_webhooks),
         }
 
         untested_patterns -= exempt_patterns
@@ -569,8 +581,7 @@ def write_instrumentation_reports(full_suite: bool, include_webhooks: bool) -> N
         var_dir = "var"  # TODO make sure path is robust here
         fn = os.path.join(var_dir, "url_coverage.txt")
         with open(fn, "wb") as f:
-            for call in calls:
-                f.write(orjson.dumps(call, option=orjson.OPT_APPEND_NEWLINE))
+            f.writelines(orjson.dumps(call, option=orjson.OPT_APPEND_NEWLINE) for call in calls)
 
         if full_suite:
             print(f"INFO: URL coverage report is in {fn}")
@@ -583,8 +594,10 @@ def write_instrumentation_reports(full_suite: bool, include_webhooks: bool) -> N
 
 
 def load_subdomain_token(response: Union["TestHttpResponse", HttpResponse]) -> ExternalAuthDataDict:
-    assert isinstance(response, HttpResponseRedirect)
-    token = response.url.rsplit("/", 1)[1]
+    assert response.status_code == 302
+    match = resolve(urlsplit(response["Location"]).path)
+    assert match.func == log_into_subdomain
+    token = match.kwargs["token"]
     data = ExternalAuthResult(
         request=mock.MagicMock(), login_token=token, delete_stored_data=False
     ).data_dict

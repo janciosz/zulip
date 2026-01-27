@@ -4,10 +4,6 @@ from zerver.lib.test_classes import WebhookTestCase
 
 
 class FrontHookTests(WebhookTestCase):
-    CHANNEL_NAME = "front"
-    URL_TEMPLATE = "/api/v1/external/front?&api_key={api_key}&stream={stream}"
-    WEBHOOK_DIR_NAME = "front"
-
     # Scenario 1: Conversation starts from an outbound message.
 
     # Conversation automatically assigned to a teammate who started it.
@@ -96,8 +92,7 @@ class FrontHookTests(WebhookTestCase):
     def test_mention_all(self) -> None:
         expected_topic_name = "cnv_keo696"
         expected_message = (
-            "**Leela Turanga** left a comment:\n"
-            "```quote\n@all Could someone else take this?\n```"
+            "**Leela Turanga** left a comment:\n```quote\n@all Could someone else take this?\n```"
         )
 
         self.check_webhook(
@@ -177,8 +172,7 @@ class FrontHookTests(WebhookTestCase):
     def test_mention(self) -> None:
         expected_topic_name = "cnv_keocka"
         expected_message = (
-            "**Leela Turanga** left a comment:\n"
-            "```quote\n@bender Could you take it from here?\n```"
+            "**Leela Turanga** left a comment:\n```quote\n@bender Could you take it from here?\n```"
         )
 
         self.check_webhook(

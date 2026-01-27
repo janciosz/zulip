@@ -17,7 +17,12 @@ import assets from "./webpack.assets.json" with {type: "json"};
 import dev_assets from "./webpack.dev-assets.json" with {type: "json"};
 
 const config = (
-    env: {minimize?: true; puppeteer_tests?: true; ZULIP_VERSION?: string} = {},
+    env: {
+        minimize?: true;
+        puppeteer_tests?: true;
+        ZULIP_VERSION?: string;
+        custom_5xx_file?: string;
+    } = {},
     argv: {mode?: string},
 ): webpack.Configuration[] => {
     const production: boolean = argv.mode === "production";
@@ -50,7 +55,7 @@ const config = (
         }),
         new HtmlWebpackPlugin({
             filename: "5xx.html",
-            template: "html/5xx.html",
+            template: env.custom_5xx_file ? "html/" + env.custom_5xx_file : "html/5xx.html",
             chunks: ["error-styles"],
             publicPath: production ? "/static/webpack-bundles/" : "/webpack/",
         }),
@@ -119,10 +124,7 @@ const config = (
                 // Transpile .js and .ts files with Babel
                 {
                     test: /\.[cm]?[jt]s$/,
-                    include: [
-                        path.resolve(import.meta.dirname, "shared/src"),
-                        path.resolve(import.meta.dirname, "src"),
-                    ],
+                    include: [path.resolve(import.meta.dirname, "src")],
                     loader: "babel-loader",
                 },
                 // regular css files
@@ -178,6 +180,7 @@ const config = (
                             "numberFormat",
                             "tooltip_hotkey_hints",
                             "popover_hotkey_hints",
+                            "list_each",
                         ],
                         precompileOptions: {
                             knownHelpersOnly: true,
@@ -250,6 +253,8 @@ const config = (
                 "Access-Control-Allow-Origin": "*",
                 "Timing-Allow-Origin": "*",
             },
+            setupMiddlewares: (middlewares) =>
+                middlewares.filter((middleware) => middleware.name !== "cross-origin-header-check"),
         },
         infrastructureLogging: {
             level: "warn",

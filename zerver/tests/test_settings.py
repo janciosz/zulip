@@ -7,13 +7,13 @@ import orjson
 from django.http import HttpRequest
 from django.test import override_settings
 
+from zerver.actions.user_settings import do_change_user_setting
 from zerver.lib.initial_password import initial_password
 from zerver.lib.test_classes import ZulipTestCase
 from zerver.lib.test_helpers import get_test_image_file, ratelimit_rule
-from zerver.lib.users import get_all_api_keys
-from zerver.models import Draft, ScheduledMessageNotificationEmail, UserProfile
+from zerver.models import Draft, NamedUserGroup, ScheduledMessageNotificationEmail, UserProfile
 from zerver.models.scheduled_jobs import NotificationTriggers
-from zerver.models.users import get_user_profile_by_api_key
+from zerver.models.users import ResolvedTopicNoticeAutoReadPolicyEnum, get_user_profile_by_api_key
 
 if TYPE_CHECKING:
     from django.test.client import _MonkeyPatchedWSGIResponse as TestHttpResponse
@@ -117,10 +117,8 @@ class ChangeSettingsTest(ZulipTestCase):
         self.assert_json_error(json_result, "Name too long!")
 
         # Now try too-short names
-        short_names = ["", "x"]
-        for name in short_names:
-            json_result = self.client_patch("/json/settings", dict(full_name=name))
-            self.assert_json_error(json_result, "Name too short!")
+        json_result = self.client_patch("/json/settings", dict(full_name=""))
+        self.assert_json_error(json_result, "Name must not be empty!")
 
     def test_illegal_characters_in_name_changes(self) -> None:
         self.login("hamlet")
@@ -226,12 +224,7 @@ class ChangeSettingsTest(ZulipTestCase):
     def test_toggling_boolean_user_settings(self) -> None:
         """Test updating each boolean setting in UserProfile property_types"""
         boolean_settings = (
-            s
-            for s in UserProfile.property_types
-            if UserProfile.property_types[s] is bool
-            # Dense mode can't be toggled without changing other settings too.
-            # This setting is tested in test_changing_information_density_settings.
-            and s not in ["dense_mode"]
+            s for s in UserProfile.property_types if UserProfile.property_types[s] is bool
         )
         for user_setting in boolean_settings:
             self.check_for_toggle_param_patch("/json/settings", user_setting)
@@ -380,6 +373,7 @@ class ChangeSettingsTest(ZulipTestCase):
             realm_name_in_email_notifications_policy=2,
             automatically_follow_topics_policy=1,
             automatically_unmute_topics_in_muted_streams_policy=1,
+            resolved_topic_notice_auto_read_policy=ResolvedTopicNoticeAutoReadPolicyEnum.always.name,
         )
 
         self.login("hamlet")
@@ -403,6 +397,8 @@ class ChangeSettingsTest(ZulipTestCase):
         result = self.client_patch("/json/settings", data)
         self.assert_json_success(result)
         user_profile = self.example_user("hamlet")
+        if setting_name == "resolved_topic_notice_auto_read_policy":
+            test_value = ResolvedTopicNoticeAutoReadPolicyEnum.always.value
         self.assertEqual(getattr(user_profile, setting_name), test_value)
 
     def test_change_user_setting(self) -> None:
@@ -415,10 +411,26 @@ class ChangeSettingsTest(ZulipTestCase):
         self.do_test_change_user_setting("timezone")
 
     def test_invalid_setting_value(self) -> None:
+        mocked_language_list = [
+            {"code": "de", "locale": "de", "name": "Deutsch", "percent_translated": 97},
+            {"code": "en", "locale": "en", "name": "English"},
+            {
+                "code": "pt-br",
+                "locale": "pt_BR",
+                "name": "Português Brasileiro",
+                "percent_translated": 0,
+            },
+        ]
+
         invalid_values: list[dict[str, Any]] = [
             {
                 "setting_name": "default_language",
                 "value": "invalid_de",
+                "error_msg": "Invalid default_language",
+            },
+            {
+                "setting_name": "default_language",
+                "value": "pt-br",
                 "error_msg": "Invalid default_language",
             },
             {
@@ -481,6 +493,11 @@ class ChangeSettingsTest(ZulipTestCase):
                 "value": 10,
                 "error_msg": "Invalid desktop_icon_count_display: Value error, Not in the list of possible values",
             },
+            {
+                "setting_name": "resolved_topic_notice_auto_read_policy",
+                "value": "invalid",
+                "error_msg": "Invalid resolved_topic_notice_auto_read_policy",
+            },
         ]
         self.login("hamlet")
         for invalid_value in invalid_values:
@@ -488,13 +505,22 @@ class ChangeSettingsTest(ZulipTestCase):
                 invalid_value["value"] = orjson.dumps(invalid_value["value"]).decode()
 
             req = {invalid_value["setting_name"]: invalid_value["value"]}
-            result = self.client_patch("/json/settings", req)
+            with mock.patch("zerver.lib.i18n.get_language_list", return_value=mocked_language_list):
+                result = self.client_patch("/json/settings", req)
 
             self.assert_json_error(result, invalid_value["error_msg"])
             hamlet = self.example_user("hamlet")
             self.assertNotEqual(
                 getattr(hamlet, invalid_value["setting_name"]), invalid_value["value"]
             )
+
+    def test_change_timezone_montreal(self) -> None:
+        self.login("hamlet")
+        data = {"timezone": "America/Montreal"}
+        result = self.client_patch("/json/settings", data)
+        self.assert_json_success(result)
+        hamlet = self.example_user("hamlet")
+        self.assertEqual(hamlet.timezone, "America/Toronto")
 
     def do_change_emojiset(self, emojiset: str) -> "TestHttpResponse":
         self.login("hamlet")
@@ -504,8 +530,8 @@ class ChangeSettingsTest(ZulipTestCase):
 
     def test_emojiset(self) -> None:
         """Test banned emoji sets are not accepted."""
-        banned_emojisets = ["apple", "emojione"]
-        valid_emojisets = ["google", "google-blob", "text", "twitter"]
+        banned_emojisets = ["apple", "emojione", "google-blob"]
+        valid_emojisets = ["google", "text", "twitter"]
 
         for emojiset in banned_emojisets:
             result = self.do_change_emojiset(emojiset)
@@ -567,97 +593,38 @@ class ChangeSettingsTest(ZulipTestCase):
 
     def test_changing_information_density_settings(self) -> None:
         hamlet = self.example_user("hamlet")
-        hamlet.dense_mode = True
         hamlet.web_font_size_px = 14
         hamlet.web_line_height_percent = 122
         hamlet.save()
         self.login("hamlet")
 
-        data: dict[str, str | int] = {"web_font_size_px": 16}
-        result = self.client_patch("/json/settings", data)
-        self.assert_json_error(
-            result,
-            "Incompatible values for 'dense_mode' and 'web_font_size_px'.",
-        )
-
-        data = {"web_font_size_px": 16, "dense_mode": orjson.dumps(False).decode()}
+        data = {
+            "web_font_size_px": 16,
+        }
         result = self.client_patch("/json/settings", data)
         self.assert_json_success(result)
         hamlet = self.example_user("hamlet")
         self.assertEqual(hamlet.web_font_size_px, 16)
-        self.assertEqual(hamlet.dense_mode, False)
 
         data = {"web_font_size_px": 20}
         result = self.client_patch("/json/settings", data)
         self.assert_json_success(result)
         hamlet = self.example_user("hamlet")
         self.assertEqual(hamlet.web_font_size_px, 20)
-        self.assertEqual(hamlet.dense_mode, False)
-
-        # Check dense_mode is still false when both the
-        # settings are set to legacy values.
-        data = {"web_font_size_px": 14}
-        result = self.client_patch("/json/settings", data)
-        self.assert_json_success(result)
-        hamlet = self.example_user("hamlet")
-        self.assertEqual(hamlet.web_font_size_px, 14)
-        self.assertEqual(hamlet.web_line_height_percent, 122)
-        self.assertEqual(hamlet.dense_mode, False)
-
-        data = {"dense_mode": orjson.dumps(True).decode()}
-        result = self.client_patch("/json/settings", data)
-        self.assert_json_success(result)
-        hamlet = self.example_user("hamlet")
-        self.assertEqual(hamlet.web_font_size_px, 14)
-        self.assertEqual(hamlet.dense_mode, True)
 
         data = {"web_line_height_percent": 140}
-        result = self.client_patch("/json/settings", data)
-        self.assert_json_error(
-            result,
-            "Incompatible values for 'dense_mode' and 'web_line_height_percent'.",
-        )
-
-        data = {"web_line_height_percent": 140, "dense_mode": orjson.dumps(False).decode()}
         result = self.client_patch("/json/settings", data)
         self.assert_json_success(result)
         hamlet = self.example_user("hamlet")
         self.assertEqual(hamlet.web_line_height_percent, 140)
-        self.assertEqual(hamlet.dense_mode, False)
 
         data = {"web_line_height_percent": 130}
         result = self.client_patch("/json/settings", data)
         self.assert_json_success(result)
         hamlet = self.example_user("hamlet")
         self.assertEqual(hamlet.web_line_height_percent, 130)
-        self.assertEqual(hamlet.dense_mode, False)
-
-        # Check dense_mode is still false when both the
-        # settings are set to legacy values.
-        data = {"web_line_height_percent": 122}
-        result = self.client_patch("/json/settings", data)
-        self.assert_json_success(result)
-        hamlet = self.example_user("hamlet")
-        self.assertEqual(hamlet.web_font_size_px, 14)
-        self.assertEqual(hamlet.web_line_height_percent, 122)
-        self.assertEqual(hamlet.dense_mode, False)
-
-        data = {"dense_mode": orjson.dumps(True).decode(), "web_font_size_px": 16}
-        result = self.client_patch("/json/settings", data)
-        self.assert_json_error(
-            result,
-            "Incompatible values for 'dense_mode' and 'web_font_size_px'.",
-        )
-
-        data = {"dense_mode": orjson.dumps(True).decode(), "web_line_height_percent": 140}
-        result = self.client_patch("/json/settings", data)
-        self.assert_json_error(
-            result,
-            "Incompatible values for 'dense_mode' and 'web_line_height_percent'.",
-        )
 
         data = {
-            "dense_mode": orjson.dumps(True).decode(),
             "web_font_size_px": 14,
             "web_line_height_percent": 122,
         }
@@ -666,7 +633,132 @@ class ChangeSettingsTest(ZulipTestCase):
         hamlet = self.example_user("hamlet")
         self.assertEqual(hamlet.web_font_size_px, 14)
         self.assertEqual(hamlet.web_line_height_percent, 122)
-        self.assertEqual(hamlet.dense_mode, True)
+
+    def test_admin_change_settings_for_other_users(self) -> None:
+        # Non-admin cannot change settings for other users
+        hamlet = self.example_user("hamlet")
+        cordelia = self.example_user("cordelia")
+        othello = self.example_user("othello")
+        iago = self.example_user("iago")
+        desdemona = self.example_user("desdemona")
+        hamletcharacters_group = NamedUserGroup.objects.get(
+            name="hamletcharacters", realm_for_sharding=iago.realm
+        )
+
+        target_users_dict = {
+            "user_ids": [iago.id, othello.id],
+            "group_ids": [hamletcharacters_group.id],
+            "skip_if_already_edited": False,
+        }
+        self.assertEqual(cordelia.automatically_follow_topics_where_mentioned, False)
+        self.assertEqual(hamlet.automatically_follow_topics_where_mentioned, False)
+        self.assertEqual(othello.automatically_follow_topics_where_mentioned, False)
+        self.assertEqual(iago.automatically_follow_topics_where_mentioned, False)
+
+        self.login("hamlet")
+        data = {
+            "target_users": orjson.dumps(target_users_dict).decode(),
+            "automatically_follow_topics_where_mentioned": orjson.dumps(True).decode(),
+            "web_font_size_px": orjson.dumps(18).decode(),
+        }
+        result = self.client_patch("/json/settings", data)
+        self.assert_json_error(result, "Must be an organization administrator")
+
+        # Admin can change non-sensitive settings for other users
+        self.login("desdemona")
+        result = self.client_patch("/json/settings", data)
+        self.assert_json_success(result)
+        cordelia.refresh_from_db()
+        othello.refresh_from_db()
+        iago.refresh_from_db()
+        hamlet.refresh_from_db()
+        self.assertEqual(cordelia.automatically_follow_topics_where_mentioned, True)
+        self.assertEqual(cordelia.web_font_size_px, 18)
+        self.assertEqual(hamlet.automatically_follow_topics_where_mentioned, True)
+        self.assertEqual(hamlet.web_font_size_px, 18)
+        self.assertEqual(othello.automatically_follow_topics_where_mentioned, True)
+        self.assertEqual(othello.web_font_size_px, 18)
+        self.assertEqual(iago.automatically_follow_topics_where_mentioned, True)
+        self.assertEqual(iago.web_font_size_px, 18)
+
+        # Test skip users who have already edited their specific settings
+        # themselves.
+        do_change_user_setting(
+            hamlet, "automatically_follow_topics_where_mentioned", False, acting_user=hamlet
+        )
+        do_change_user_setting(
+            othello, "automatically_follow_topics_where_mentioned", False, acting_user=othello
+        )
+        do_change_user_setting(
+            cordelia, "automatically_follow_topics_where_mentioned", False, acting_user=iago
+        )
+        do_change_user_setting(
+            iago, "automatically_follow_topics_where_mentioned", False, acting_user=desdemona
+        )
+
+        target_users_dict["skip_if_already_edited"] = True
+        data = {
+            "target_users": orjson.dumps(target_users_dict).decode(),
+            "automatically_follow_topics_where_mentioned": orjson.dumps(True).decode(),
+        }
+        result = self.client_patch("/json/settings", data)
+        self.assert_json_success(result)
+        cordelia.refresh_from_db()
+        othello.refresh_from_db()
+        iago.refresh_from_db()
+        hamlet.refresh_from_db()
+        self.assertEqual(cordelia.automatically_follow_topics_where_mentioned, True)
+        self.assertEqual(othello.automatically_follow_topics_where_mentioned, False)
+        self.assertEqual(iago.automatically_follow_topics_where_mentioned, True)
+        self.assertEqual(hamlet.automatically_follow_topics_where_mentioned, False)
+
+        # Admin cannot change sensitive settings for other users.
+        data = {
+            "target_users": orjson.dumps(target_users_dict).decode(),
+            "send_read_receipts": orjson.dumps(False).decode(),
+        }
+        result = self.client_patch("/json/settings", data)
+        self.assert_json_error(result, "Cannot change this setting for other users.")
+
+        # Admin cannot change timezone setting for other users.
+        data = {
+            "target_users": orjson.dumps(target_users_dict).decode(),
+            "timezone": "Asia/Kolkata",
+        }
+        result = self.client_patch("/json/settings", data)
+        self.assert_json_error(result, "Cannot change this setting for other users.")
+
+        # Test with invalid users.
+        invalid_target_users_dict = {
+            "user_ids": [500, othello.id],
+            "skip_if_already_edited": False,
+        }
+        data = {
+            "target_users": orjson.dumps(invalid_target_users_dict).decode(),
+            "automatically_follow_topics_where_mentioned": orjson.dumps(False).decode(),
+        }
+        result = self.client_patch("/json/settings", data)
+        self.assert_json_error(result, "Invalid user ID: 500")
+
+        # Test with invalid groups.
+        invalid_target_users_dict = {
+            "group_ids": [500, hamletcharacters_group.id],
+            "skip_if_already_edited": False,
+        }
+        data = {
+            "target_users": orjson.dumps(invalid_target_users_dict).decode(),
+            "automatically_follow_topics_where_mentioned": orjson.dumps(False).decode(),
+        }
+        result = self.client_patch("/json/settings", data)
+        self.assert_json_error(result, "Invalid user group ID: 500")
+
+        # Test target users dict without user_ids and group_ids.
+        data = {
+            "target_users": orjson.dumps({"skip_if_already_edited": False}).decode(),
+            "automatically_follow_topics_where_mentioned": orjson.dumps(False).decode(),
+        }
+        result = self.client_patch("/json/settings", data)
+        self.assert_json_error(result, "Either user_ids or group_ids must be provided.")
 
 
 class UserChangesTest(ZulipTestCase):
@@ -675,11 +767,9 @@ class UserChangesTest(ZulipTestCase):
         email = user.email
 
         self.login_user(user)
-        old_api_keys = get_all_api_keys(user)
-        # Ensure the old API keys are in the authentication cache, so
+        # Ensure the old API key is in the authentication cache, so
         # that the below logic can test whether we have a cache-flushing bug.
-        for api_key in old_api_keys:
-            self.assertEqual(get_user_profile_by_api_key(api_key).email, email)
+        self.assertEqual(get_user_profile_by_api_key(user.api_key).email, email)
 
         # First verify this endpoint is not registered in the /json/... path
         # to prevent access with only a session.
@@ -691,19 +781,17 @@ class UserChangesTest(ZulipTestCase):
         result = self.client_post("/api/v1/users/me/api_key/regenerate")
         self.assertEqual(result.status_code, 401)
 
+        old_api_key = user.api_key
         result = self.api_post(user, "/api/v1/users/me/api_key/regenerate")
         new_api_key = self.assert_json_success(result)["api_key"]
-        self.assertNotIn(new_api_key, old_api_keys)
+        self.assertNotEqual(new_api_key, old_api_key)
         user = self.example_user("hamlet")
-        current_api_keys = get_all_api_keys(user)
-        self.assertIn(new_api_key, current_api_keys)
+        self.assertEqual(new_api_key, user.api_key)
 
-        for api_key in old_api_keys:
-            with self.assertRaises(UserProfile.DoesNotExist):
-                get_user_profile_by_api_key(api_key)
+        with self.assertRaises(UserProfile.DoesNotExist):
+            get_user_profile_by_api_key(old_api_key)
 
-        for api_key in current_api_keys:
-            self.assertEqual(get_user_profile_by_api_key(api_key).email, email)
+        self.assertEqual(get_user_profile_by_api_key(user.api_key).email, email)
 
 
 class UserDraftSettingsTests(ZulipTestCase):

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import contextlib
 import hashlib
 import logging
 import os
@@ -23,9 +24,9 @@ from scripts.lib.zulip_tools import (
     get_dev_uuid_var_path,
     os_families,
     parse_os_release,
+    run,
     run_as_root,
 )
-from tools.setup import setup_venvs
 
 VAR_DIR_PATH = os.path.join(ZULIP_PATH, "var")
 
@@ -76,6 +77,8 @@ vendor = distro_info["ID"]
 os_version = distro_info["VERSION_ID"]
 if vendor == "debian" and os_version == "12":  # bookworm
     POSTGRESQL_VERSION = "15"
+elif vendor == "debian" and os_version == "13":  # trixie
+    POSTGRESQL_VERSION = "17"
 elif vendor == "ubuntu" and os_version == "22.04":  # jammy
     POSTGRESQL_VERSION = "14"
 elif vendor == "ubuntu" and os_version == "24.04":  # noble
@@ -149,7 +152,7 @@ COMMON_YUM_DEPENDENCIES = [
 
 BUILD_GROONGA_FROM_SOURCE = False
 BUILD_PGROONGA_FROM_SOURCE = False
-if (vendor == "debian" and os_version in []) or (vendor == "ubuntu" and os_version in []):
+if (vendor == "debian" and os_version in ["13"]) or (vendor == "ubuntu" and os_version in []):
     # For platforms without a PGroonga release, we need to build it
     # from source.
     BUILD_PGROONGA_FROM_SOURCE = True
@@ -397,7 +400,9 @@ def main(options: argparse.Namespace) -> NoReturn:
         "https_proxy=" + os.environ.get("https_proxy", ""),
         "no_proxy=" + os.environ.get("no_proxy", ""),
     ]
-    run_as_root([*proxy_env, "scripts/lib/install-node"], sudo_args=["-H"])
+    # Preserve PATH to catch mistaken extra installations of node in the user's
+    # home directory.
+    run_as_root([*proxy_env, "scripts/lib/install-node"], sudo_args=["--preserve-env=PATH"])
 
     try:
         setup_node_modules()
@@ -414,17 +419,24 @@ def main(options: argparse.Namespace) -> NoReturn:
             sys.exit(1)
 
     # Install shellcheck.
-    run_as_root([*proxy_env, "tools/setup/install-shellcheck"])
+    run_as_root([*proxy_env, "tools/setup/install-shellcheck"], sudo_args=["--preserve-env=PATH"])
     # Install shfmt.
-    run_as_root([*proxy_env, "tools/setup/install-shfmt"])
-
-    # Install transifex-cli.
-    run_as_root([*proxy_env, "tools/setup/install-transifex-cli"])
+    run_as_root([*proxy_env, "tools/setup/install-shfmt"], sudo_args=["--preserve-env=PATH"])
 
     # Install tusd
-    run_as_root([*proxy_env, "tools/setup/install-tusd"])
+    run_as_root([*proxy_env, "tools/setup/install-tusd"], sudo_args=["--preserve-env=PATH"])
 
-    setup_venvs.main()
+    # Install Python environment
+    run_as_root([*proxy_env, "scripts/lib/install-uv"], sudo_args=["--preserve-env=PATH"])
+    run(
+        [*proxy_env, "uv", "sync", "--frozen"],
+        env={k: v for k, v in os.environ.items() if k not in {"PYTHONDEVMODE", "PYTHONWARNINGS"}},
+    )
+    # Clean old symlinks used before uv migration
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink("zulip-py3-venv")
+    if os.path.lexists("/srv/zulip-py3-venv"):
+        run_as_root(["rm", "/srv/zulip-py3-venv"])
 
     run_as_root(["cp", REPO_STOPWORDS_PATH, TSEARCH_STOPWORDS_PATH])
 
@@ -451,13 +463,13 @@ def main(options: argparse.Namespace) -> NoReturn:
     # bad idea, and empirically it can cause Python to segfault on
     # certain cffi-related imports.  Instead, start a new Python
     # process inside the virtualenv.
-    activate_this = "/srv/zulip-py3-venv/bin/activate_this.py"
     provision_inner = os.path.join(ZULIP_PATH, "tools", "lib", "provision_inner.py")
-    with open(activate_this) as f:
-        exec(f.read(), dict(__file__=activate_this))  # noqa: S102
     os.execvp(
-        provision_inner,
+        "uv",
         [
+            "uv",
+            "run",
+            "--no-sync",
             provision_inner,
             *(["--force"] if options.is_force else []),
             *(["--build-release-tarball-only"] if options.is_build_release_tarball_only else []),

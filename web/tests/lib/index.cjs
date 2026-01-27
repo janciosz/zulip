@@ -3,6 +3,7 @@
 const assert = require("node:assert/strict");
 const path = require("node:path");
 
+require("@date-fns/tz"); // To prevent mockdate from interfering with it
 require("css.escape");
 require("handlebars/runtime.js");
 const {JSDOM} = require("jsdom");
@@ -23,6 +24,7 @@ const dom = new JSDOM("", {url: "http://zulip.zulipdev.com/"});
 global.DOMParser = dom.window.DOMParser;
 global.HTMLAnchorElement = dom.window.HTMLAnchorElement;
 global.HTMLElement = dom.window.HTMLElement;
+global.HTMLImageElement = dom.window.HTMLImageElement;
 global.Window = dom.window.Window;
 Object.defineProperty(global, "navigator", {
     value: {
@@ -33,10 +35,7 @@ Object.defineProperty(global, "navigator", {
 
 require("@babel/register")({
     extensions: [".cjs", ".cts", ".js", ".mjs", ".mts", ".ts"],
-    only: [
-        new RegExp("^" + _.escapeRegExp(path.resolve(__dirname, "../../shared/src") + path.sep)),
-        new RegExp("^" + _.escapeRegExp(path.resolve(__dirname, "../../src") + path.sep)),
-    ],
+    only: [new RegExp("^" + _.escapeRegExp(path.resolve(__dirname, "../../src") + path.sep))],
     plugins: [
         ...(process.env.USING_INSTRUMENTED_CODE ? [["istanbul", {exclude: []}]] : []),
         ["@babel/plugin-transform-modules-commonjs", {lazy: () => true}],
@@ -86,7 +85,6 @@ const noop = function () {};
 require("../../src/templates.ts"); // register Zulip extensions
 
 async function run_one_module(file) {
-    zjquery.clear_initialize_function();
     zjquery.clear_all_elements();
     console.info("running test " + path.basename(file, ".test.cjs"));
     test.set_current_file_name(file);
@@ -99,6 +97,10 @@ async function run_one_module(file) {
 }
 
 test.set_verbose(files.length === 1);
+
+// In case someone mistakenly vanishes the async task with something like `await
+// new Promise(() => {})`, assume failure until we establish otherwise.
+process.exitCode = 1;
 
 (async () => {
     let exit_code = 0;
@@ -143,8 +145,7 @@ test.set_verbose(files.length === 1);
         namespace.finish();
     }
 
-    process.exit(exit_code);
+    process.exitCode = exit_code;
 })().catch((error) => /* istanbul ignore next */ {
     console.error(error);
-    process.exit(1);
 });

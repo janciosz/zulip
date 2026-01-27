@@ -9,6 +9,7 @@ const {$t} = zrequire("i18n");
 const pygments_data = zrequire("pygments_data");
 const realm_playground = zrequire("realm_playground");
 const typeahead_helper = zrequire("typeahead_helper");
+const {initialize_user_settings} = zrequire("user_settings");
 
 run_test("get_pygments_typeahead_list_for_composebox", () => {
     // When no Code Playground is configured, the list of candidates should
@@ -45,6 +46,8 @@ run_test("get_pygments_typeahead_list_for_composebox", () => {
 });
 
 run_test("get_pygments_typeahead_list_for_settings", () => {
+    initialize_user_settings({user_settings: {}});
+
     const custom_pygment_language = "custom_lang";
     const playground_data = [
         {
@@ -75,10 +78,14 @@ run_test("get_pygments_typeahead_list_for_settings", () => {
     let iterator = candidates.entries();
     assert.equal(iterator.next().value[1], $t({defaultMessage: "Custom language: custom_lang"}));
     assert.equal(iterator.next().value[1], $t({defaultMessage: "Custom language: invent_a_lang"}));
+    assert.equal(iterator.next().value[1], "Text only (text, text)");
+    assert.equal(iterator.next().value[1], "quote (quote, quote)");
+    assert.equal(iterator.next().value[1], "spoiler (spoiler, spoiler)");
+    assert.equal(iterator.next().value[1], "math (math, math)");
     assert.equal(iterator.next().value[1], "JavaScript (javascript, js, javascript, js)");
     assert.equal(
         iterator.next().value[1],
-        "Python (python, bazel, py, py3, python3, sage, starlark, python, bazel, py, py3, python3, sage, starlark)",
+        "Python (python, bazel, py, py3, pyi, python3, sage, starlark, python, bazel, py, py3, pyi, python3, sage, starlark)",
     );
     assert.equal(iterator.next().value[1], "Java (java, java)");
     assert.equal(iterator.next().value[1], "Go (go, golang, go, golang)");
@@ -93,10 +100,14 @@ run_test("get_pygments_typeahead_list_for_settings", () => {
     );
     assert.equal(iterator.next().value[1], $t({defaultMessage: "Custom language: custom_lang"}));
     assert.equal(iterator.next().value[1], $t({defaultMessage: "Custom language: invent_a_lang"}));
+    assert.equal(iterator.next().value[1], "Text only (text, text)");
+    assert.equal(iterator.next().value[1], "quote (quote, quote)");
+    assert.equal(iterator.next().value[1], "spoiler (spoiler, spoiler)");
+    assert.equal(iterator.next().value[1], "math (math, math)");
     assert.equal(iterator.next().value[1], "JavaScript (javascript, js, javascript, js)");
     assert.equal(
         iterator.next().value[1],
-        "Python (python, bazel, py, py3, python3, sage, starlark, python, bazel, py, py3, python3, sage, starlark)",
+        "Python (python, bazel, py, py3, pyi, python3, sage, starlark, python, bazel, py, py3, pyi, python3, sage, starlark)",
     );
 
     // Test typing "invent_a_lang". Make sure there is no duplicate entries.
@@ -104,9 +115,7 @@ run_test("get_pygments_typeahead_list_for_settings", () => {
     iterator = candidates.entries();
     assert.equal(iterator.next().value[1], $t({defaultMessage: "Custom language: invent_a_lang"}));
     assert.equal(iterator.next().value[1], $t({defaultMessage: "Custom language: custom_lang"}));
-    assert.equal(iterator.next().value[1], "JavaScript (javascript, js, javascript, js)");
-    assert.equal(
-        iterator.next().value[1],
-        "Python (python, bazel, py, py3, python3, sage, starlark, python, bazel, py, py3, python3, sage, starlark)",
-    );
+    assert.equal(iterator.next().value[1], "Text only (text, text)");
+    assert.equal(iterator.next().value[1], "quote (quote, quote)");
+    assert.equal(iterator.next().value[1], "spoiler (spoiler, spoiler)");
 });

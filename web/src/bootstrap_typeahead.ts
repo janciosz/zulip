@@ -41,15 +41,15 @@
  *
  *   Our custom changes include all mentions of this.trigger_selection.
  *
- * 3. Header text:
+ * 3. Footer text:
  *
- *   This adds support for showing a custom header text like: "You are now
- *   completing a user mention". Provide the function `this.header_html` that
- *   returns a string containing the header text, or false.
+ *   This adds support for showing a custom footer text like: "You are now
+ *   completing a user mention". Provide the function `this.footer_html` that
+ *   returns a string containing the footer text, or false.
  *
- *   Our custom changes include all mentions of this.header_html, some CSS changes
+ *   Our custom changes include all mentions of this.footer_html, some CSS changes
  *   in compose.css and splitting $container out of $menu so we can insert
- *   additional HTML before $menu.
+ *   additional HTML after $menu.
  *
  * 4. Escape hooks:
  *
@@ -164,6 +164,7 @@ import {insertTextIntoField} from "text-field-edit";
 import getCaretCoordinates from "textarea-caret";
 import * as tippy from "tippy.js";
 
+import * as mouse_drag from "./mouse_drag.ts";
 import * as scroll_util from "./scroll_util.ts";
 import {get_string_diff, the} from "./util.ts";
 
@@ -195,8 +196,8 @@ export function rewire_MAX_ITEMS(value: typeof MAX_ITEMS): void {
 /* TYPEAHEAD PUBLIC CLASS DEFINITION
  * ================================= */
 
-const HEADER_ELEMENT_HTML =
-    '<p class="typeahead-header"><span id="typeahead-header-text"></span></p>';
+const FOOTER_ELEMENT_HTML =
+    '<p class="typeahead-footer"><span id="typeahead-footer-text"></span></p>';
 const CONTAINER_HTML = '<div class="typeahead dropdown-menu"></div>';
 const MENU_HTML = '<ul class="typeahead-menu" data-simplebar></ul>';
 const ITEM_HTML = '<li class="typeahead-item"><a class="typeahead-item-link"></a></li>';
@@ -221,7 +222,7 @@ export class Typeahead<ItemType extends string | object> {
     items: number;
     matcher: (item: ItemType, query: string) => boolean;
     sorter: (items: ItemType[], query: string) => ItemType[];
-    highlighter_html: (item: ItemType, query: string) => string | undefined;
+    item_html: (item: ItemType, query: string) => string | undefined;
     updater: (
         item: ItemType,
         query: string,
@@ -230,20 +231,24 @@ export class Typeahead<ItemType extends string | object> {
     ) => string | undefined;
     $container: JQuery;
     $menu: JQuery;
-    $header: JQuery;
+    $footer: JQuery;
     source: (query: string, input_element: TypeaheadInputElement) => ItemType[];
     dropup: boolean;
     automated: () => boolean;
     trigger_selection: (event: JQuery.KeyDownEvent) => boolean;
     on_escape: (() => void) | undefined;
-    // returns a string to show in typeahead header or false.
-    header_html: () => string | false;
+    // returns a string to show in typeahead footer or false.
+    footer_html: () => string | false;
     // returns a string to show in typeahead items or false.
     option_label: (matching_items: ItemType[], item: ItemType) => string | false;
     suppressKeyPressRepeat = false;
     query = "";
     mouse_moved_since_typeahead = false;
     shown = false;
+    // To trigger updater when Esc is pressed only during the stream topic typeahead in composebox.
+    select_on_escape_condition: () => boolean;
+    // Used to clear tooltip instances attached to typeahead container.
+    clear_typeahead_tooltip: (() => void) | undefined;
     openInputFieldOnKeyUp: (() => void) | undefined;
     closeInputFieldOnHide: (() => void) | undefined;
     helpOnEmptyStrings: boolean;
@@ -259,10 +264,15 @@ export class Typeahead<ItemType extends string | object> {
     // don't set the html content of the div from this module, and
     // it's handled from the caller (or updater function) instead.
     updateElementContent: boolean;
+    // Used to determine whether the typeahead should be shown,
+    // when the user clicks anywhere on the input element.
+    showOnClick: boolean;
     // Used for custom situations where we want to hide the typeahead
     // after selecting an option, instead of the default call to lookup().
     hideAfterSelect: () => boolean;
     hideOnEmptyAfterBackspace: boolean;
+    // Used for adding a custom classname to the typeahead link.
+    getCustomItemClassname: ((item: ItemType) => string) | undefined;
 
     constructor(input_element: TypeaheadInputElement, options: TypeaheadOptions<ItemType>) {
         this.input_element = input_element;
@@ -274,24 +284,26 @@ export class Typeahead<ItemType extends string | object> {
         this.items = options.items ?? MAX_ITEMS;
         this.matcher = options.matcher ?? ((item, query) => this.defaultMatcher(item, query));
         this.sorter = options.sorter;
-        this.highlighter_html = options.highlighter_html;
+        this.item_html = options.item_html;
         this.updater = options.updater ?? ((items) => this.defaultUpdater(items));
         this.$container = $(CONTAINER_HTML);
         if (options.non_tippy_parent_element) {
             $(options.non_tippy_parent_element).append(this.$container);
         }
         this.$menu = $(MENU_HTML).appendTo(this.$container);
-        this.$header = $(HEADER_ELEMENT_HTML).appendTo(this.$container);
+        this.$footer = $(FOOTER_ELEMENT_HTML).appendTo(this.$container);
         this.source = options.source;
         this.dropup = options.dropup ?? false;
         this.automated = options.automated ?? (() => false);
         this.trigger_selection = options.trigger_selection ?? (() => false);
+        this.clear_typeahead_tooltip = options.clear_typeahead_tooltip;
         this.on_escape = options.on_escape;
-        // return a string to show in typeahead header or false.
-        this.header_html = options.header_html ?? (() => false);
+        // return a string to show in typeahead footer or false.
+        this.footer_html = options.footer_html ?? (() => false);
         // return a string to show in typeahead items or false.
         this.option_label = options.option_label ?? (() => false);
         this.stopAdvance = options.stopAdvance ?? false;
+        this.select_on_escape_condition = options.select_on_escape_condition ?? (() => false);
         this.advanceKeys = options.advanceKeys ?? [];
         this.openInputFieldOnKeyUp = options.openInputFieldOnKeyUp;
         this.closeInputFieldOnHide = options.closeInputFieldOnHide;
@@ -302,13 +314,17 @@ export class Typeahead<ItemType extends string | object> {
         this.requireHighlight = options.requireHighlight ?? true;
         this.shouldHighlightFirstResult = options.shouldHighlightFirstResult ?? (() => true);
         this.updateElementContent = options.updateElementContent ?? true;
+        this.showOnClick = options.showOnClick ?? true;
         this.hideAfterSelect = options.hideAfterSelect ?? (() => true);
         this.hideOnEmptyAfterBackspace = options.hideOnEmptyAfterBackspace ?? false;
-
+        this.getCustomItemClassname = options.getCustomItemClassname;
         this.listen();
     }
 
     select(e?: JQuery.ClickEvent | JQuery.KeyUpEvent | JQuery.KeyDownEvent): this {
+        if (e?.type === "click" && mouse_drag.is_drag(e)) {
+            return this;
+        }
         const active_option = this.$menu.find(".active")[0];
         const val = active_option ? this.values.get(active_option) : undefined;
         // It's possible that we got here from pressing enter with nothing highlighted.
@@ -368,14 +384,6 @@ export class Typeahead<ItemType extends string | object> {
 
         // Call this early to avoid duplicate calls.
         this.shown = true;
-
-        const header_text_html = this.header_html();
-        if (header_text_html) {
-            this.$header.find("span#typeahead-header-text").html(header_text_html);
-            this.$header.show();
-        } else {
-            this.$header.hide();
-        }
         this.mouse_moved_since_typeahead = false;
 
         const input_element = this.input_element;
@@ -465,6 +473,10 @@ export class Typeahead<ItemType extends string | object> {
                         void instance.popperInstance?.update();
                     });
                 },
+                onHidden: (instance) => {
+                    this.clear_typeahead_tooltip?.();
+                    instance.destroy();
+                },
             });
         }
 
@@ -492,15 +504,18 @@ export class Typeahead<ItemType extends string | object> {
         return this;
     }
 
-    lookup(hideOnEmpty: boolean): this {
+    lookup(hideOnEmpty: boolean, force_lookup?: boolean): this {
         this.query =
             this.input_element.type === "contenteditable"
                 ? this.input_element.$element.text()
                 : (this.input_element.$element.val() ?? "");
 
+        // The force_lookup parameter allows specific code paths to override
+        // the helpOnEmptyStrings configured for the typeahead element.
         if (
             (!this.helpOnEmptyStrings || hideOnEmpty) &&
-            (!this.query || this.query.length < MIN_LENGTH)
+            (!this.query || this.query.length < MIN_LENGTH) &&
+            !force_lookup
         ) {
             return this.shown ? this.hide() : this;
         }
@@ -543,10 +558,13 @@ export class Typeahead<ItemType extends string | object> {
         const $items: JQuery[] = final_items.map((item) => {
             const $i = $(ITEM_HTML);
             this.values.set(the($i), item);
-            const item_html = this.highlighter_html(item, this.query) ?? "";
+            const item_html = this.item_html(item, this.query) ?? "";
             const $item_html = $i.find("a").html(item_html);
 
             const option_label_html = this.option_label(matching_items, item);
+            if (this.getCustomItemClassname) {
+                $item_html.addClass(this.getCustomItemClassname(item));
+            }
 
             if (option_label_html) {
                 $item_html
@@ -555,6 +573,22 @@ export class Typeahead<ItemType extends string | object> {
             }
             return $i;
         });
+
+        // We want to re render the typeahead footer for ever update
+        // in user's string since once typeahead is shown after `@`,
+        // footer might change depending on whether next character is
+        // `_` (silent mention) or not.
+        const footer_text_html = this.footer_html();
+        // We want to clear tooltip instance on each re render since
+        // emoji may have shifted its position.
+        this.clear_typeahead_tooltip?.();
+
+        if (footer_text_html) {
+            this.$footer.find("span#typeahead-footer-text").html(footer_text_html);
+            this.$footer.show();
+        } else {
+            this.$footer.hide();
+        }
 
         if (this.requireHighlight || this.shouldHighlightFirstResult()) {
             $items[0]!.addClass("active");
@@ -616,7 +650,13 @@ export class Typeahead<ItemType extends string | object> {
         this.$menu
             .on("click", "li", this.click.bind(this))
             .on("mouseenter", "li", this.mouseenter.bind(this))
-            .on("mousemove", "li", this.mousemove.bind(this));
+            .on("mousemove", "li", this.mousemove.bind(this))
+            .on("blur", "li", (e) => {
+                // Selecting typeahead item content followed by blur
+                // should hide the typeahead if the relatedTarget is
+                // outside the typeahead.
+                this.blur(e);
+            });
 
         $(window).on("resize", this.resizeHandler.bind(this));
     }
@@ -746,6 +786,9 @@ export class Typeahead<ItemType extends string | object> {
                 break;
 
             case "Escape":
+                if (this.select_on_escape_condition()) {
+                    this.select(e);
+                }
                 if (!this.shown) {
                     return;
                 }
@@ -809,8 +852,25 @@ export class Typeahead<ItemType extends string | object> {
     }
 
     element_click(): void {
-        // update / hide the typeahead menu if the user clicks anywhere
-        // inside the typing area, to avoid misplaced typeahead insertion.
+        if (!this.showOnClick) {
+            // If showOnClick is false, we don't want to show the typeahead
+            // when the user clicks anywhere on the input element.
+            return;
+        }
+
+        if (
+            this.input_element.type === "contenteditable" &&
+            this.input_element.$element.prop("contenteditable") === "false"
+        ) {
+            // We do not want to show the typeahead if user cannot type in
+            // the input, for cases like user not having required permission.
+            return;
+        }
+
+        // Update / hide the typeahead menu if the user clicks anywhere
+        // inside the typing area. This is important in textarea elements
+        // such as the compose box where multiple typeahead can exist,
+        // and we want to prevent misplaced typeahead insertion.
         this.lookup(false);
     }
 
@@ -857,7 +917,7 @@ export class Typeahead<ItemType extends string | object> {
  * =========================== */
 
 type TypeaheadOptions<ItemType> = {
-    highlighter_html: (item: ItemType, query: string) => string | undefined;
+    item_html: (item: ItemType, query: string) => string | undefined;
     items?: number;
     source: (query: string, input_element: TypeaheadInputElement) => ItemType[];
     // optional options
@@ -865,17 +925,19 @@ type TypeaheadOptions<ItemType> = {
     automated?: () => boolean;
     closeInputFieldOnHide?: () => void;
     dropup?: boolean;
-    header_html?: () => string | false;
+    footer_html?: () => string | false;
     helpOnEmptyStrings?: boolean;
     hideOnEmptyAfterBackspace?: boolean;
     matcher?: (item: ItemType, query: string) => boolean;
     on_escape?: () => void;
+    clear_typeahead_tooltip?: () => void;
     openInputFieldOnKeyUp?: () => void;
     option_label?: (matching_items: ItemType[], item: ItemType) => string | false;
     non_tippy_parent_element?: string;
     sorter: (items: ItemType[], query: string) => ItemType[];
     stopAdvance?: boolean;
     tabIsEnter?: boolean;
+    select_on_escape_condition?: () => boolean;
     trigger_selection?: (event: JQuery.KeyDownEvent) => boolean;
     updater?: (
         item: ItemType,
@@ -886,5 +948,7 @@ type TypeaheadOptions<ItemType> = {
     requireHighlight?: boolean;
     shouldHighlightFirstResult?: () => boolean;
     updateElementContent?: boolean;
+    showOnClick?: boolean;
     hideAfterSelect?: () => boolean;
+    getCustomItemClassname?: (item: ItemType) => string;
 };

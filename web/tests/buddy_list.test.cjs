@@ -6,11 +6,12 @@ const _ = require("lodash");
 
 const {
     clear_buddy_list,
-    override_user_matches_narrow,
+    override_user_matches_narrow_using_loaded_data,
     buddy_list_add_user_matching_view,
     buddy_list_add_other_user,
     stub_buddy_list_elements,
 } = require("./lib/buddy_list.cjs");
+const {make_realm} = require("./lib/example_realm.cjs");
 const {mock_esm, zrequire} = require("./lib/namespace.cjs");
 const {run_test, noop} = require("./lib/test.cjs");
 const blueslip = require("./lib/zblueslip.cjs");
@@ -18,6 +19,7 @@ const $ = require("./lib/zjquery.cjs");
 
 const padded_widget = mock_esm("../src/padded_widget");
 const message_viewport = mock_esm("../src/message_viewport");
+const background_task = mock_esm("../src/background_task");
 
 const buddy_data = zrequire("buddy_data");
 const {BuddyList} = zrequire("buddy_list");
@@ -25,12 +27,11 @@ const people = zrequire("people");
 const {set_realm} = zrequire("state_data");
 const {initialize_user_settings} = zrequire("user_settings");
 
-set_realm({});
+set_realm(make_realm());
 initialize_user_settings({user_settings: {}});
 
 function init_simulated_scrolling() {
     const elem = {
-        dataset: {},
         scrollTop: 0,
         scrollHeight: 0,
     };
@@ -63,7 +64,7 @@ people.add_active_user(chris);
 const $alice_li = $.create("alice-stub");
 const $bob_li = $.create("bob-stub");
 
-run_test("basics", ({override, mock_template}) => {
+run_test("basics", ({override}) => {
     const buddy_list = new BuddyList();
     init_simulated_scrolling();
 
@@ -71,8 +72,8 @@ run_test("basics", ({override, mock_template}) => {
     override(message_viewport, "height", () => 550);
     override(padded_widget, "update_padding", noop);
     stub_buddy_list_elements();
-    mock_template("buddy_list/view_all_users.hbs", false, () => "<view-all-users-stub>");
 
+    override(background_task, "run_async_function_without_await", noop);
     buddy_list.populate({
         all_user_ids: [alice.user_id],
     });
@@ -92,13 +93,16 @@ run_test("basics", ({override, mock_template}) => {
     assert.equal($li, $alice_li);
 });
 
-run_test("split list", ({override, override_rewire, mock_template}) => {
+run_test("split list", ({override, override_rewire}) => {
     const buddy_list = new BuddyList();
     init_simulated_scrolling();
     stub_buddy_list_elements();
-    mock_template("buddy_list/view_all_users.hbs", false, () => "<view-all-users-stub>");
 
-    override_rewire(buddy_data, "user_matches_narrow", override_user_matches_narrow);
+    override_rewire(
+        buddy_data,
+        "user_matches_narrow_using_loaded_data",
+        override_user_matches_narrow_using_loaded_data,
+    );
 
     override(buddy_list, "items_to_html", (opts) => {
         assert.ok(opts.items.length > 0);
@@ -123,6 +127,7 @@ run_test("split list", ({override, override_rewire, mock_template}) => {
 
     // one user matching the view
     buddy_list_add_user_matching_view(alice.user_id, $alice_li);
+    override(background_task, "run_async_function_without_await", noop);
     buddy_list.populate({
         all_user_ids: [alice.user_id],
     });
@@ -151,13 +156,12 @@ run_test("split list", ({override, override_rewire, mock_template}) => {
     assert.ok(appended_to_other_users);
 });
 
-run_test("find_li", ({override, mock_template}) => {
+run_test("find_li", ({override}) => {
     const buddy_list = new BuddyList();
 
     override(buddy_list, "fill_screen_with_content", noop);
-    mock_template("buddy_list/view_all_users.hbs", false, () => "<view-all-users-stub>");
     stub_buddy_list_elements();
-
+    override(background_task, "run_async_function_without_await", noop);
     clear_buddy_list(buddy_list);
     buddy_list_add_user_matching_view(alice.user_id, $alice_li);
     buddy_list_add_other_user(bob.user_id, $bob_li);
@@ -173,12 +177,11 @@ run_test("find_li", ({override, mock_template}) => {
     assert.equal($li, $bob_li);
 });
 
-run_test("fill_screen_with_content early break on big list", ({override, mock_template}) => {
+run_test("fill_screen_with_content early break on big list", ({override}) => {
     stub_buddy_list_elements();
     const buddy_list = new BuddyList();
     const elem = init_simulated_scrolling();
     stub_buddy_list_elements();
-    mock_template("buddy_list/view_all_users.hbs", false, () => "<view-all-users-stub>");
 
     let chunks_inserted = 0;
     override(buddy_list, "render_more", () => {
@@ -204,6 +207,7 @@ run_test("fill_screen_with_content early break on big list", ({override, mock_te
         user_ids.push(person.user_id);
     });
 
+    override(background_task, "run_async_function_without_await", noop);
     buddy_list.populate({
         all_user_ids: user_ids,
     });
@@ -212,15 +216,18 @@ run_test("fill_screen_with_content early break on big list", ({override, mock_te
     assert.equal(chunks_inserted, 6);
 });
 
-run_test("big_list", ({override, override_rewire, mock_template}) => {
+run_test("big_list", ({override, override_rewire}) => {
     const buddy_list = new BuddyList();
     init_simulated_scrolling();
 
     stub_buddy_list_elements();
     override(padded_widget, "update_padding", noop);
     override(message_viewport, "height", () => 550);
-    override_rewire(buddy_data, "user_matches_narrow", override_user_matches_narrow);
-    mock_template("buddy_list/view_all_users.hbs", false, () => "<view-all-users-stub>");
+    override_rewire(
+        buddy_data,
+        "user_matches_narrow_using_loaded_data",
+        override_user_matches_narrow_using_loaded_data,
+    );
 
     let items_to_html_call_count = 0;
     override(buddy_list, "items_to_html", () => {
@@ -262,6 +269,7 @@ run_test("big_list", ({override, override_rewire, mock_template}) => {
         user_ids.push(person.user_id);
     });
 
+    override(background_task, "run_async_function_without_await", noop);
     buddy_list.populate({
         all_user_ids: user_ids,
     });
@@ -345,17 +353,17 @@ run_test("find_li w/bad key", ({override}) => {
     assert.deepEqual($undefined_li, undefined);
 });
 
-run_test("scrolling", ({override, mock_template}) => {
+run_test("scrolling", ({override}) => {
     const buddy_list = new BuddyList();
     let tried_to_fill;
     override(buddy_list, "fill_screen_with_content", () => {
         tried_to_fill = true;
     });
-    mock_template("buddy_list/view_all_users.hbs", false, () => "<view-all-users-stub>");
     stub_buddy_list_elements();
     init_simulated_scrolling();
     stub_buddy_list_elements();
 
+    override(background_task, "run_async_function_without_await", noop);
     clear_buddy_list(buddy_list);
     assert.ok(tried_to_fill);
     tried_to_fill = false;

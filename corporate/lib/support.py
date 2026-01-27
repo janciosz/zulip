@@ -17,17 +17,14 @@ from corporate.lib.stripe import (
     get_push_status_for_remote_request,
     start_of_next_billing_cycle,
 )
-from corporate.models import (
-    Customer,
-    CustomerPlan,
-    CustomerPlanOffer,
-    LicenseLedger,
-    ZulipSponsorshipRequest,
-    get_current_plan_by_customer,
-)
+from corporate.models.customers import Customer
+from corporate.models.licenses import LicenseLedger
+from corporate.models.plans import CustomerPlan, CustomerPlanOffer, get_current_plan_by_customer
+from corporate.models.sponsorships import ZulipSponsorshipRequest
+from zerver.actions.realm_settings import RealmDeactivationReasonType
 from zerver.lib.timestamp import timestamp_to_datetime
-from zerver.models import Realm
-from zerver.models.realm_audit_logs import AuditLogEventType
+from zerver.models import Realm, UserProfile
+from zerver.models.realm_audit_logs import AuditLogEventType, RealmAuditLog
 from zerver.models.realms import get_org_type_display_name
 from zilencer.lib.remote_counts import MissingDataError
 from zilencer.models import (
@@ -50,6 +47,7 @@ class SponsorshipRequestDict(TypedDict):
     org_type: str
     org_website: str
     org_description: str
+    plan_to_use_zulip: str
     total_users: str
     paid_users: str
     paid_users_description: str
@@ -83,7 +81,7 @@ class PlanData:
     licenses: int | None = None
     licenses_used: int | None = None
     next_billing_cycle_start: datetime | None = None
-    is_legacy_plan: bool = False
+    is_complimentary_access_plan: bool = False
     has_fixed_price: bool = False
     is_current_plan_billable: bool = False
     stripe_customer_url: str | None = None
@@ -109,6 +107,13 @@ class MobilePushData:
 
 
 @dataclass
+class DeactivationData:
+    event_time: datetime
+    acting_user: UserProfile | None
+    reason: RealmDeactivationReasonType | None
+
+
+@dataclass
 class RemoteSupportData:
     date_created: datetime
     has_stale_audit_log: bool
@@ -129,10 +134,32 @@ class CloudSupportData:
     plan_data: PlanData
     sponsorship_data: SponsorshipData
     user_data: UserData
+    file_upload_usage: str
+    is_scrubbed: bool
+    deactivation_data: DeactivationData | None
 
 
 def get_stripe_customer_url(stripe_id: str) -> str:
     return f"https://dashboard.stripe.com/customers/{stripe_id}"  # nocoverage
+
+
+def get_formatted_realm_upload_space_used(realm: Realm) -> str:  # nocoverage
+    realm_bytes_used = realm.currently_used_upload_space_bytes()
+    files_uploaded = realm_bytes_used > 0
+
+    realm_uploads = "No uploads"
+    if files_uploaded:
+        realm_uploads = str(round(realm_bytes_used / 1024 / 1024, 2))
+
+    quota = realm.upload_quota_bytes()
+    if quota is None:
+        if files_uploaded:
+            return f"{realm_uploads} MiB / No quota"
+        return f"{realm_uploads} / No quota"
+    if quota == 0:
+        return f"{realm_uploads} / 0.0 MiB"
+    quota_mb = round(quota / 1024 / 1024, 2)
+    return f"{realm_uploads} / {quota_mb} MiB"
 
 
 def get_realm_user_data(realm: Realm) -> UserData:
@@ -185,6 +212,7 @@ def get_customer_sponsorship_data(customer: Customer) -> SponsorshipData:
                 org_website=website,
                 org_description=last_sponsorship_request.org_description,
                 total_users=last_sponsorship_request.expected_total_users,
+                plan_to_use_zulip=last_sponsorship_request.plan_to_use_zulip,
                 paid_users=last_sponsorship_request.paid_users_count,
                 paid_users_description=last_sponsorship_request.paid_users_description,
                 requested_plan=last_sponsorship_request.requested_plan,
@@ -316,9 +344,13 @@ def get_plan_data_for_support_view(
                 plan_data.current_plan, timezone_now()
             )
 
-        plan_data.is_legacy_plan = (
-            plan_data.current_plan.tier == CustomerPlan.TIER_SELF_HOSTED_LEGACY
-        )
+        if isinstance(billing_session, RealmBillingSession):
+            # TODO implement a complimentary access plan/tier for Zulip Cloud.
+            plan_data.is_complimentary_access_plan = False
+        else:
+            plan_data.is_complimentary_access_plan = (
+                plan_data.current_plan.tier == CustomerPlan.TIER_SELF_HOSTED_LEGACY
+            )
         plan_data.has_fixed_price = plan_data.current_plan.fixed_price is not None
         plan_data.is_current_plan_billable = billing_session.check_plan_tier_is_billable(
             plan_tier=plan_data.current_plan.tier
@@ -366,8 +398,10 @@ def get_mobile_push_data(remote_entity: RemoteZulipServer | RemoteRealm) -> Mobi
             # mobile_pushes_forwarded is a CountStat with a day frequency,
             # so we want to show the start of the latest day interval.
             push_forwarded_interval_start = (
-                latest_remote_server_push_forwarded_count.end_time - timedelta(days=1)
-            ).strftime("%Y-%m-%d")
+                (latest_remote_server_push_forwarded_count.end_time - timedelta(days=1))
+                .date()
+                .isoformat()
+            )
         else:
             push_forwarded_interval_start = "None"
         push_status = get_push_status_for_remote_request(
@@ -409,8 +443,10 @@ def get_mobile_push_data(remote_entity: RemoteZulipServer | RemoteRealm) -> Mobi
             # mobile_pushes_forwarded is a CountStat with a day frequency,
             # so we want to show the start of the latest day interval.
             push_forwarded_interval_start = (
-                latest_remote_realm_push_forwarded_count.end_time - timedelta(days=1)
-            ).strftime("%Y-%m-%d")
+                (latest_remote_realm_push_forwarded_count.end_time - timedelta(days=1))
+                .date()
+                .isoformat()
+            )
         else:
             push_forwarded_interval_start = "None"
         push_status = get_push_status_for_remote_request(remote_entity.server, remote_entity)
@@ -428,6 +464,24 @@ def get_mobile_push_data(remote_entity: RemoteZulipServer | RemoteRealm) -> Mobi
             mobile_pushes_forwarded=mobile_pushes["total_forwarded"],
             last_mobile_push_sent=push_forwarded_interval_start,
         )
+
+
+def get_deactivation_data(audit_log: RealmAuditLog) -> DeactivationData:
+    event_time = audit_log.event_time
+
+    acting_user = None
+    if audit_log.acting_user:
+        acting_user = audit_log.acting_user
+
+    reason = None
+    if audit_log.extra_data:
+        reason = audit_log.extra_data.get("deactivation_reason", None)
+
+    return DeactivationData(
+        event_time=event_time,
+        acting_user=acting_user,
+        reason=reason,
+    )
 
 
 def get_data_for_remote_support_view(billing_session: BillingSession) -> RemoteSupportData:
@@ -471,8 +525,21 @@ def get_data_for_cloud_support_view(billing_session: BillingSession) -> CloudSup
     else:
         sponsorship_data = SponsorshipData()
 
+    deactivation_data = None
+    if billing_session.realm.deactivated:
+        deactivation_audit_log = RealmAuditLog.objects.filter(
+            realm=billing_session.realm, event_type=AuditLogEventType.REALM_DEACTIVATED
+        ).last()
+        if deactivation_audit_log:
+            deactivation_data = get_deactivation_data(deactivation_audit_log)
+
     return CloudSupportData(
         plan_data=plan_data,
         sponsorship_data=sponsorship_data,
         user_data=user_data,
+        file_upload_usage=get_formatted_realm_upload_space_used(billing_session.realm),
+        is_scrubbed=RealmAuditLog.objects.filter(
+            realm=billing_session.realm, event_type=AuditLogEventType.REALM_SCRUBBED
+        ).exists(),
+        deactivation_data=deactivation_data,
     )

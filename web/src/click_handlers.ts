@@ -3,7 +3,7 @@
 import $ from "jquery";
 import assert from "minimalistic-assert";
 import * as tippy from "tippy.js";
-import {z} from "zod";
+import * as z from "zod/mini";
 
 import render_buddy_list_tooltip_content from "../templates/buddy_list_tooltip_content.hbs";
 
@@ -13,7 +13,6 @@ import * as buddy_data from "./buddy_data.ts";
 import * as compose_actions from "./compose_actions.ts";
 import * as compose_reply from "./compose_reply.ts";
 import * as compose_state from "./compose_state.ts";
-import {media_breakpoints_num} from "./css_variables.ts";
 import * as emoji_picker from "./emoji_picker.ts";
 import * as hash_util from "./hash_util.ts";
 import * as hashchange from "./hashchange.ts";
@@ -21,6 +20,7 @@ import * as message_edit from "./message_edit.ts";
 import * as message_lists from "./message_lists.ts";
 import * as message_store from "./message_store.ts";
 import * as message_view from "./message_view.ts";
+import * as mouse_drag from "./mouse_drag.ts";
 import * as narrow_state from "./narrow_state.ts";
 import * as navigate from "./navigate.ts";
 import {page_params} from "./page_params.ts";
@@ -29,8 +29,8 @@ import * as popover_menus from "./popover_menus.ts";
 import * as reactions from "./reactions.ts";
 import * as recent_view_ui from "./recent_view_ui.ts";
 import * as rows from "./rows.ts";
+import * as settings_config from "./settings_config.ts";
 import * as settings_panel_menu from "./settings_panel_menu.ts";
-import * as settings_preferences from "./settings_preferences.ts";
 import * as settings_toggle from "./settings_toggle.ts";
 import * as sidebar_ui from "./sidebar_ui.ts";
 import * as spectators from "./spectators.ts";
@@ -40,6 +40,7 @@ import * as stream_popover from "./stream_popover.ts";
 import * as topic_list from "./topic_list.ts";
 import * as ui_util from "./ui_util.ts";
 import {parse_html} from "./ui_util.ts";
+import {user_settings} from "./user_settings.ts";
 import * as util from "./util.ts";
 
 export function initialize(): void {
@@ -117,17 +118,22 @@ export function initialize(): void {
 
         // Inline image, video and twitter previews.
         if (
-            $target.is("img.message_inline_image") ||
+            $target.is(".media-image-element") ||
             $target.is(".message_inline_animated_image_still") ||
             $target.is("video") ||
             $target.is(".message_inline_video") ||
-            $target.is("img.twitter-avatar")
+            $target.is("img.twitter-avatar") ||
+            $target.is(".media-audio-element")
         ) {
             return true;
         }
 
         // UI elements for triggering message editing or viewing edit history.
-        if ($target.is("i.edit_message_button") || $target.is(".message_edit_notice")) {
+        if (
+            $target.is("i.edit_message_button") ||
+            $target.is(".message_edit_notice") ||
+            $target.is(".edit-notifications")
+        ) {
             return true;
         }
 
@@ -156,10 +162,20 @@ export function initialize(): void {
             return true;
         }
 
+        // Reveal button for a hidden message
+        if ($target.closest(".reveal-hidden-message").length > 0) {
+            return true;
+        }
+
+        // Hide button for a revealed message sent by a muted user.
+        if ($target.closest(".rehide-muted-user-message").length > 0) {
+            return true;
+        }
+
         return false;
     }
 
-    const select_message_function = function (this: HTMLElement, e: JQuery.TriggeredEvent): void {
+    const select_message_function = function (this: HTMLElement, e: JQuery.ClickEvent): void {
         assert(e.target instanceof Element);
         if (is_clickable_message_element($(e.target))) {
             // If this click came from a hyperlink, don't trigger the
@@ -175,7 +191,14 @@ export function initialize(): void {
         }
 
         if (document.getSelection()?.type === "Range") {
-            // Drags on the message (to copy message text) shouldn't trigger a reply.
+            // Drags and double/triple clicks on the message
+            // (to copy message text) shouldn't trigger a reply.
+            return;
+        }
+
+        if (mouse_drag.is_drag(e)) {
+            // This prevents triggering a reply when you click and drag through
+            // an area that doesn't contain text.
             return;
         }
 
@@ -194,7 +217,7 @@ export function initialize(): void {
         // user to the message's near view instead of opening the
         // compose box.
         const current_filter = narrow_state.filter();
-        if (current_filter !== undefined && !current_filter.supports_collapsing_recipients()) {
+        if (current_filter !== undefined && !current_filter.contains_no_partial_conversations()) {
             const message = message_store.get(id);
 
             if (message === undefined) {
@@ -216,22 +239,6 @@ export function initialize(): void {
     // selection function which will open the compose box  and select the message.
     if (!util.is_mobile()) {
         $("#main_div").on("click", ".messagebox", select_message_function);
-        // on the other hand, on mobile it should be done with a long tap.
-    } else {
-        $("#main_div").on("longtap", ".messagebox", function (this: HTMLElement, e) {
-            const sel = window.getSelection();
-            // if one matches, remove the current selections.
-            // after a longtap that is valid, there should be no text selected.
-            if (sel) {
-                if (sel.removeAllRanges) {
-                    sel.removeAllRanges();
-                } else if (sel.empty) {
-                    sel.empty();
-                }
-            }
-
-            select_message_function.call(this, e);
-        });
     }
 
     $("#main_div").on("click", ".star_container", function (e) {
@@ -260,15 +267,28 @@ export function initialize(): void {
         const local_id = $(this).attr("data-reaction-id")!;
         const message_id = rows.get_message_id(this);
         reactions.process_reaction_click(message_id, local_id);
-        $(".tooltip").remove();
     });
 
-    $("body").on("click", ".reveal_hidden_message", (e) => {
+    $("body").on("click", ".reveal-hidden-message", (e) => {
         assert(message_lists.current !== undefined);
         const message_id = rows.id($(e.currentTarget).closest(".message_row"));
         message_lists.current.view.reveal_hidden_message(message_id);
         e.stopPropagation();
         e.preventDefault();
+    });
+
+    $("#main_div").on("click", ".rehide-muted-user-message", (e) => {
+        const message_id = Number($(e.currentTarget).attr("data-message-id"));
+        assert(message_lists.current !== undefined);
+        const $row = message_lists.current.get_row(message_id);
+        const message = message_lists.current.get(rows.id($row));
+        assert(message !== undefined);
+        const message_container = message_lists.current.view.message_containers.get(message.id);
+        assert(message_container !== undefined);
+        assert(!message_container.is_hidden);
+        message_lists.current.view.hide_revealed_message(message_id);
+        e.preventDefault();
+        e.stopPropagation();
     });
 
     $("#main_div").on("click", "a.stream", function (this: HTMLAnchorElement, e) {
@@ -277,7 +297,7 @@ export function initialize(): void {
         // so we re-encode the hash.
         const stream_id = Number.parseInt($(this).attr("data-stream-id")!, 10);
         if (stream_id) {
-            browser_history.go_to_location(hash_util.by_stream_url(stream_id));
+            browser_history.go_to_location(hash_util.channel_url_by_user_setting(stream_id));
             return;
         }
         window.location.href = this.href;
@@ -322,7 +342,7 @@ export function initialize(): void {
         );
         e.stopPropagation();
     });
-    $("body").on("click", ".always_visible_topic_edit,.on_hover_topic_edit", function (e) {
+    $("body").on("click", ".on_hover_topic_edit", function (e) {
         const $recipient_row = $(this).closest(".recipient_row");
         message_edit.start_inline_topic_edit($recipient_row);
         e.stopPropagation();
@@ -339,7 +359,7 @@ export function initialize(): void {
     });
     $("body").on("click", ".message_edit_save", function (e) {
         const $row = $(this).closest(".message_row");
-        message_edit.save_message_row_edit($row);
+        void message_edit.save_message_row_edit($row);
         e.stopPropagation();
     });
     $("body").on("click", ".message_edit_cancel", function (e) {
@@ -385,20 +405,20 @@ export function initialize(): void {
         },
     );
 
+    $("body").on("input", ".message_edit_form textarea", function (this: HTMLElement) {
+        const $row = $(this).closest(".message_row");
+
+        if ($row.hasClass("preview_mode")) {
+            message_edit.render_preview_area($row);
+        }
+    });
+
     // RESOLVED TOPICS
     $("body").on("click", ".message_header .on_hover_topic_resolve", (e) => {
         e.stopPropagation();
         const $recipient_row = $(e.target).closest(".recipient_row");
         const message_id = rows.id_for_recipient_row($recipient_row);
-        const topic_name = $(e.target).attr("data-topic-name")!;
-        message_edit.toggle_resolve_topic(message_id, topic_name, false, $recipient_row);
-    });
-
-    $("body").on("click", ".message_header .on_hover_topic_unresolve", (e) => {
-        e.stopPropagation();
-        const $recipient_row = $(e.target).closest(".recipient_row");
-        const message_id = rows.id_for_recipient_row($recipient_row);
-        const topic_name = $(e.target).attr("data-topic-name")!;
+        const topic_name = $(e.target).closest(".message_header").attr("data-topic-name")!;
         message_edit.toggle_resolve_topic(message_id, topic_name, false, $recipient_row);
     });
 
@@ -417,30 +437,20 @@ export function initialize(): void {
         return nearest.id;
     }
 
-    $("#message_feed_container").on(
-        "click",
-        ".narrows_by_recipient",
-        function (this: HTMLElement, e) {
-            if (e.metaKey || e.ctrlKey || e.shiftKey) {
-                return;
-            }
-            e.preventDefault();
-            const row_id = get_row_id_for_narrowing(this);
-            message_view.narrow_by_recipient(row_id, {trigger: "message header"});
-        },
-    );
-
     $("#message_feed_container").on("click", ".narrows_by_topic", function (this: HTMLElement, e) {
         if (e.metaKey || e.ctrlKey || e.shiftKey) {
             return;
         }
         e.preventDefault();
+        if (mouse_drag.is_drag(e)) {
+            return;
+        }
         const row_id = get_row_id_for_narrowing(this);
         message_view.narrow_by_topic(row_id, {trigger: "message header"});
     });
 
     // SIDEBARS
-    $("body").on("click", "#compose-new-direct-message", (e) => {
+    $("body").on("click", ".compose-new-direct-message", (e) => {
         e.preventDefault();
         e.stopPropagation();
 
@@ -458,6 +468,12 @@ export function initialize(): void {
         if ($(e.target).parents(".user-profile-picture").length === 1) {
             return;
         }
+        if (mouse_drag.is_drag(e)) {
+            // To avoid the click behavior if a user name or status text is
+            // selected.
+            e.preventDefault();
+            return;
+        }
 
         const $li = $(e.target).parents("li");
 
@@ -466,7 +482,6 @@ export function initialize(): void {
         e.preventDefault();
         e.stopPropagation();
         sidebar_ui.hide_userlist_sidebar();
-        $(".tooltip").remove();
     });
 
     // Doesn't show tooltip on touch devices.
@@ -484,7 +499,7 @@ export function initialize(): void {
     ): void {
         let placement: tippy.Placement = "left";
         let observer: MutationObserver;
-        if (window.innerWidth < media_breakpoints_num.md) {
+        if (ui_util.matches_viewport_state("lt_md_min")) {
             // On small devices display tooltips based on available space.
             // This will default to "bottom" placement for this tooltip.
             placement = "auto";
@@ -508,6 +523,10 @@ export function initialize(): void {
                 if (is_custom_observer_needed) {
                     observer.disconnect();
                 }
+            },
+            onCreate(instance) {
+                const $popover = $(instance.popper);
+                $popover.addClass("buddy-list-tooltip-root");
             },
             onShow(instance) {
                 if (!is_custom_observer_needed) {
@@ -536,55 +555,71 @@ export function initialize(): void {
     }
 
     // BUDDY LIST TOOLTIPS (not displayed on touch devices)
-    $(".buddy-list-section").on("mouseenter", ".selectable_sidebar_block", (e) => {
-        e.stopPropagation();
-        const user_id_string = $(e.currentTarget)
-            .closest(".user_sidebar_entry")
-            .attr("data-user-id")!;
-        const title_data = buddy_data.get_title_data(user_id_string, false);
+    $(".buddy-list-section").on(
+        "mouseenter",
+        ".user_sidebar_entry",
+        function (this: HTMLElement, e) {
+            e.stopPropagation();
+            const $elem = $(this);
 
-        // `target_node` is the `ul` element since it stays in DOM even after updates.
-        function get_target_node(): HTMLElement {
-            return util.the($(e.target).parents(".buddy-list-section"));
-        }
+            const is_compact_mode =
+                user_settings.user_list_style ===
+                settings_config.user_list_style_values.compact.code;
+            const status_el = is_compact_mode ? null : util.the($elem.find(".status-text"));
+            const is_truncated = status_el ? status_el.scrollWidth > status_el.clientWidth : false;
+            const should_show_status = is_compact_mode || is_truncated;
 
-        function check_reference_removed(
-            mutation: MutationRecord,
-            instance: tippy.Instance,
-        ): boolean {
-            return Array.prototype.includes.call(
-                mutation.removedNodes,
-                instance.reference.parentElement,
-            );
-        }
+            const user_id_string = $elem.attr("data-user-id")!;
+            const title_data = buddy_data.get_title_data(user_id_string, false, should_show_status);
 
-        const $elem = $(e.currentTarget)
-            .closest(".user_sidebar_entry")
-            .find(".selectable_sidebar_block");
-        do_render_buddy_list_tooltip($elem, title_data, get_target_node, check_reference_removed);
-
-        /*
-           The following implements a little tooltip giving the name for status emoji
-           when hovering them in the right sidebar. This requires special logic, to avoid
-           conflicting with the main tooltip or showing duplicate tooltips.
-        */
-        $(".user_sidebar_entry .status-emoji-name").off("mouseenter").off("mouseleave");
-        $(".user_sidebar_entry .status-emoji-name").on("mouseenter", () => {
-            const element: tippy.ReferenceElement = util.the($elem);
-            const instance = element._tippy;
-            if (instance?.state.isVisible) {
-                instance.destroy();
+            // `target_node` is the `ul` element since it stays in DOM even after updates.
+            function get_target_node(): HTMLElement {
+                return util.the($(e.target).parents(".buddy-list-section"));
             }
-        });
-        $(".user_sidebar_entry .status-emoji-name").on("mouseleave", () => {
+
+            function check_reference_removed(
+                mutation: MutationRecord,
+                instance: tippy.Instance,
+            ): boolean {
+                return Array.prototype.includes.call(mutation.removedNodes, instance.reference);
+            }
+
             do_render_buddy_list_tooltip(
                 $elem,
                 title_data,
                 get_target_node,
                 check_reference_removed,
             );
-        });
-    });
+
+            /*
+            The following implements a little tooltip giving the name for status emoji
+            when hovering them in the right sidebar. This requires special logic, to avoid
+            conflicting with the main tooltip or showing duplicate tooltips.
+            */
+            $(".user_sidebar_entry .status-emoji-name").off("mouseenter").off("mouseleave");
+            $(".user_sidebar_entry .status-emoji-name").on("mouseenter", () => {
+                const element: tippy.ReferenceElement = util.the($elem);
+                const instance = element._tippy;
+                // We make sure instance is of buddy list since we don't want to
+                // close any other tippy instances.
+                if (
+                    instance?.state.isVisible &&
+                    instance.reference.classList.contains("user_sidebar_entry") &&
+                    instance.popper.classList.contains("buddy-list-tooltip-root")
+                ) {
+                    instance.destroy();
+                }
+            });
+            $(".user_sidebar_entry .status-emoji-name").on("mouseleave", () => {
+                do_render_buddy_list_tooltip(
+                    $elem,
+                    title_data,
+                    get_target_node,
+                    check_reference_removed,
+                );
+            });
+        },
+    );
 
     // DIRECT MESSAGE LIST TOOLTIPS (not displayed on touch devices)
     $("body").on("mouseenter", ".dm-user-status", function (this: HTMLElement, e) {
@@ -594,7 +629,7 @@ export function initialize(): void {
         // This converts from 'true' in the DOM to true.
         const is_group = z.boolean().parse(JSON.parse($elem.attr("data-is-group")!));
 
-        const title_data = buddy_data.get_title_data(user_ids_string, is_group);
+        const title_data = buddy_data.get_title_data(user_ids_string, is_group, true);
 
         // Since anything inside `#left_sidebar_scroll_container` can be replaced, it is our target node here.
         function get_target_node(): HTMLElement {
@@ -644,19 +679,6 @@ export function initialize(): void {
         });
     });
 
-    // Left sidebar channel rows
-    $("body").on("click", ".channel-new-topic-button", function (this: HTMLElement, e) {
-        e.stopPropagation();
-        const stream_id = Number.parseInt(this.dataset.streamId!, 10);
-        compose_actions.start({
-            message_type: "stream",
-            stream_id,
-            topic: "",
-            trigger: "clear topic button",
-            keep_composebox_empty: true,
-        });
-    });
-
     // Recent conversations direct messages (Not displayed on small widths)
     $("body").on(
         "mouseenter",
@@ -666,7 +688,7 @@ export function initialize(): void {
             const $elem = $(this);
             const user_ids_string = $elem.attr("data-user-ids-string");
             // Don't show tooltip for group direct messages.
-            if (!user_ids_string || user_ids_string.split(",").length !== 1) {
+            if (user_ids_string?.split(",").length !== 1) {
                 return;
             }
             const title_data = recent_view_ui.get_pm_tooltip_data(user_ids_string);
@@ -730,10 +752,65 @@ export function initialize(): void {
         browser_history.go_to_location(target);
     });
 
+    $("body").on("click", ".formatting-control-scroller-button", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+
+        const $target = $(e.currentTarget);
+        const $button_container = $target.closest(".compose-scrolling-buttons-container");
+        const $button_bar = $button_container.find(".compose-scrollable-buttons");
+
+        const button_container_width = Number(
+            $button_container.attr("data-button-container-width"),
+        );
+        const button_bar_max_left_scroll = Number(
+            $button_container.attr("data-button-bar-max-left-scroll"),
+        );
+        const button_bar_scroll_left = Number($button_bar.scrollLeft());
+
+        // Buttons do not scale, so as to provide a generous click
+        // area while not overwhelming the visibility of buttons on
+        // narrower viewports at larger font sizes
+        const scroller_button_width_px = 48;
+        // We scroll 80% of the viewable area on each click...
+        const button_bar_scroll_percentage = 80 / 100;
+        // ...less the width of the two scroller buttons.
+        const button_adjusted_scroll_shift =
+            button_bar_scroll_percentage * (button_container_width - 2 * scroller_button_width_px);
+        let new_scroll_position = 0;
+
+        assert(typeof button_bar_scroll_left === "number");
+
+        if ($target.hasClass("formatting-scroller-forward")) {
+            new_scroll_position = button_bar_scroll_left + button_adjusted_scroll_shift;
+            // If we're less than the width of the scroller button from
+            // the end, just scroll the rest of the way forward
+            if (button_bar_max_left_scroll <= new_scroll_position - scroller_button_width_px) {
+                new_scroll_position = button_bar_max_left_scroll;
+            }
+        } else {
+            new_scroll_position = button_bar_scroll_left - button_adjusted_scroll_shift;
+            // If we're less than the width of the scroller button from
+            // the start, just scroll the rest of the way back
+            if (new_scroll_position <= scroller_button_width_px) {
+                new_scroll_position = 0;
+            }
+        }
+
+        $button_bar.scrollLeft(new_scroll_position);
+    });
+
     function handle_compose_click(e: JQuery.ClickEvent): void {
         const $target = $(e.target);
         // Emoji clicks should be handled by their own click handler in emoji_picker.js
-        if ($target.is(".emoji_map, img.emoji, .drag, .compose_gif_icon, .compose_control_menu")) {
+        if ($target.is(".emoji_map, img.emoji, .drag")) {
+            return;
+        }
+
+        // GIF icon clicks should be handled by the click handlers defined in their
+        // modules.
+        if ($target.is(".compose-gif-icon-giphy, .compose-gif-icon-tenor")) {
+            e.stopPropagation();
             return;
         }
 
@@ -773,15 +850,14 @@ export function initialize(): void {
 
     // LEFT SIDEBAR
 
-    $("body").on("click", "#clear_search_topic_button", topic_list.clear_topic_search);
-
-    $(".streams_filter_icon").on("click", (e) => {
-        e.stopPropagation();
-        stream_list.toggle_filter_displayed(e);
-    });
+    $("body").on(
+        "click",
+        ".filter-topics .input-close-filter-button",
+        topic_list.clear_topic_search,
+    );
 
     $("body").on("click", "#direct-messages-section-header.zoom-out", (e) => {
-        if ($(e.target).closest("#show-all-direct-messages").length === 1) {
+        if ($(e.target).closest(".show-all-direct-messages").length === 1) {
             // Let the browser handle the "direct message feed" widget.
             return;
         }
@@ -817,7 +893,7 @@ export function initialize(): void {
         window.location.hash = "narrow/is/dm";
     });
 
-    $("body").on("click", ".direct-messages-list-filter", (e) => {
+    $("body").on("click", ".direct-messages-search-section", (e) => {
         // We don't want clicking on the filter to trigger the DM
         // narrow defined on click for
         // `#direct-messages-section-header.zoom-in`.
@@ -849,12 +925,6 @@ export function initialize(): void {
         this.blur();
     });
 
-    $("body").on("click", ".language_selection_widget button", (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        settings_preferences.launch_default_language_setting_modal();
-    });
-
     $("body").on("click", "#header-container .brand", (e) => {
         if (e.metaKey || e.ctrlKey || e.shiftKey) {
             return;
@@ -877,10 +947,16 @@ export function initialize(): void {
         }
 
         if (compose_state.composing() && $(e.target).parents("#compose").length === 0) {
-            if (
-                $(e.target).closest("a").length > 0 ||
-                $(e.target).closest(".copy_codeblock").length > 0
-            ) {
+            const is_click_within_link = $(e.target).closest("a").length > 0;
+            if (is_click_within_link || $(e.target).closest(".copy_codeblock").length > 0) {
+                const is_selecting_link_text = is_click_within_link && mouse_drag.is_drag(e);
+                if (is_selecting_link_text) {
+                    // Avoid triggering the click handler for a link
+                    // when just dragging over it to select the text.
+                    e.preventDefault();
+                    return;
+                }
+
                 // Refocus compose message text box if one clicks an external
                 // link/url to view something else while composing a message.
                 // See issue #4331 for more details.
@@ -929,5 +1005,15 @@ export function initialize(): void {
 
     $(".settings-header.mobile .fa-chevron-left").on("click", () => {
         settings_panel_menu.mobile_deactivate_section();
+    });
+
+    $(document).on("click", ".request-upgrade", (e) => {
+        e.preventDefault();
+        window.open("/upgrade/", "_blank", "noopener,noreferrer");
+    });
+
+    $(document).on("click", ".request-sponsorship", (e) => {
+        e.preventDefault();
+        window.open("/sponsorship/", "_blank", "noopener,noreferrer");
     });
 }

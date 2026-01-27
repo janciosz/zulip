@@ -52,7 +52,10 @@ from zerver.lib.timestamp import datetime_to_timestamp, timestamp_to_datetime
 from zerver.lib.typed_endpoint import typed_endpoint
 from zerver.lib.users import is_2fa_verified
 from zerver.lib.utils import has_api_key_format
-from zerver.lib.webhooks.common import notify_bot_owner_about_invalid_json
+from zerver.lib.webhooks.common import (
+    MissingHTTPEventHeaderError,
+    notify_bot_owner_about_invalid_json,
+)
 from zerver.models import UserProfile
 from zerver.models.clients import get_client
 from zerver.models.users import get_user_profile_by_api_key
@@ -91,7 +94,13 @@ def update_user_activity(
         "time": datetime_to_timestamp(timezone_now()),
         "client_id": request_notes.client.id,
     }
-    queue_json_publish_rollback_unsafe("user_activity", event, lambda event: None)
+
+    queue_name = "user_activity"
+    if settings.USER_ACTIVITY_SHARDS > 1:  # nocoverage
+        shard_id = user_profile.id % settings.USER_ACTIVITY_SHARDS + 1
+        queue_name = f"user_activity_shard{shard_id}"
+
+    queue_json_publish_rollback_unsafe(queue_name, event, lambda event: None)
 
 
 # Based on django.views.decorators.http.require_http_methods
@@ -206,7 +215,7 @@ def require_billing_access(
         **kwargs: ParamT.kwargs,
     ) -> HttpResponse:
         if not user_profile.has_billing_access:
-            raise JsonableError(_("Must be a billing administrator or an organization owner"))
+            raise JsonableError(_("Insufficient permission"))
         return func(request, user_profile, *args, **kwargs)
 
     return wrapper
@@ -335,6 +344,12 @@ def log_unsupported_webhook_event(request: HttpRequest, summary: str) -> None:
 
 def log_exception_to_webhook_logger(request: HttpRequest, err: Exception) -> None:
     extra = {"request": request}
+
+    # We deliberately skip logging this client error, as it results from a malformed request
+    # and doesn't indicate an issue on our end.
+    if isinstance(err, MissingHTTPEventHeaderError):
+        return
+
     # We intentionally omit the stack_info for these events, where
     # they are intentionally raised, and the stack_info between that
     # point and this one is not interesting.
@@ -550,7 +565,9 @@ def human_users_only(
         request: HttpRequest, /, *args: ParamT.args, **kwargs: ParamT.kwargs
     ) -> HttpResponse:
         assert request.user.is_authenticated
-        if request.user.is_bot:
+        # Check bot_type here, rather than is_bot, because  the
+        # narrow user cache only has that (nullable) type
+        if request.user.bot_type is not None:
             raise JsonableError(_("This endpoint does not accept bot requests."))
         return view_func(request, *args, **kwargs)
 
@@ -681,7 +698,9 @@ def require_member_or_admin(
     ) -> HttpResponse:
         if user_profile.is_guest:
             raise JsonableError(_("Not allowed for guest users"))
-        if user_profile.is_bot:
+        # Check bot_type here, rather than is_bot, because  the
+        # narrow user cache only has that (nullable) type
+        if user_profile.bot_type is not None:
             raise JsonableError(_("This endpoint does not accept bot requests."))
         return view_func(request, user_profile, *args, **kwargs)
 
@@ -918,7 +937,7 @@ def authenticated_json_view(
         *args: ParamT.args,
         **kwargs: ParamT.kwargs,
     ) -> HttpResponse:
-        if not request.user.is_authenticated:
+        if not request.user.is_authenticated:  # nocoverage
             raise UnauthorizedError
 
         user_profile = request.user
@@ -940,6 +959,7 @@ def authenticated_json_view(
 # from command-line tools into Django.  We protect them from the
 # outside world by checking a shared secret, and also the originating
 # IP (for now).
+@typed_endpoint
 def authenticate_internal_api(request: HttpRequest, *, secret: str) -> bool:
     return is_local_addr(request.META["REMOTE_ADDR"]) and constant_time_compare(
         secret, settings.SHARED_SECRET
@@ -962,11 +982,10 @@ def internal_api_view(
         @csrf_exempt
         @require_post
         @wraps(view_func)
-        @typed_endpoint
         def _wrapped_func_arguments(
-            request: HttpRequest, /, *args: ParamT.args, secret: str, **kwargs: ParamT.kwargs
+            request: HttpRequest, /, *args: ParamT.args, **kwargs: ParamT.kwargs
         ) -> HttpResponse:
-            if not authenticate_internal_api(request, secret=secret):
+            if not authenticate_internal_api(request):  # type: ignore[call-arg] # @typed_endpoint fills in secret from the request
                 raise AccessDeniedError
             request_notes = RequestNotes.get_notes(request)
             is_tornado_request = request_notes.tornado_handler_id is not None

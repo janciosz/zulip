@@ -3,12 +3,16 @@ import {isValid, parseISO} from "date-fns";
 import $ from "jquery";
 import assert from "minimalistic-assert";
 
+import render_channel_message_link from "../templates/channel_message_link.hbs";
 import code_buttons_container from "../templates/code_buttons_container.hbs";
+import render_markdown_audio from "../templates/markdown_audio.hbs";
 import render_markdown_timestamp from "../templates/markdown_timestamp.hbs";
 import render_mention_content_wrapper from "../templates/mention_content_wrapper.hbs";
+import render_topic_link from "../templates/topic_link.hbs";
 
 import * as blueslip from "./blueslip.ts";
 import {show_copied_confirmation} from "./copied_tooltip.ts";
+import * as hash_util from "./hash_util.ts";
 import {$t} from "./i18n.ts";
 import * as message_store from "./message_store.ts";
 import type {Message} from "./message_store.ts";
@@ -233,20 +237,35 @@ export const update_elements = ($content: JQuery): void => {
         }
     });
 
-    $content.find("a.stream-topic").each(function (): void {
-        const stream_id_string = $(this).attr("data-stream-id");
-        assert(stream_id_string !== undefined);
-        const stream_id = Number.parseInt(stream_id_string, 10);
-        if (stream_id && $(this).find(".highlight").length === 0) {
-            // Display the current name for stream if it is not
-            // being displayed in search highlight.
-            const stream_name = sub_store.maybe_get_stream_name(stream_id);
-            if (stream_name !== undefined) {
-                // If the stream has been deleted,
-                // sub_store.maybe_get_stream_name might return
-                // undefined.  Otherwise, display the current stream name.
-                const text = $(this).text();
-                $(this).text("#" + stream_name + text.slice(text.indexOf(" > ")));
+    $content.find("a.stream-topic, a.message-link").each(function (): void {
+        const narrow_url = $(this).attr("href");
+        assert(narrow_url !== undefined);
+        const channel_topic = hash_util.decode_stream_topic_from_url(narrow_url);
+        assert(channel_topic !== null);
+        const channel_name = sub_store.maybe_get_stream_name(channel_topic.stream_id);
+        if (channel_name !== undefined && $(this).find(".highlight").length === 0) {
+            // Display the current channel name if it hasn't been deleted
+            // and not being displayed in search highlight.
+            // TODO: Ideally, we should NOT skip this if only topic is highlighted,
+            // but we are doing so currently.
+            const topic_name = channel_topic.topic_name;
+            assert(topic_name !== undefined);
+            const topic_display_name = util.get_final_topic_display_name(topic_name);
+            const context = {
+                channel_name,
+                topic_display_name,
+                is_empty_string_topic: topic_name === "",
+                href: narrow_url,
+            };
+            if ($(this).hasClass("stream-topic")) {
+                const topic_link_html = render_topic_link({
+                    channel_id: channel_topic.stream_id,
+                    ...context,
+                });
+                $(this).replaceWith($(topic_link_html));
+            } else {
+                const message_link_html = render_channel_message_link(context);
+                $(this).replaceWith($(message_link_html));
             }
         }
     });
@@ -298,12 +317,12 @@ export const update_elements = ($content: JQuery): void => {
     });
 
     // Display the view-code-in-playground and the copy-to-clipboard button inside the div.codehilite element,
-    // and add a `zulip-code-block` class to it to detect it easily in `copy_and_paste.ts`.
+    // and add a `zulip-code-block` class to it to detect it easily in `compose_paste.ts`.
     $content.find("div.codehilite").each(function (): void {
         const $codehilite = $(this);
         const $pre = $codehilite.find("pre");
         const fenced_code_lang = $codehilite.attr("data-code-language");
-        let playground_info;
+        let playground_info: realm_playground.RealmPlayground[] | undefined;
         if (fenced_code_lang !== undefined) {
             playground_info = realm_playground.get_playground_info_for_languages(fenced_code_lang);
         }
@@ -320,11 +339,7 @@ export const update_elements = ($content: JQuery): void => {
             // popover listing the options.
             let title = $t({defaultMessage: "View in playground"});
             const $view_in_playground_button = $buttonContainer.find(".code_external_link");
-            if (
-                playground_info &&
-                playground_info.length === 1 &&
-                playground_info[0] !== undefined
-            ) {
+            if (playground_info?.length === 1 && playground_info[0] !== undefined) {
                 title = $t(
                     {defaultMessage: "View in {playground_name}"},
                     {playground_name: playground_info[0].name},
@@ -349,6 +364,20 @@ export const update_elements = ($content: JQuery): void => {
             });
         });
         $codehilite.addClass("zulip-code-block");
+    });
+
+    $content.find("audio").each(function (): void {
+        // We grab the audio source and title for
+        // inserting into the template
+        const audio_src = $(this).attr("src");
+        const audio_title = $(this).attr("title");
+
+        const rendered_audio = render_markdown_audio({
+            audio_src,
+            audio_title,
+        });
+
+        $(this).replaceWith($(rendered_audio));
     });
 
     // Display emoji (including realm emoji) as text if

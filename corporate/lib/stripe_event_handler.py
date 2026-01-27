@@ -13,14 +13,9 @@ from corporate.lib.stripe import (
     RemoteServerBillingSession,
     get_configured_fixed_price_plan_offer,
 )
-from corporate.models import (
-    Customer,
-    CustomerPlan,
-    Event,
-    Invoice,
-    Session,
-    get_current_plan_by_customer,
-)
+from corporate.models.customers import Customer
+from corporate.models.plans import CustomerPlan, get_current_plan_by_customer
+from corporate.models.stripe_state import Event, Invoice, Session
 from zerver.lib.send_email import FromAddress, send_email
 from zerver.models.users import get_active_user_profile_by_id_in_realm
 
@@ -114,7 +109,7 @@ def handle_checkout_session_completed_event(
         session.customer, stripe_session.metadata.get("user_id")
     )
     payment_method = stripe_setup_intent.payment_method
-    assert isinstance(payment_method, (str, type(None)))  # noqa: UP038  # https://github.com/python/mypy/issues/17413
+    assert isinstance(payment_method, str | None)
 
     if session.type in [
         Session.CARD_UPDATE_FROM_BILLING_PAGE,

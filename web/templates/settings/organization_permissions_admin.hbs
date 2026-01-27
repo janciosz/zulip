@@ -10,19 +10,21 @@
                 {{> settings_save_discard_widget section_name="join-settings" }}
             </div>
             <div class="m-10 inline-block organization-permissions-parent">
-                {{> settings_checkbox
-                  setting_name="realm_invite_required"
-                  prefix="id_"
-                  is_checked=realm_invite_required
-                  label=admin_settings_label.realm_invite_required}}
-
+                <div id="realm_invite_required_container" {{#unless user_has_email_set}}class="disabled_setting_tooltip"{{/unless}}>
+                    {{> settings_checkbox
+                      setting_name="realm_invite_required"
+                      prefix="id_"
+                      is_checked=realm_invite_required
+                      is_disabled=(not user_has_email_set)
+                      label=admin_settings_label.realm_invite_required}}
+                </div>
                 {{> group_setting_value_pill_input
                   setting_name="realm_can_invite_users_group"
-                  label=(t 'Who can send email invitations to new users')}}
+                  label=group_setting_labels.can_invite_users_group}}
 
                 {{> group_setting_value_pill_input
                   setting_name="realm_create_multiuse_invite_group"
-                  label=(t 'Who can create reusable invitation links')}}
+                  label=group_setting_labels.create_multiuse_invite_group}}
 
                 <div class="input-group">
                     <label for="id_realm_org_join_restrictions" class="settings-field-label">{{t "Restrict email domains of new users" }}</label>
@@ -60,13 +62,15 @@
 
         <div id="org-stream-permissions" class="settings-subsection-parent">
             <div class="subsection-header">
-                <h3>{{t "Channel permissions" }}</h3>
+                <h3>{{t "Channel permissions" }}
+                    {{> ../help_link_widget link="/help/channel-permissions" }}
+                </h3>
                 {{> settings_save_discard_widget section_name="stream-permissions" }}
             </div>
-            <div class="m-10 inline-block organization-permissions-parent">
+            <div class="m-10 organization-permissions-parent">
                 {{> group_setting_value_pill_input
                   setting_name="realm_can_create_public_channel_group"
-                  label=(t 'Who can create public channels')}}
+                  label=group_setting_labels.can_create_public_channel_group}}
 
                 {{> upgrade_tip_widget . }}
                 {{> settings_checkbox
@@ -79,27 +83,27 @@
 
                 {{> ../dropdown_widget_with_label
                   widget_name="realm_can_create_web_public_channel_group"
-                  label=(t 'Who can create web-public channels')
+                  label=group_setting_labels.can_create_web_public_channel_group
                   value_type="number"}}
 
                 {{> group_setting_value_pill_input
                   setting_name="realm_can_create_private_channel_group"
-                  label=(t 'Who can create private channels')}}
+                  label=group_setting_labels.can_create_private_channel_group}}
 
-                <div class="input-group">
-                    <label for="id_realm_invite_to_stream_policy" class="settings-field-label">{{t "Who can add users to channels" }}</label>
-                    <select name="realm_invite_to_stream_policy" id="id_realm_invite_to_stream_policy" class="prop-element settings_select bootstrap-focus-style" data-setting-widget-type="number">
-                        {{> dropdown_options_widget option_values=common_policy_values}}
-                    </select>
-                </div>
-                <div class="input-group">
-                    <label for="id_realm_wildcard_mention_policy" class="settings-field-label">{{t "Who can notify a large number of users with a wildcard mention" }}
-                        {{> ../help_link_widget link="/help/restrict-wildcard-mentions" }}
-                    </label>
-                    <select name="realm_wildcard_mention_policy" id="id_realm_wildcard_mention_policy" class="prop-element settings_select bootstrap-focus-style" data-setting-widget-type="number">
-                        {{> dropdown_options_widget option_values=wildcard_mention_policy_values}}
-                    </select>
-                </div>
+
+                {{> group_setting_value_pill_input
+                  setting_name="realm_can_add_subscribers_group"
+                  label=group_setting_labels.can_add_subscribers_group}}
+
+                {{> group_setting_value_pill_input
+                  setting_name="realm_can_mention_many_users_group"
+                  label=group_setting_labels.can_mention_many_users_group
+                  help_link="/help/restrict-wildcard-mentions"}}
+
+                {{> group_setting_value_pill_input
+                  setting_name="realm_can_set_topics_policy_group"
+                  label=group_setting_labels.can_set_topics_policy_group
+                  help_link="/help/require-topics"}}
             </div>
         </div>
 
@@ -110,14 +114,14 @@
                 </h3>
                 {{> settings_save_discard_widget section_name="group-permissions" }}
             </div>
-            <div class="m-10 inline-block organization-permissions-parent">
+            <div class="m-10 organization-permissions-parent">
                 {{> group_setting_value_pill_input
                   setting_name="realm_can_manage_all_groups"
-                  label=(t 'Who can administer all user groups')}}
+                  label=group_setting_labels.can_manage_all_groups}}
                 {{> upgrade_tip_widget . }}
                 {{> group_setting_value_pill_input
                   setting_name="realm_can_create_groups"
-                  label=(t 'Who can create user groups')}}
+                  label=group_setting_labels.can_create_groups}}
             </div>
         </div>
 
@@ -131,11 +135,11 @@
 
             {{> group_setting_value_pill_input
               setting_name="realm_direct_message_permission_group"
-              label=(t 'Who can authorize a direct message conversation')}}
+              label=group_setting_labels.direct_message_permission_group}}
 
             {{> group_setting_value_pill_input
               setting_name="realm_direct_message_initiator_group"
-              label=(t 'Who can start a direct message conversation')}}
+              label=group_setting_labels.direct_message_initiator_group}}
         </div>
 
         <div id="org-msg-editing" class="settings-subsection-parent">
@@ -152,11 +156,12 @@
                   is_checked=realm_allow_message_editing
                   label=admin_settings_label.realm_allow_message_editing}}
 
-                {{> settings_checkbox
-                  setting_name="realm_allow_edit_history"
-                  prefix="id_"
-                  is_checked=realm_allow_edit_history
-                  label=admin_settings_label.realm_allow_edit_history}}
+                <div class="input-group">
+                    <label for="id_realm_message_edit_history_visibility_policy" class="settings-field-label">{{t "Allow viewing the history of a message?"}}</label>
+                    <select name="realm_message_edit_history_visibility_policy" id="id_realm_message_edit_history_visibility_policy" class="prop-element settings_select bootstrap-focus-style" data-setting-widget-type="string">
+                        {{> dropdown_options_widget option_values=message_edit_history_visibility_policy_values}}
+                    </select>
+                </div>
 
                 <div class="input-group time-limit-setting">
                     <label for="id_realm_message_content_edit_limit_seconds" class="settings-field-label">{{t "Time limit for editing messages" }}</label>
@@ -167,14 +172,19 @@
                     </select>
                     <div class="dependent-settings-block">
                         <label for="id_realm_message_content_edit_limit_minutes" class="inline-block realm-time-limit-label">
-                            {{t 'Duration editing is allowed after posting (minutes)'}}:&nbsp;
+                            {{t 'Time limit'}}:&nbsp;
                         </label>
                         <input type="text" id="id_realm_message_content_edit_limit_minutes"
                           name="realm_message_content_edit_limit_minutes"
                           class="time-limit-custom-input"
                           autocomplete="off"
                           value="{{ realm_message_content_edit_limit_minutes }}"
-                          {{#unless realm_allow_message_editing}}disabled{{/unless}}/>
+                          {{#unless realm_allow_message_editing}}disabled{{/unless}}/>&nbsp;
+                        <span class="time-unit-text">
+                            {{t "{realm_message_content_edit_limit_minutes, plural, one {minute} other {minutes}}"}}
+                        </span>
+
+
                     </div>
                 </div>
             </div>
@@ -190,7 +200,7 @@
 
             {{> group_setting_value_pill_input
               setting_name="realm_can_move_messages_between_topics_group"
-              label=(t 'Who can move messages to another topic')}}
+              label=group_setting_labels.can_move_messages_between_topics_group}}
 
             <div class="input-group time-limit-setting">
                 <label for="id_realm_move_messages_within_stream_limit_seconds" class="settings-field-label">{{t "Time limit for editing topics" }} <i>({{t "does not apply to moderators and administrators" }})</i></label>
@@ -201,18 +211,21 @@
                 </select>
                 <div class="dependent-settings-block">
                     <label for="id_realm_move_messages_within_stream_limit_minutes" class="inline-block realm-time-limit-label">
-                        {{t 'Duration editing is allowed after posting (minutes)'}}:&nbsp;
+                        {{t 'Time limit'}}:&nbsp;
                     </label>
                     <input type="text" id="id_realm_move_messages_within_stream_limit_minutes"
                       name="realm_move_messages_within_stream_limit_minutes"
                       class="time-limit-custom-input"
-                      autocomplete="off"/>
+                      autocomplete="off"/>&nbsp;
+                    <span class="time-unit-text">
+                        {{t "{realm_move_messages_within_stream_limit_minutes, plural, one {minute} other {minutes}}"}}
+                    </span>
                 </div>
             </div>
 
             {{> group_setting_value_pill_input
               setting_name="realm_can_move_messages_between_channels_group"
-              label=(t 'Who can move messages to another channel')}}
+              label=group_setting_labels.can_move_messages_between_channels_group}}
 
             <div class="input-group time-limit-setting">
                 <label for="id_realm_move_messages_between_streams_limit_seconds" class="settings-field-label">{{t "Time limit for moving messages between channels" }} <i>({{t "does not apply to moderators and administrators" }})</i></label>
@@ -223,14 +236,21 @@
                 </select>
                 <div class="dependent-settings-block">
                     <label for="id_realm_move_messages_between_streams_limit_minutes" class="inline-block realm-time-limit-label">
-                        {{t 'Duration editing is allowed after posting (minutes)'}}:&nbsp;
+                        {{t 'Time limit'}}:&nbsp;
                     </label>
                     <input type="text" id="id_realm_move_messages_between_streams_limit_minutes"
                       name="realm_move_messages_between_streams_limit_minutes"
                       class="time-limit-custom-input"
-                      autocomplete="off"/>
+                      autocomplete="off"/>&nbsp;
+                    <span class="time-unit-text">
+                        {{t "{realm_move_messages_between_streams_limit_minutes, plural, one {minute} other {minutes}}"}}
+                    </span>
                 </div>
             </div>
+
+            {{> group_setting_value_pill_input
+              setting_name="realm_can_resolve_topics_group"
+              label=group_setting_labels.can_resolve_topics_group}}
         </div>
 
         <div id="org-msg-deletion" class="settings-subsection-parent">
@@ -243,11 +263,11 @@
             <div class="inline-block organization-settings-parent">
                 {{> group_setting_value_pill_input
                   setting_name="realm_can_delete_any_message_group"
-                  label=(t 'Who can delete any message')}}
+                  label=group_setting_labels.can_delete_any_message_group}}
 
                 {{> group_setting_value_pill_input
                   setting_name="realm_can_delete_own_message_group"
-                  label=(t 'Who can delete their own messages')}}
+                  label=group_setting_labels.can_delete_own_message_group}}
 
                 <div class="input-group time-limit-setting">
                     <label for="id_realm_message_content_delete_limit_seconds" class="settings-field-label">
@@ -260,15 +280,20 @@
                     </select>
                     <div class="dependent-settings-block">
                         <label for="id_realm_message_content_delete_limit_minutes" class="inline-block realm-time-limit-label">
-                            {{t "Duration deletion is allowed after posting (minutes)" }}:
+                            {{t "Time limit" }}:&nbsp;
                         </label>
                         <input type="text" id="id_realm_message_content_delete_limit_minutes"
                           name="realm_message_content_delete_limit_minutes"
                           class="time-limit-custom-input"
                           autocomplete="off"
-                          value="{{ realm_message_content_delete_limit_minutes }}"/>
+                          value="{{ realm_message_content_delete_limit_minutes }}"/>&nbsp;
+                        <span class="time-unit-text">{{t "{realm_message_content_delete_limit_minutes, plural, one {minute} other {minutes}}"}}</span>
                     </div>
                 </div>
+
+                {{> group_setting_value_pill_input
+                  setting_name="realm_can_set_delete_message_policy_group"
+                  label=group_setting_labels.can_set_delete_message_policy_group}}
             </div>
         </div>
 
@@ -289,8 +314,9 @@
                 {{> settings_checkbox
                   setting_name="realm_name_changes_disabled"
                   prefix="id_"
-                  is_checked=realm_name_changes_disabled
-                  label=admin_settings_label.realm_name_changes_disabled}}
+                  is_checked=(or realm_name_changes_disabled server_name_changes_disabled)
+                  label=admin_settings_label.realm_name_changes_disabled
+                  is_disabled=server_name_changes_disabled}}
 
                 {{> settings_checkbox
                   setting_name="realm_email_changes_disabled"
@@ -301,8 +327,9 @@
                 {{> settings_checkbox
                   setting_name="realm_avatar_changes_disabled"
                   prefix="id_"
-                  is_checked=realm_avatar_changes_disabled
-                  label=admin_settings_label.realm_avatar_changes_disabled}}
+                  is_checked=(or realm_avatar_changes_disabled server_avatar_changes_disabled)
+                  label=admin_settings_label.realm_avatar_changes_disabled
+                  is_disabled=server_avatar_changes_disabled}}
 
             </div>
         </div>
@@ -320,9 +347,15 @@
                   is_checked=realm_enable_guest_user_indicator
                   label=admin_settings_label.realm_enable_guest_user_indicator}}
 
+                {{> settings_checkbox
+                  setting_name="realm_enable_guest_user_dm_warning"
+                  prefix="id_"
+                  is_checked=realm_enable_guest_user_dm_warning
+                  label=admin_settings_label.realm_enable_guest_user_dm_warning}}
+
                 {{> ../dropdown_widget_with_label
                   widget_name="realm_can_access_all_users_group"
-                  label=(t 'Who can view all other users in the organization')
+                  label=group_setting_labels.can_access_all_users_group
                   value_type="number"
                   help_link="/help/guest-users#configure-whether-guests-can-see-all-other-users"}}
             </div>
@@ -334,16 +367,47 @@
                 {{> settings_save_discard_widget section_name="other-permissions" }}
             </div>
             <div class="m-10 inline-block organization-permissions-parent">
-                <div class="input-group">
-                    <label for="id_realm_bot_creation_policy" class="settings-field-label">{{t "Who can add bots" }}</label>
-                    <select name="realm_bot_creation_policy" class="setting-widget prop-element settings_select bootstrap-focus-style" id="id_realm_bot_creation_policy" data-setting-widget-type="number">
-                        {{> dropdown_options_widget option_values=bot_creation_policy_values}}
-                    </select>
+                {{#if is_plan_self_hosted}}
+                    {{> group_setting_value_pill_input
+                      setting_name="realm_can_manage_billing_group"
+                      label=group_setting_labels.can_manage_billing_group
+                      help_link="https://zulip.com//help/self-hosted-billing"
+                      }}
+                {{else}}
+                    {{> group_setting_value_pill_input
+                      setting_name="realm_can_manage_billing_group"
+                      label=group_setting_labels.can_manage_billing_group
+                      help_link="/help/zulip-cloud-billing"
+                      }}
+                {{/if}}
+
+                <div class="disabled-unfinished-feature"
+                  {{#unless server_can_summarize_topics}}style="display: none"{{/unless}}>
+                    {{#unless server_can_summarize_topics}}
+                        <div class="tip">
+                            {{#if is_plan_self_hosted}}
+                            {{t "AI summaries are not enabled on this server."}}
+                            {{else}}
+                            {{t "AI summaries are not available on Zulip Cloud yet."}}
+                            {{/if}}
+                        </div>
+                    {{/unless}}
+                    {{> group_setting_value_pill_input
+                      setting_name="realm_can_summarize_topics_group"
+                      label=group_setting_labels.can_summarize_topics_group}}
                 </div>
 
                 {{> group_setting_value_pill_input
+                  setting_name="realm_can_create_write_only_bots_group"
+                  label=group_setting_labels.can_create_write_only_bots_group}}
+
+                {{> group_setting_value_pill_input
+                  setting_name="realm_can_create_bots_group"
+                  label=group_setting_labels.can_create_bots_group}}
+
+                {{> group_setting_value_pill_input
                   setting_name="realm_can_add_custom_emoji_group"
-                  label=(t 'Who can add custom emoji')}}
+                  label=group_setting_labels.can_add_custom_emoji_group}}
             </div>
         </div>
     </form>

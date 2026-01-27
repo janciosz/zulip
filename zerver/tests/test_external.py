@@ -5,16 +5,13 @@ from contextlib import contextmanager
 from typing import IO, TYPE_CHECKING, Any
 from unittest import mock, skipUnless
 
-import DNS
 import orjson
 from circuitbreaker import CircuitBreakerMonitor
 from django.conf import settings
-from django.core.exceptions import ValidationError
 from django.test import override_settings
 from django.utils.timezone import now as timezone_now
 from typing_extensions import override
 
-from zerver.forms import email_is_not_mit_mailing_list
 from zerver.lib.cache import cache_delete
 from zerver.lib.rate_limiter import (
     RateLimitedIPAddr,
@@ -24,7 +21,6 @@ from zerver.lib.rate_limiter import (
 )
 from zerver.lib.test_classes import ZulipTestCase
 from zerver.lib.test_helpers import ratelimit_rule
-from zerver.lib.zephyr import compute_mit_user_fullname
 from zerver.models import PushDeviceToken, UserProfile
 
 if settings.ZILENCER_ENABLED:
@@ -32,49 +28,6 @@ if settings.ZILENCER_ENABLED:
 
 if TYPE_CHECKING:
     from django.test.client import _MonkeyPatchedWSGIResponse as TestHttpResponse
-
-
-class MITNameTest(ZulipTestCase):
-    def test_valid_hesiod(self) -> None:
-        with mock.patch(
-            "DNS.dnslookup",
-            return_value=[
-                ["starnine:*:84233:101:Athena Consulting Exchange User,,,:/mit/starnine:/bin/bash"]
-            ],
-        ):
-            self.assertEqual(
-                compute_mit_user_fullname(self.mit_email("starnine")),
-                "Athena Consulting Exchange User",
-            )
-        with mock.patch(
-            "DNS.dnslookup",
-            return_value=[["sipbexch:*:87824:101:Exch Sipb,,,:/mit/sipbexch:/bin/athena/bash"]],
-        ):
-            self.assertEqual(compute_mit_user_fullname("sipbexch@mit.edu"), "Exch Sipb")
-
-    def test_invalid_hesiod(self) -> None:
-        with mock.patch(
-            "DNS.dnslookup", side_effect=DNS.Base.ServerError("DNS query status: NXDOMAIN", 3)
-        ):
-            self.assertEqual(compute_mit_user_fullname("1234567890@mit.edu"), "1234567890@mit.edu")
-        with mock.patch(
-            "DNS.dnslookup", side_effect=DNS.Base.ServerError("DNS query status: NXDOMAIN", 3)
-        ):
-            self.assertEqual(compute_mit_user_fullname("ec-discuss@mit.edu"), "ec-discuss@mit.edu")
-
-    def test_mailinglist(self) -> None:
-        with mock.patch(
-            "DNS.dnslookup", side_effect=DNS.Base.ServerError("DNS query status: NXDOMAIN", 3)
-        ):
-            self.assertRaises(ValidationError, email_is_not_mit_mailing_list, "1234567890@mit.edu")
-        with mock.patch(
-            "DNS.dnslookup", side_effect=DNS.Base.ServerError("DNS query status: NXDOMAIN", 3)
-        ):
-            self.assertRaises(ValidationError, email_is_not_mit_mailing_list, "ec-discuss@mit.edu")
-
-    def test_notmailinglist(self) -> None:
-        with mock.patch("DNS.dnslookup", return_value=[["POP IMAP.EXCHANGE.MIT.EDU starnine"]]):
-            email_is_not_mit_mailing_list("sipbexch@mit.edu")
 
 
 class RateLimitTests(ZulipTestCase):

@@ -16,6 +16,7 @@ from urllib3.util import Retry
 from zerver.lib.partial import partial
 from zerver.lib.queue import queue_json_publish_rollback_unsafe
 from zerver.models import Client, Realm, UserProfile
+from zerver.models.users import get_user_profile_narrow_by_id
 from zerver.tornado.sharding import (
     get_realm_tornado_ports,
     get_tornado_url,
@@ -86,16 +87,21 @@ def request_event_queue(
     narrow: Iterable[Sequence[str]] = [],
     bulk_message_deletion: bool = False,
     stream_typing_notifications: bool = False,
-    user_settings_object: bool = False,
     pronouns_field_type_supported: bool = True,
     linkifier_url_template: bool = False,
     user_list_incomplete: bool = False,
     include_deactivated_groups: bool = False,
     archived_channels: bool = False,
     empty_topic_name: bool = False,
+    simplified_presence_events: bool = False,
 ) -> str | None:
     if not settings.USING_TORNADO:
         return None
+
+    # We make sure to pre-fill the narrow user cache, to save
+    # session-based Tornado (/json/events) from having to go to the
+    # database.
+    get_user_profile_narrow_by_id(user_profile.id)
 
     tornado_url = get_tornado_url(get_user_tornado_port(user_profile))
     req = {
@@ -112,13 +118,13 @@ def request_event_queue(
         "lifespan_secs": queue_lifespan_secs,
         "bulk_message_deletion": orjson.dumps(bulk_message_deletion),
         "stream_typing_notifications": orjson.dumps(stream_typing_notifications),
-        "user_settings_object": orjson.dumps(user_settings_object),
         "pronouns_field_type_supported": orjson.dumps(pronouns_field_type_supported),
         "linkifier_url_template": orjson.dumps(linkifier_url_template),
         "user_list_incomplete": orjson.dumps(user_list_incomplete),
         "include_deactivated_groups": orjson.dumps(include_deactivated_groups),
         "archived_channels": orjson.dumps(archived_channels),
         "empty_topic_name": orjson.dumps(empty_topic_name),
+        "simplified_presence_events": orjson.dumps(simplified_presence_events),
     }
 
     if event_types is not None:
@@ -133,6 +139,12 @@ def get_user_events(
 ) -> list[dict[str, Any]]:
     if not settings.USING_TORNADO:
         return []
+
+    # Pre-fill the narrow user cache, to save session-based Tornado
+    # (/json/events) from having to go to the database.  This is
+    # almost certainly filled already, from above, but there is little
+    # harm in forcing it.
+    get_user_profile_narrow_by_id(user_profile.id)
 
     tornado_url = get_tornado_url(get_user_tornado_port(user_profile))
     post_data: dict[str, Any] = {
@@ -213,4 +225,15 @@ def send_event_rollback_unsafe(
 def send_event_on_commit(
     realm: Realm, event: Mapping[str, Any], users: Iterable[int] | Iterable[Mapping[str, Any]]
 ) -> None:
+    if not settings.USING_RABBITMQ:
+        # In tests, round-trip the event through JSON, as happens with
+        # RabbitMQ.  zerver.lib.queue also enforces this, but the
+        # on-commit nature of the event sending makes it difficult to
+        # trace which event was at fault -- so we also check it
+        # immediately, here.
+        try:
+            event = orjson.loads(orjson.dumps(event))
+        except TypeError:
+            print(event)
+            raise
     transaction.on_commit(lambda: send_event_rollback_unsafe(realm, event, users))

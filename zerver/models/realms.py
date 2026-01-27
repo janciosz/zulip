@@ -1,5 +1,6 @@
 from email.headerregistry import Address
-from enum import IntEnum
+from enum import Enum, IntEnum
+from types import UnionType
 from typing import TYPE_CHECKING, Optional, TypedDict
 from uuid import uuid4
 
@@ -27,7 +28,6 @@ if TYPE_CHECKING:
     # We use BaseBackend only for typing. Importing it otherwise causes circular dependency.
     from django.contrib.auth.backends import BaseBackend
 
-    from zerver.models import Stream
 
 SECONDS_PER_DAY = 86400
 
@@ -55,7 +55,7 @@ def clear_supported_auth_backends_cache() -> None:
 class RealmAuthenticationMethod(models.Model):
     """
     Tracks which authentication backends are enabled for a realm.
-    An enabled backend is represented in this table a row with appropriate
+    An enabled backend is represented in this table as a row with appropriate
     .realm value and .name matching the name of the target backend in the
     AUTH_BACKEND_NAME_MAP dict.
     """
@@ -99,6 +99,11 @@ class OrgTypeDict(TypedDict):
     onboarding_zulip_guide_url: str | None
 
 
+class VideoChatProviderDict(TypedDict):
+    name: str
+    id: int
+
+
 class CommonPolicyEnum(IntEnum):
     MEMBERS_ONLY = 1
     ADMINS_ONLY = 2
@@ -114,14 +119,6 @@ class CreateWebPublicStreamPolicyEnum(IntEnum):
     MODERATORS_ONLY = 4
     NOBODY = 6
     OWNERS_ONLY = 7
-
-
-class BotCreationPolicyEnum(IntEnum):
-    # This value is also being used in web/src/settings_bots.bot_creation_policy_values.
-    # On updating it here, update it there as well.
-    EVERYONE = 1
-    LIMIT_GENERIC_BOTS = 2
-    ADMINS_ONLY = 3
 
 
 class MoveMessagesBetweenStreamsPolicyEnum(IntEnum):
@@ -151,11 +148,24 @@ class DigestWeekdayEnum(IntEnum):
     SUNDAY = 6
 
 
-class Realm(models.Model):  # type: ignore[django-manager-missing] # django-stubs cannot resolve the custom CTEManager yet https://github.com/typeddjango/django-stubs/issues/1023
+class MessageEditHistoryVisibilityPolicyEnum(Enum):
+    # The case is used by Pydantic in the API
+    all = 1
+    moves = 2
+    none = 3
+
+
+class RealmTopicsPolicyEnum(Enum):
+    allow_empty_topic = 2
+    disable_empty_topic = 3
+
+
+class Realm(models.Model):
     MAX_REALM_NAME_LENGTH = 40
     MAX_REALM_DESCRIPTION_LENGTH = 1000
     MAX_REALM_SUBDOMAIN_LENGTH = 40
     MAX_REALM_REDIRECT_URL_LENGTH = 128
+    MAX_REALM_WELCOME_MESSAGE_CUSTOM_TEXT_LENGTH = 8000
 
     INVITES_STANDARD_REALM_DAILY_MAX = 3000
     MESSAGE_VISIBILITY_LIMITED = 10000
@@ -182,6 +192,7 @@ class Realm(models.Model):  # type: ignore[django-manager-missing] # django-stub
     # cease to be the case.
     push_notifications_enabled = models.BooleanField(default=False, db_index=True)
     push_notifications_enabled_end_timestamp = models.DateTimeField(default=None, null=True)
+    require_e2ee_push_notifications = models.BooleanField(default=False, db_default=False)
 
     date_created = models.DateTimeField(default=timezone_now)
     scheduled_deletion_date = models.DateTimeField(default=None, db_index=True, null=True)
@@ -216,15 +227,28 @@ class Realm(models.Model):  # type: ignore[django-manager-missing] # django-stub
     # Day of the week on which the digest is sent (default: Tuesday).
     digest_weekday = models.SmallIntegerField(default=1)
 
+    # Whether channel event messages are enabled in the organizaton.
+    send_channel_events_messages = models.BooleanField(default=False)
+
     send_welcome_emails = models.BooleanField(default=True)
     message_content_allowed_in_email_notifications = models.BooleanField(default=True)
 
-    mandatory_topics = models.BooleanField(default=False)
+    # Whether the organization's security policy allows owners to take
+    # actions like full data exports that grant access to all private
+    # content in this organization.
+    owner_full_content_access = models.BooleanField(default=False, db_default=False)
+
+    topics_policy = models.PositiveSmallIntegerField(
+        default=RealmTopicsPolicyEnum.allow_empty_topic.value
+    )
+    REALM_TOPICS_POLICY_TYPES = list(RealmTopicsPolicyEnum)
 
     require_unique_names = models.BooleanField(default=False)
     name_changes_disabled = models.BooleanField(default=False)
     email_changes_disabled = models.BooleanField(default=False)
     avatar_changes_disabled = models.BooleanField(default=False)
+
+    welcome_message_custom_text = models.TextField(default="")
 
     POLICY_MEMBERS_ONLY = 1
     POLICY_ADMINS_ONLY = 2
@@ -242,6 +266,15 @@ class Realm(models.Model):  # type: ignore[django-manager-missing] # django-stub
         SystemGroups.MEMBERS: POLICY_MEMBERS_ONLY,
         SystemGroups.EVERYONE: POLICY_EVERYONE,
         SystemGroups.NOBODY: POLICY_NOBODY,
+    }
+
+    SYSTEM_GROUPS_TO_WILDCARD_MENTION_POLICY_MAP = {
+        SystemGroups.EVERYONE: WildcardMentionPolicyEnum.EVERYONE,
+        SystemGroups.MEMBERS: WildcardMentionPolicyEnum.MEMBERS,
+        SystemGroups.FULL_MEMBERS: WildcardMentionPolicyEnum.FULL_MEMBERS,
+        SystemGroups.MODERATORS: WildcardMentionPolicyEnum.MODERATORS,
+        SystemGroups.ADMINISTRATORS: WildcardMentionPolicyEnum.ADMINS,
+        SystemGroups.NOBODY: WildcardMentionPolicyEnum.NOBODY,
     }
 
     COMMON_POLICY_TYPES = [field.value for field in CommonPolicyEnum]
@@ -296,6 +329,11 @@ class Realm(models.Model):  # type: ignore[django-manager-missing] # django-stub
         "UserGroup", on_delete=models.RESTRICT, related_name="+"
     )
 
+    # UserGroup whose members are allowed to summarize topics.
+    can_summarize_topics_group = models.ForeignKey(
+        "UserGroup", on_delete=models.RESTRICT, related_name="+"
+    )
+
     # UserGroup whose members are allowed to create invite link.
     create_multiuse_invite_group = models.ForeignKey(
         "UserGroup", on_delete=models.RESTRICT, related_name="+"
@@ -329,9 +367,9 @@ class Realm(models.Model):  # type: ignore[django-manager-missing] # django-stub
         "UserGroup", on_delete=models.RESTRICT, related_name="+"
     )
 
-    # Who in the organization is allowed to invite other users to streams.
-    invite_to_stream_policy = models.PositiveSmallIntegerField(
-        default=CommonPolicyEnum.MEMBERS_ONLY
+    # UserGroup which is allowed to add subscribers to channels.
+    can_add_subscribers_group = models.ForeignKey(
+        "UserGroup", on_delete=models.RESTRICT, related_name="+"
     )
 
     # UserGroup which is allowed to move messages between streams.
@@ -339,12 +377,41 @@ class Realm(models.Model):  # type: ignore[django-manager-missing] # django-stub
         "UserGroup", on_delete=models.RESTRICT, related_name="+"
     )
 
-    # Global policy for who is allowed to use wildcard mentions in
-    # streams with a large number of subscribers.  Anyone can use
-    # wildcard mentions in small streams regardless of this setting.
-    wildcard_mention_policy = models.PositiveSmallIntegerField(
-        default=WildcardMentionPolicyEnum.ADMINS,
+    # UserGroup which is allowed to resolve topics.
+    can_resolve_topics_group = models.ForeignKey(
+        "UserGroup", on_delete=models.RESTRICT, related_name="+"
     )
+
+    # UserGroup which is allowed to create bots.
+    can_create_bots_group = models.ForeignKey(
+        "UserGroup", on_delete=models.RESTRICT, related_name="+"
+    )
+
+    # UserGroup which is allowed to create incoming webhooks.
+    can_create_write_only_bots_group = models.ForeignKey(
+        "UserGroup", on_delete=models.RESTRICT, related_name="+"
+    )
+
+    # UserGroup which is allowed to manage plans and billing.
+    can_manage_billing_group = models.ForeignKey(
+        "UserGroup", on_delete=models.RESTRICT, related_name="+"
+    )
+
+    # UserGroup which is allowed to use wildcard mentions in large channels.
+    can_mention_many_users_group = models.ForeignKey(
+        "UserGroup", on_delete=models.RESTRICT, related_name="+"
+    )
+
+    # UserGroup which is allowed to set per-channel delete permissions setting.
+    can_set_delete_message_policy_group = models.ForeignKey(
+        "UserGroup", on_delete=models.RESTRICT, related_name="+"
+    )
+
+    # UserGroup which is allowed to set per-channel `topics_policy` setting.
+    can_set_topics_policy_group = models.ForeignKey(
+        "UserGroup", on_delete=models.RESTRICT, related_name="+"
+    )
+
     WILDCARD_MENTION_POLICY_TYPES = [field.value for field in WildcardMentionPolicyEnum]
 
     # Threshold in days for new users to create streams, and potentially take
@@ -370,7 +437,10 @@ class Realm(models.Model):  # type: ignore[django-manager-missing] # django-stub
     )
 
     # Whether users have access to message edit history
-    allow_edit_history = models.BooleanField(default=True)
+    message_edit_history_visibility_policy = models.PositiveSmallIntegerField(
+        default=MessageEditHistoryVisibilityPolicyEnum.all.value,
+    )
+    MESSAGE_EDIT_HISTORY_VISIBILITY_POLICY_TYPES = list(MessageEditHistoryVisibilityPolicyEnum)
 
     # Defaults for new users
     default_language = models.CharField(default="en", max_length=MAX_LANGUAGE_ID_LENGTH)
@@ -379,6 +449,14 @@ class Realm(models.Model):  # type: ignore[django-manager-missing] # django-stub
     ZULIP_SANDBOX_CHANNEL_NAME = gettext_lazy("sandbox")
     DEFAULT_NOTIFICATION_STREAM_NAME = gettext_lazy("general")
     STREAM_EVENTS_NOTIFICATION_TOPIC_NAME = gettext_lazy("channel events")
+    REPORT_MESSAGE_REASONS = {
+        "spam": gettext_lazy("Spam"),
+        "harassment": gettext_lazy("Harassment"),
+        "inappropriate": gettext_lazy("Inappropriate content"),
+        "norms": gettext_lazy("Violates community norms"),
+        "other": gettext_lazy("Other reason"),
+    }
+    MAX_REPORT_MESSAGE_EXPLANATION_LENGTH = 1000
     moderation_request_channel = models.ForeignKey(
         "Stream",
         related_name="+",
@@ -548,14 +626,11 @@ class Realm(models.Model):  # type: ignore[django-manager-missing] # django-stub
     }
     plan_type = models.PositiveSmallIntegerField(default=PLAN_TYPE_SELF_HOSTED)
 
-    bot_creation_policy = models.PositiveSmallIntegerField(default=BotCreationPolicyEnum.EVERYONE)
-    BOT_CREATION_POLICY_TYPES = [field.value for field in BotCreationPolicyEnum]
-
     UPLOAD_QUOTA_LIMITED = 5
     UPLOAD_QUOTA_STANDARD_FREE = 50
     custom_upload_quota_gb = models.IntegerField(null=True)
 
-    VIDEO_CHAT_PROVIDERS = {
+    VIDEO_CHAT_PROVIDERS: dict[str, VideoChatProviderDict] = {
         "disabled": {
             "name": "None",
             "id": 0,
@@ -565,18 +640,21 @@ class Realm(models.Model):  # type: ignore[django-manager-missing] # django-stub
             "id": 1,
         },
         # ID 2 was used for the now-deleted Google Hangouts.
-        # ID 3 reserved for optional Zoom, see below.
-        # ID 4 reserved for optional BigBlueButton, see below.
-    }
-
-    if settings.VIDEO_ZOOM_CLIENT_ID is not None and settings.VIDEO_ZOOM_CLIENT_SECRET is not None:
-        VIDEO_CHAT_PROVIDERS["zoom"] = {
+        "zoom": {
             "name": "Zoom",
             "id": 3,
-        }
-
-    if settings.BIG_BLUE_BUTTON_SECRET is not None and settings.BIG_BLUE_BUTTON_URL is not None:
-        VIDEO_CHAT_PROVIDERS["big_blue_button"] = {"name": "BigBlueButton", "id": 4}
+        },
+        "big_blue_button": {
+            "name": "BigBlueButton",
+            "id": 4,
+        },
+        # Only one of the Zoom integrations can be enabled on the server
+        # at a time, so we use the same name for both.
+        "zoom_server_to_server": {
+            "name": "Zoom",
+            "id": 5,
+        },
+    }
 
     video_chat_provider = models.PositiveSmallIntegerField(
         default=VIDEO_CHAT_PROVIDERS["jitsi_meet"]["id"]
@@ -585,37 +663,36 @@ class Realm(models.Model):  # type: ignore[django-manager-missing] # django-stub
     JITSI_SERVER_SPECIAL_VALUES_MAP = {"default": None}
     jitsi_server_url = models.URLField(null=True, default=None)
 
-    # Please access this via get_giphy_rating_options.
-    GIPHY_RATING_OPTIONS = {
+    # Please access this via get_gif_rating_options.
+    GIF_RATING_OPTIONS = {
         "disabled": {
-            "name": gettext_lazy("GIPHY integration disabled"),
+            "name": gettext_lazy("GIF integration disabled"),
             "id": 0,
         },
-        # Source: https://github.com/Giphy/giphy-js/blob/master/packages/fetch-api/README.md#shared-options
-        "y": {
-            "name": gettext_lazy("Allow GIFs rated Y (Very young audience)"),
-            "id": 1,
-        },
+        # Source:
+        # 1. https://developers.giphy.com/docs/optional-settings/#rating
+        # 2. https://developers.google.com/tenor/guides/content-filtering#ContentFilter-options
         "g": {
             "name": gettext_lazy("Allow GIFs rated G (General audience)"),
-            "id": 2,
+            "id": 1,
         },
         "pg": {
             "name": gettext_lazy("Allow GIFs rated PG (Parental guidance)"),
-            "id": 3,
+            "id": 2,
         },
         "pg-13": {
             "name": gettext_lazy("Allow GIFs rated PG-13 (Parental guidance - under 13)"),
-            "id": 4,
+            "id": 3,
         },
         "r": {
             "name": gettext_lazy("Allow GIFs rated R (Restricted)"),
-            "id": 5,
+            "id": 4,
         },
     }
 
-    # maximum rating of the GIFs that will be retrieved from GIPHY
-    giphy_rating = models.PositiveSmallIntegerField(default=GIPHY_RATING_OPTIONS["g"]["id"])
+    # maximum rating of the GIFs that will be retrieved.
+    # This is now used as a common rating for both Tenor and GIPHY.
+    giphy_rating = models.PositiveSmallIntegerField(default=GIF_RATING_OPTIONS["g"]["id"])
 
     default_code_block_language = models.TextField(default="")
 
@@ -626,12 +703,13 @@ class Realm(models.Model):  # type: ignore[django-manager-missing] # django-stub
     # Whether clients should display "(guest)" after names of guest users.
     enable_guest_user_indicator = models.BooleanField(default=True)
 
+    # Whether to notify client when a DM has a guest recipient.
+    enable_guest_user_dm_warning = models.BooleanField(default=True)
+
     # Define the types of the various automatically managed properties
-    property_types: dict[str, type | tuple[type, ...]] = dict(
-        allow_edit_history=bool,
+    property_types: dict[str, type | UnionType] = dict(
         allow_message_editing=bool,
         avatar_changes_disabled=bool,
-        bot_creation_policy=int,
         default_code_block_language=str,
         default_language=str,
         description=str,
@@ -640,6 +718,7 @@ class Realm(models.Model):  # type: ignore[django-manager-missing] # django-stub
         disallow_disposable_email_addresses=bool,
         email_changes_disabled=bool,
         emails_restricted_to_domains=bool,
+        enable_guest_user_dm_warning=bool,
         enable_guest_user_indicator=bool,
         enable_read_receipts=bool,
         enable_spectator_access=bool,
@@ -647,73 +726,75 @@ class Realm(models.Model):  # type: ignore[django-manager-missing] # django-stub
         inline_image_preview=bool,
         inline_url_embed_preview=bool,
         invite_required=bool,
-        invite_to_stream_policy=int,
-        jitsi_server_url=(str, type(None)),
-        mandatory_topics=bool,
+        jitsi_server_url=str | None,
         message_content_allowed_in_email_notifications=bool,
-        message_content_edit_limit_seconds=(int, type(None)),
-        message_content_delete_limit_seconds=(int, type(None)),
-        move_messages_between_streams_limit_seconds=(int, type(None)),
-        move_messages_within_stream_limit_seconds=(int, type(None)),
-        message_retention_days=(int, type(None)),
+        message_content_edit_limit_seconds=int | None,
+        message_content_delete_limit_seconds=int | None,
+        message_edit_history_visibility_policy=MessageEditHistoryVisibilityPolicyEnum,
+        move_messages_between_streams_limit_seconds=int | None,
+        move_messages_within_stream_limit_seconds=int | None,
+        message_retention_days=int,
         name=str,
         name_changes_disabled=bool,
         push_notifications_enabled=bool,
+        require_e2ee_push_notifications=bool,
         require_unique_names=bool,
+        send_channel_events_messages=bool,
         send_welcome_emails=bool,
+        topics_policy=RealmTopicsPolicyEnum,
         video_chat_provider=int,
         waiting_period_threshold=int,
         want_advertise_in_communities_directory=bool,
-        wildcard_mention_policy=int,
+        welcome_message_custom_text=str,
     )
 
     REALM_PERMISSION_GROUP_SETTINGS: dict[str, GroupPermissionSetting] = dict(
         create_multiuse_invite_group=GroupPermissionSetting(
-            require_system_group=False,
-            allow_internet_group=False,
             allow_nobody_group=True,
             allow_everyone_group=False,
             default_group_name=SystemGroups.ADMINISTRATORS,
         ),
         can_access_all_users_group=GroupPermissionSetting(
             require_system_group=True,
-            allow_internet_group=False,
             allow_nobody_group=False,
             allow_everyone_group=True,
             default_group_name=SystemGroups.EVERYONE,
+            # Note that user_can_access_all_other_users in the web
+            # app is relying on members always have access.
             allowed_system_groups=[SystemGroups.EVERYONE, SystemGroups.MEMBERS],
         ),
+        can_add_subscribers_group=GroupPermissionSetting(
+            allow_nobody_group=True,
+            allow_everyone_group=False,
+            default_group_name=SystemGroups.MEMBERS,
+        ),
         can_add_custom_emoji_group=GroupPermissionSetting(
-            require_system_group=False,
-            allow_internet_group=False,
+            allow_nobody_group=True,
+            allow_everyone_group=False,
+            default_group_name=SystemGroups.MEMBERS,
+        ),
+        can_create_bots_group=GroupPermissionSetting(
             allow_nobody_group=True,
             allow_everyone_group=False,
             default_group_name=SystemGroups.MEMBERS,
         ),
         can_create_groups=GroupPermissionSetting(
-            require_system_group=False,
-            allow_internet_group=False,
             allow_nobody_group=True,
             allow_everyone_group=False,
             default_group_name=SystemGroups.MEMBERS,
         ),
         can_create_public_channel_group=GroupPermissionSetting(
-            require_system_group=False,
-            allow_internet_group=False,
             allow_nobody_group=True,
             allow_everyone_group=False,
             default_group_name=SystemGroups.MEMBERS,
         ),
         can_create_private_channel_group=GroupPermissionSetting(
-            require_system_group=False,
-            allow_internet_group=False,
             allow_nobody_group=True,
             allow_everyone_group=False,
             default_group_name=SystemGroups.MEMBERS,
         ),
         can_create_web_public_channel_group=GroupPermissionSetting(
             require_system_group=True,
-            allow_internet_group=False,
             allow_nobody_group=True,
             allow_everyone_group=False,
             default_group_name=SystemGroups.OWNERS,
@@ -724,58 +805,77 @@ class Realm(models.Model):  # type: ignore[django-manager-missing] # django-stub
                 SystemGroups.NOBODY,
             ],
         ),
+        can_create_write_only_bots_group=GroupPermissionSetting(
+            allow_nobody_group=True,
+            allow_everyone_group=False,
+            default_group_name=SystemGroups.MEMBERS,
+        ),
         can_delete_any_message_group=GroupPermissionSetting(
-            require_system_group=False,
-            allow_internet_group=False,
             allow_nobody_group=True,
             allow_everyone_group=False,
             default_group_name=SystemGroups.ADMINISTRATORS,
         ),
         can_delete_own_message_group=GroupPermissionSetting(
-            require_system_group=False,
-            allow_internet_group=False,
             allow_nobody_group=True,
             allow_everyone_group=True,
             default_group_name=SystemGroups.EVERYONE,
         ),
         can_invite_users_group=GroupPermissionSetting(
-            require_system_group=False,
-            allow_internet_group=False,
             allow_nobody_group=True,
             allow_everyone_group=False,
             default_group_name=SystemGroups.MEMBERS,
         ),
         can_manage_all_groups=GroupPermissionSetting(
-            require_system_group=False,
-            allow_internet_group=False,
             allow_nobody_group=False,
             allow_everyone_group=False,
             default_group_name=SystemGroups.OWNERS,
         ),
+        can_manage_billing_group=GroupPermissionSetting(
+            allow_nobody_group=False,
+            allow_everyone_group=False,
+            default_group_name=SystemGroups.ADMINISTRATORS,
+        ),
+        can_mention_many_users_group=GroupPermissionSetting(
+            allow_nobody_group=True,
+            allow_everyone_group=True,
+            default_group_name=SystemGroups.ADMINISTRATORS,
+        ),
         can_move_messages_between_channels_group=GroupPermissionSetting(
-            require_system_group=False,
-            allow_internet_group=False,
             allow_nobody_group=True,
             allow_everyone_group=False,
             default_group_name=SystemGroups.MEMBERS,
         ),
         can_move_messages_between_topics_group=GroupPermissionSetting(
-            require_system_group=False,
-            allow_internet_group=False,
+            allow_nobody_group=True,
+            allow_everyone_group=True,
+            default_group_name=SystemGroups.EVERYONE,
+        ),
+        can_resolve_topics_group=GroupPermissionSetting(
+            allow_nobody_group=True,
+            allow_everyone_group=True,
+            default_group_name=SystemGroups.EVERYONE,
+        ),
+        can_set_delete_message_policy_group=GroupPermissionSetting(
+            allow_nobody_group=True,
+            allow_everyone_group=False,
+            default_group_name=SystemGroups.MODERATORS,
+        ),
+        can_set_topics_policy_group=GroupPermissionSetting(
+            allow_nobody_group=True,
+            allow_everyone_group=True,
+            default_group_name=SystemGroups.MEMBERS,
+        ),
+        can_summarize_topics_group=GroupPermissionSetting(
             allow_nobody_group=True,
             allow_everyone_group=True,
             default_group_name=SystemGroups.EVERYONE,
         ),
         direct_message_initiator_group=GroupPermissionSetting(
-            require_system_group=False,
-            allow_internet_group=False,
             allow_nobody_group=True,
             allow_everyone_group=True,
             default_group_name=SystemGroups.EVERYONE,
         ),
         direct_message_permission_group=GroupPermissionSetting(
-            require_system_group=False,
-            allow_internet_group=False,
             allow_nobody_group=True,
             allow_everyone_group=True,
             default_group_name=SystemGroups.EVERYONE,
@@ -823,12 +923,12 @@ class Realm(models.Model):  # type: ignore[django-manager-missing] # django-stub
     def __str__(self) -> str:
         return f"{self.string_id} {self.id}"
 
-    def get_giphy_rating_options(self) -> dict[str, dict[str, object]]:
-        """Wrapper function for GIPHY_RATING_OPTIONS that ensures evaluation
+    def get_gif_rating_options(self) -> dict[str, dict[str, object]]:
+        """Wrapper function for GIF_RATING_OPTIONS that ensures evaluation
         of the lazily evaluated `name` field without modifying the original."""
         return {
             rating_type: {"name": str(rating["name"]), "id": rating["id"]}
-            for rating_type, rating in self.GIPHY_RATING_OPTIONS.items()
+            for rating_type, rating in self.GIF_RATING_OPTIONS.items()
         }
 
     def authentication_methods_dict(self) -> dict[str, bool]:
@@ -889,12 +989,17 @@ class Realm(models.Model):  # type: ignore[django-manager-missing] # django-stub
             role__in=roles,
         )
 
-    def get_human_billing_admin_and_realm_owner_users(self) -> QuerySet["UserProfile"]:
+    def get_human_users_with_billing_access_and_realm_owner_users(self) -> QuerySet["UserProfile"]:
+        from zerver.lib.user_groups import get_recursive_group_members
+
+        can_manage_billing_group_members = get_recursive_group_members(
+            self.can_manage_billing_group.id
+        )
+
         return UserProfile.objects.filter(
-            Q(role=UserProfile.ROLE_REALM_OWNER) | Q(is_billing_admin=True),
-            realm=self,
+            Q(id__in=can_manage_billing_group_members)
+            | Q(role=UserProfile.ROLE_REALM_OWNER, realm=self, is_active=True),
             is_bot=False,
-            is_active=True,
         )
 
     def get_active_users(self) -> QuerySet["UserProfile"]:
@@ -911,6 +1016,23 @@ class Realm(models.Model):  # type: ignore[django-manager-missing] # django-stub
         """
         return UserProfile.objects.filter(realm=self, is_bot=False).order_by("id").first()
 
+    def get_billing_admins_delivery_email(self) -> str:
+        from zerver.lib.user_groups import get_recursive_group_members
+
+        can_manage_billing_group_members = get_recursive_group_members(
+            self.can_manage_billing_group_id
+        )
+
+        billing_admins = (
+            UserProfile.objects.filter(
+                id__in=can_manage_billing_group_members,
+                is_bot=False,
+            )
+            .order_by("delivery_email")
+            .values_list("delivery_email", flat=True)
+        )
+        return ", ".join(billing_admins)
+
     def get_human_owner_users(self) -> QuerySet["UserProfile"]:
         return UserProfile.objects.filter(
             realm=self, is_bot=False, role=UserProfile.ROLE_REALM_OWNER, is_active=True
@@ -919,37 +1041,27 @@ class Realm(models.Model):  # type: ignore[django-manager-missing] # django-stub
     def get_bot_domain(self) -> str:
         return get_fake_email_domain(self.host)
 
-    def get_moderation_request_channel(self) -> Optional["Stream"]:
-        if (
-            self.moderation_request_channel is not None
-            and not self.moderation_request_channel.deactivated
-        ):
-            return self.moderation_request_channel
-        return None
-
-    def get_new_stream_announcements_stream(self) -> Optional["Stream"]:
-        if (
-            self.new_stream_announcements_stream is not None
-            and not self.new_stream_announcements_stream.deactivated
-        ):
-            return self.new_stream_announcements_stream
-        return None
-
-    def get_signup_announcements_stream(self) -> Optional["Stream"]:
-        if (
-            self.signup_announcements_stream is not None
-            and not self.signup_announcements_stream.deactivated
-        ):
-            return self.signup_announcements_stream
-        return None
-
-    def get_zulip_update_announcements_stream(self) -> Optional["Stream"]:
-        if (
-            self.zulip_update_announcements_stream is not None
-            and not self.zulip_update_announcements_stream.deactivated
-        ):
-            return self.zulip_update_announcements_stream
-        return None
+    def get_enabled_video_chat_providers(self) -> dict[str, VideoChatProviderDict]:
+        enabled_video_chat_providers: dict[str, VideoChatProviderDict] = {}
+        for provider in self.VIDEO_CHAT_PROVIDERS:
+            if provider == "zoom" and (
+                settings.VIDEO_ZOOM_SERVER_TO_SERVER_ACCOUNT_ID is not None
+                or settings.VIDEO_ZOOM_CLIENT_ID is None
+                or settings.VIDEO_ZOOM_CLIENT_SECRET is None
+            ):
+                continue
+            if provider == "big_blue_button" and (
+                settings.BIG_BLUE_BUTTON_SECRET is None or settings.BIG_BLUE_BUTTON_URL is None
+            ):
+                continue
+            if provider == "zoom_server_to_server" and (
+                settings.VIDEO_ZOOM_SERVER_TO_SERVER_ACCOUNT_ID is None
+                or settings.VIDEO_ZOOM_CLIENT_ID is None
+                or settings.VIDEO_ZOOM_CLIENT_SECRET is None
+            ):
+                continue
+            enabled_video_chat_providers[provider] = self.VIDEO_CHAT_PROVIDERS[provider]
+        return enabled_video_chat_providers
 
     @property
     def max_invites(self) -> int:
@@ -978,12 +1090,20 @@ class Realm(models.Model):  # type: ignore[django-manager-missing] # django-stub
             return Realm.UPLOAD_QUOTA_LIMITED
         elif plan_type == Realm.PLAN_TYPE_STANDARD_FREE:
             return Realm.UPLOAD_QUOTA_STANDARD_FREE
-        elif plan_type in [Realm.PLAN_TYPE_STANDARD, Realm.PLAN_TYPE_PLUS]:
+        elif plan_type == Realm.PLAN_TYPE_STANDARD:
             from corporate.lib.stripe import get_cached_seat_count
 
             # Paying customers with few users should get a reasonable minimum quota.
             return max(
-                get_cached_seat_count(self) * settings.UPLOAD_QUOTA_PER_USER_GB,
+                get_cached_seat_count(self) * settings.UPLOAD_QUOTA_PER_USER_GB_FOR_STANDARD,
+                Realm.UPLOAD_QUOTA_STANDARD_FREE,
+            )
+        elif plan_type == Realm.PLAN_TYPE_PLUS:
+            from corporate.lib.stripe import get_cached_seat_count
+
+            # Paying customers with few users should get a reasonable minimum quota.
+            return max(
+                get_cached_seat_count(self) * settings.UPLOAD_QUOTA_PER_USER_GB_FOR_PLUS,
                 Realm.UPLOAD_QUOTA_STANDARD_FREE,
             )
         else:
@@ -1078,16 +1198,8 @@ class Realm(models.Model):  # type: ignore[django-manager-missing] # django-stub
         return settings.REALM_HOSTS.get(subdomain, default_host)
 
     @property
-    def is_zephyr_mirror_realm(self) -> bool:
-        return self.string_id == "zephyr"
-
-    @property
-    def webathena_enabled(self) -> bool:
-        return self.is_zephyr_mirror_realm
-
-    @property
     def presence_disabled(self) -> bool:
-        return self.is_zephyr_mirror_realm
+        return False
 
     def web_public_streams_enabled(self) -> bool:
         if not settings.WEB_PUBLIC_STREAMS_ENABLED:
@@ -1156,51 +1268,6 @@ def get_realm_by_id(realm_id: int) -> Realm:
     return Realm.objects.get(id=realm_id)
 
 
-def get_realm_with_settings(realm_id: int) -> Realm:
-    # Prefetch the following settings:
-    # This also prefetches can_access_all_users_group setting,
-    # even when it cannot be set to anonymous groups because
-    # the setting is used when fetching users in the realm.
-    # * All the settings that can be set to anonymous groups.
-    # * Announcements streams.
-    return Realm.objects.select_related(
-        "moderation_request_channel",
-        "create_multiuse_invite_group",
-        "create_multiuse_invite_group__named_user_group",
-        "can_access_all_users_group",
-        "can_access_all_users_group__named_user_group",
-        "can_add_custom_emoji_group",
-        "can_add_custom_emoji_group__named_user_group",
-        "can_create_groups",
-        "can_create_groups__named_user_group",
-        "can_create_public_channel_group",
-        "can_create_public_channel_group__named_user_group",
-        "can_create_private_channel_group",
-        "can_create_private_channel_group__named_user_group",
-        "can_create_web_public_channel_group",
-        "can_create_web_public_channel_group__named_user_group",
-        "can_delete_any_message_group",
-        "can_delete_any_message_group__named_user_group",
-        "can_delete_own_message_group",
-        "can_delete_own_message_group__named_user_group",
-        "can_invite_users_group",
-        "can_invite_users_group__named_user_group",
-        "can_manage_all_groups",
-        "can_manage_all_groups__named_user_group",
-        "can_move_messages_between_channels_group",
-        "can_move_messages_between_channels_group__named_user_group",
-        "can_move_messages_between_topics_group",
-        "can_move_messages_between_topics_group__named_user_group",
-        "direct_message_initiator_group",
-        "direct_message_initiator_group__named_user_group",
-        "direct_message_permission_group",
-        "direct_message_permission_group__named_user_group",
-        "new_stream_announcements_stream",
-        "signup_announcements_stream",
-        "zulip_update_announcements_stream",
-    ).get(id=realm_id)
-
-
 def require_unique_names(realm: Realm | None) -> bool:
     if realm is None:
         # realm is None when a new realm is being created.
@@ -1230,15 +1297,20 @@ def get_corresponding_policy_value_for_group_setting(
     realm: Realm,
     group_setting_name: str,
     valid_policy_enums: list[int],
+    system_groups_name_dict: dict[int, str],
 ) -> int:
-    setting_group = getattr(realm, group_setting_name)
-    if (
-        hasattr(setting_group, "named_user_group")
-        and setting_group.named_user_group.is_system_group
-    ):
-        enum_policy_value = Realm.SYSTEM_GROUPS_ENUM_MAP[setting_group.named_user_group.name]
-        if enum_policy_value in valid_policy_enums:
-            return enum_policy_value
+    setting_group_id = getattr(realm, group_setting_name + "_id")
+    if setting_group_id in system_groups_name_dict:
+        system_group_name = system_groups_name_dict[setting_group_id]
+        if group_setting_name == "can_mention_many_users_group":
+            # Wildcard mention policy uses different set of enums than other policy settings.
+            return Realm.SYSTEM_GROUPS_TO_WILDCARD_MENTION_POLICY_MAP.get(
+                system_group_name, WildcardMentionPolicyEnum.EVERYONE
+            )
+        else:
+            enum_policy_value = Realm.SYSTEM_GROUPS_ENUM_MAP[system_group_name]
+            if enum_policy_value in valid_policy_enums:
+                return enum_policy_value
 
     # If the group setting is not set to one of the role based groups
     # that the previous enum setting allowed, then just return the
@@ -1248,6 +1320,9 @@ def get_corresponding_policy_value_for_group_setting(
         # moderators group.
         assert valid_policy_enums == Realm.CREATE_WEB_PUBLIC_STREAM_POLICY_TYPES
         return Realm.POLICY_MODERATORS_ONLY
+
+    if group_setting_name == "can_mention_many_users_group":
+        return WildcardMentionPolicyEnum.EVERYONE
 
     assert valid_policy_enums == Realm.COMMON_POLICY_TYPES
     return Realm.POLICY_MEMBERS_ONLY

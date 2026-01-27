@@ -5,12 +5,12 @@ const assert = require("node:assert/strict");
 const {zrequire} = require("./lib/namespace.cjs");
 const {run_test} = require("./lib/test.cjs");
 
-const typeahead = zrequire("../shared/src/typeahead");
+const typeahead = zrequire("typeahead");
 
 const unicode_emojis = [
     ["1f43c", "panda_face"],
-    ["1f642", "smile"],
-    ["1f604", "big_smile"],
+    ["1f642", "slight_smile"],
+    ["1f604", "smile"],
     ["1f368", "ice_cream"],
     ["1f366", "soft_ice_cream"],
     ["1f6a5", "horizontal_traffic_light"],
@@ -36,7 +36,7 @@ function emoji_matches(query) {
 
 function assert_emoji_matches(query, expected) {
     const names = emoji_matches(query).map((emoji) => emoji.emoji_name);
-    assert.deepEqual(names.sort(), expected);
+    assert.deepEqual(names.toSorted(), expected);
 }
 
 run_test("get_emoji_matcher: nonmatches", () => {
@@ -46,8 +46,8 @@ run_test("get_emoji_matcher: nonmatches", () => {
 
 run_test("get_emoji_matcher: misc matches", () => {
     assert_emoji_matches("da", ["panda_face", "tada"]);
-    assert_emoji_matches("smil", ["big_smile", "smile"]);
-    assert_emoji_matches("mile", ["big_smile", "smile"]);
+    assert_emoji_matches("smil", ["slight_smile", "smile"]);
+    assert_emoji_matches("mile", ["slight_smile", "smile"]);
     assert_emoji_matches("japanese_post_", ["japanese_post_office"]);
 });
 
@@ -181,6 +181,7 @@ run_test("sort_emojis: th", () => {
         {emoji_name: "thumbs_down", is_realm_emoji: true},
         {emoji_name: "thumbs_up", is_realm_emoji: false, emoji_code: "1f44d"},
     ];
+    typeahead.set_frequently_used_emojis(typeahead.get_popular_emojis());
     assert.deepEqual(sort_emojis(emoji_list, "th"), [
         "thumbs_up",
         "thermometer",
@@ -191,28 +192,20 @@ run_test("sort_emojis: th", () => {
 
 run_test("sort_emojis: sm", () => {
     const emoji_list = [
-        {emoji_name: "big_smile", is_realm_emoji: true},
+        {emoji_name: "smile", is_realm_emoji: true},
         {emoji_name: "slight_smile", is_realm_emoji: false, emoji_code: "1f642"},
         {emoji_name: "small_airplane", is_realm_emoji: true},
     ];
-    assert.deepEqual(sort_emojis(emoji_list, "sm"), [
-        "slight_smile",
-        "small_airplane",
-        "big_smile",
-    ]);
+    assert.deepEqual(sort_emojis(emoji_list, "sm"), ["slight_smile", "smile", "small_airplane"]);
 });
 
 run_test("sort_emojis: SM", () => {
     const emoji_list = [
-        {emoji_name: "big_smile", is_realm_emoji: true},
+        {emoji_name: "smile", is_realm_emoji: true},
         {emoji_name: "slight_smile", is_realm_emoji: false, emoji_code: "1f642"},
         {emoji_name: "small_airplane", is_realm_emoji: true},
     ];
-    assert.deepEqual(sort_emojis(emoji_list, "SM"), [
-        "slight_smile",
-        "small_airplane",
-        "big_smile",
-    ]);
+    assert.deepEqual(sort_emojis(emoji_list, "SM"), ["slight_smile", "smile", "small_airplane"]);
 });
 
 run_test("sort_emojis: prefix before midphrase, with underscore (traffic_li)", () => {

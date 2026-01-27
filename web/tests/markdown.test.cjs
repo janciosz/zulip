@@ -6,6 +6,7 @@ const katex = require("katex");
 
 const markdown_test_cases = require("../../zerver/tests/fixtures/markdown_test_cases.json");
 
+const {make_realm} = require("./lib/example_realm.cjs");
 const markdown_assert = require("./lib/markdown_assert.cjs");
 const {mock_esm, set_global, zrequire} = require("./lib/namespace.cjs");
 const {run_test} = require("./lib/test.cjs");
@@ -50,7 +51,7 @@ mock_esm("../src/settings_data", {
 const emoji = zrequire("emoji");
 const emoji_codes = zrequire("../../static/generated/emoji/emoji_codes.json");
 const linkifiers = zrequire("linkifiers");
-const fenced_code = zrequire("../shared/src/fenced_code");
+const fenced_code = zrequire("fenced_code");
 const markdown_config = zrequire("markdown_config");
 const markdown = zrequire("markdown");
 const people = zrequire("people");
@@ -58,10 +59,14 @@ const pygments_data = zrequire("pygments_data");
 const {set_realm} = zrequire("state_data");
 const stream_data = zrequire("stream_data");
 const user_groups = zrequire("user_groups");
+const settings_config = zrequire("settings_config");
 const {initialize_user_settings} = zrequire("user_settings");
 
-set_realm({});
-const user_settings = {};
+const REALM_EMPTY_TOPIC_DISPLAY_NAME = "general chat";
+set_realm(make_realm({realm_empty_topic_display_name: REALM_EMPTY_TOPIC_DISPLAY_NAME}));
+const user_settings = {
+    web_channel_default_view: settings_config.web_channel_default_view_values.channel_feed.code,
+};
 initialize_user_settings({user_settings});
 
 const emoji_params = {
@@ -201,13 +206,13 @@ const amp_stream = {
     stream_id: 5,
     is_muted: false,
 };
-stream_data.add_sub(denmark);
-stream_data.add_sub(social);
-stream_data.add_sub(edgecase_stream);
-stream_data.add_sub(edgecase_stream_2);
+stream_data.add_sub_for_tests(denmark);
+stream_data.add_sub_for_tests(social);
+stream_data.add_sub_for_tests(edgecase_stream);
+stream_data.add_sub_for_tests(edgecase_stream_2);
 // Note: edgecase_stream cannot be mentioned because it is caught by
 // streamTopicHandler and it would be parsed as edgecase_stream_2.
-stream_data.add_sub(amp_stream);
+stream_data.add_sub_for_tests(amp_stream);
 
 markdown.initialize(markdown_config.get_helpers());
 linkifiers.initialize(example_realm_linkifiers);
@@ -409,21 +414,25 @@ test("marked", ({override}) => {
         {
             input: "This is a #**Denmark>some topic** stream_topic link",
             expected:
-                '<p>This is a <a class="stream-topic" data-stream-id="1" href="/#narrow/channel/1-Denmark/topic/some.20topic">#Denmark &gt; some topic</a> stream_topic link</p>',
+                '<p>This is a <a class="stream-topic" data-stream-id="1" href="#narrow/channel/1-Denmark/topic/some.20topic">#Denmark &gt; some topic</a> stream_topic link</p>',
+        },
+        {
+            input: "This is a #**Denmark>** stream_topic link with empty string topic.",
+            expected: `<p>This is a <a class="stream-topic" data-stream-id="1" href="#narrow/channel/1-Denmark/topic/">#Denmark &gt; <span class="empty-topic-display">translated: ${REALM_EMPTY_TOPIC_DISPLAY_NAME}</span></a> stream_topic link with empty string topic.</p>`,
         },
         {
             input: "This has two links: #**Denmark>some topic** and #**social>other topic**.",
             expected:
-                '<p>This has two links: <a class="stream-topic" data-stream-id="1" href="/#narrow/channel/1-Denmark/topic/some.20topic">#Denmark &gt; some topic</a> and <a class="stream-topic" data-stream-id="2" href="/#narrow/channel/2-social/topic/other.20topic">#social &gt; other topic</a>.</p>',
-        },
-        {
-            input: "This is not a #**Denmark>** stream_topic link",
-            expected: "<p>This is not a #**Denmark&gt;** stream_topic link</p>",
+                '<p>This has two links: <a class="stream-topic" data-stream-id="1" href="#narrow/channel/1-Denmark/topic/some.20topic">#Denmark &gt; some topic</a> and <a class="stream-topic" data-stream-id="2" href="#narrow/channel/2-social/topic/other.20topic">#social &gt; other topic</a>.</p>',
         },
         {
             input: "Look at #**Denmark>message_link@100**",
             expected:
-                '<p>Look at <a class="message-link" href="/#narrow/channel/1-Denmark/topic/message_link/near/100">#Denmark &gt; message_link @ 💬</a></p>',
+                '<p>Look at <a class="message-link" href="#narrow/channel/1-Denmark/topic/message_link/near/100">#Denmark &gt; message_link @ 💬</a></p>',
+        },
+        {
+            input: "Look at #**Denmark>@100**",
+            expected: `<p>Look at <a class="message-link" href="#narrow/channel/1-Denmark/topic//near/100">#Denmark &gt; <span class="empty-topic-display">translated: ${REALM_EMPTY_TOPIC_DISPLAY_NAME}</span> @ 💬</a></p>`,
         },
         {
             input: "Look at #**Unknown>message_link@100**",
@@ -593,7 +602,7 @@ test("marked", ({override}) => {
         {
             input: ":)",
             expected:
-                '<p><span aria-label="smile" class="emoji emoji-1f642" role="img" title="smile">:smile:</span></p>',
+                '<p><span aria-label="slight smile" class="emoji emoji-1f642" role="img" title="slight smile">:slight_smile:</span></p>',
             translate_emoticons: true,
         },
         // Test HTML escaping in custom Zulip rules
@@ -633,7 +642,7 @@ test("marked", ({override}) => {
         {
             input: "#**Bobby <h1>Tables</h1>**",
             expected:
-                '<p><a class="stream-topic" data-stream-id="4" href="/#narrow/channel/4-Bobby-.3Ch1/topic/Tables.3C.2Fh1.3E">#Bobby &lt;h1 &gt; Tables&lt;/h1&gt;</a></p>',
+                '<p><a class="stream-topic" data-stream-id="4" href="#narrow/channel/4-Bobby-.3Ch1/topic/Tables.3C.2Fh1.3E">#Bobby &lt;h1 &gt; Tables&lt;/h1&gt;</a></p>',
         },
         {
             input: "#**& &amp; &amp;amp;**",
@@ -643,7 +652,7 @@ test("marked", ({override}) => {
         {
             input: "#**& &amp; &amp;amp;>& &amp; &amp;amp;**",
             expected:
-                '<p><a class="stream-topic" data-stream-id="5" href="/#narrow/channel/5-.26-.26-.26amp.3B/topic/.26.20.26.20.26amp.3B">#&amp; &amp; &amp;amp; &gt; &amp; &amp; &amp;amp;</a></p>',
+                '<p><a class="stream-topic" data-stream-id="5" href="#narrow/channel/5-.26-.26-.26amp.3B/topic/.26.20.26.20.26amp.3B">#&amp; &amp; &amp;amp; &gt; &amp; &amp; &amp;amp;</a></p>',
         },
     ];
 
@@ -985,7 +994,7 @@ test("translate_emoticons_to_names", () => {
 
     // Simple test
     const test_text = "Testing :)";
-    const expected = "Testing :smile:";
+    const expected = "Testing :slight_smile:";
     const result = translate_emoticons_to_names(test_text);
     assert.equal(result, expected);
 

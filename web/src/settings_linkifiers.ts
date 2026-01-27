@@ -1,7 +1,7 @@
 import $ from "jquery";
 import assert from "minimalistic-assert";
 import SortableJS from "sortablejs";
-import {z} from "zod";
+import * as z from "zod/mini";
 
 import render_confirm_delete_linkifier from "../templates/confirm_dialog/confirm_delete_linkifier.hbs";
 import render_admin_linkifier_edit_form from "../templates/settings/admin_linkifier_edit_form.hbs";
@@ -11,6 +11,7 @@ import * as channel from "./channel.ts";
 import * as confirm_dialog from "./confirm_dialog.ts";
 import * as dialog_widget from "./dialog_widget.ts";
 import {$t_html} from "./i18n.ts";
+import * as linkifiers from "./linkifiers.ts";
 import * as ListWidget from "./list_widget.ts";
 import * as scroll_util from "./scroll_util.ts";
 import * as settings_ui from "./settings_ui.ts";
@@ -68,7 +69,7 @@ function open_linkifier_edit_form(linkifier_id: number): void {
             error_continuation(xhr: JQuery.jqXHR<unknown>) {
                 $change_linkifier_button.prop("disabled", false);
                 const parsed = z
-                    .object({errors: z.record(z.array(z.string()).optional())})
+                    .object({errors: z.record(z.string(), z.optional(z.array(z.string())))})
                     .safeParse(xhr.responseJSON);
                 if (parsed.success) {
                     handle_linkifier_api_error(
@@ -132,23 +133,23 @@ function handle_linkifier_api_error(
     // The endpoint uses the Django ValidationError system for error
     // handling, which returns somewhat complicated error
     // dictionaries. This logic parses them.
-    if (errors.pattern !== undefined) {
+    if (errors["pattern"] !== undefined) {
         ui_report.error(
-            $t_html({defaultMessage: "Failed: {error}"}, {error: errors.pattern[0]}),
+            $t_html({defaultMessage: "Failed: {error}"}, {error: errors["pattern"][0]}),
             undefined,
             pattern_status,
         );
     }
-    if (errors.url_template !== undefined) {
+    if (errors["url_template"] !== undefined) {
         ui_report.error(
-            $t_html({defaultMessage: "Failed: {error}"}, {error: errors.url_template[0]}),
+            $t_html({defaultMessage: "Failed: {error}"}, {error: errors["url_template"][0]}),
             undefined,
             template_status,
         );
     }
-    if (errors.__all__ !== undefined) {
+    if (errors["__all__"] !== undefined) {
         ui_report.error(
-            $t_html({defaultMessage: "Failed: {error}"}, {error: errors.__all__[0]}),
+            $t_html({defaultMessage: "Failed: {error}"}, {error: errors["__all__"][0]}),
             undefined,
             linkifier_status,
         );
@@ -219,7 +220,9 @@ export function build_page(): void {
         e.stopPropagation();
         const $button = $(this);
         const html_body = render_confirm_delete_linkifier();
-        const url = "/json/realm/filters/" + encodeURIComponent($button.attr("data-linkifier-id")!);
+        const url =
+            "/json/realm/filters/" +
+            encodeURIComponent($button.closest("tr").attr("data-linkifier-id")!);
 
         confirm_dialog.launch({
             html_heading: $t_html({defaultMessage: "Delete linkifier?"}),
@@ -237,7 +240,7 @@ export function build_page(): void {
         e.stopPropagation();
 
         const $button = $(this);
-        const linkifier_id = Number.parseInt($button.attr("data-linkifier-id")!, 10);
+        const linkifier_id = Number.parseInt($button.closest("tr").attr("data-linkifier-id")!, 10);
         open_linkifier_edit_form(linkifier_id);
     });
 
@@ -255,6 +258,21 @@ export function build_page(): void {
             $pattern_status.hide();
             $template_status.hide();
 
+            const pattern = String($("#linkifier_pattern").val()).trim();
+            const url_template = String($("#linkifier_template").val()).trim();
+
+            try {
+                linkifiers.python_to_js_linkifier(pattern, url_template);
+            } catch {
+                $add_linkifier_button.prop("disabled", false);
+                ui_report.error(
+                    $t_html({defaultMessage: "Failed: Invalid Pattern"}),
+                    undefined,
+                    $pattern_status,
+                );
+                return;
+            }
+
             void channel.post({
                 url: "/json/realm/filters",
                 data: $(this).serialize(),
@@ -270,7 +288,7 @@ export function build_page(): void {
                 error(xhr) {
                     $add_linkifier_button.prop("disabled", false);
                     const parsed = z
-                        .object({errors: z.record(z.array(z.string()).optional())})
+                        .object({errors: z.record(z.string(), z.optional(z.array(z.string())))})
                         .safeParse(xhr.responseJSON);
                     if (parsed.success) {
                         handle_linkifier_api_error(

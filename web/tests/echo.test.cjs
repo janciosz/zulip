@@ -4,11 +4,14 @@ const assert = require("node:assert/strict");
 
 const MockDate = require("mockdate");
 
+const {make_user_group} = require("./lib/example_group.cjs");
 const {mock_esm, zrequire} = require("./lib/namespace.cjs");
 const {make_stub} = require("./lib/stub.cjs");
 const {run_test, noop} = require("./lib/test.cjs");
 
+const browser_history = mock_esm("../src/browser_history");
 const compose_notifications = mock_esm("../src/compose_notifications");
+const hash_util = mock_esm("../src/hash_util");
 const markdown = mock_esm("../src/markdown");
 const message_lists = mock_esm("../src/message_lists");
 const message_events_util = mock_esm("../src/message_events_util");
@@ -31,6 +34,10 @@ const message_store = mock_esm("../src/message_store", {
 
     update_booleans() {},
 
+    update_message_content(message, new_content) {
+        message.content = new_content;
+    },
+
     convert_raw_message_to_message_with_booleans() {},
 });
 
@@ -44,6 +51,11 @@ message_lists.current = {
             can_apply_locally() {
                 return true;
             },
+            has_exactly_channel_topic_operators() {
+                return true;
+            },
+            adjust_with_operand_to_message: noop,
+            terms: noop,
         },
     },
     change_message_id: noop,
@@ -83,7 +95,7 @@ const general_sub = {
     name: "general",
     subscribed: true,
 };
-stream_data.add_sub(general_sub);
+stream_data.add_sub_for_tests(general_sub);
 
 run_test("process_from_server for un-echoed messages", () => {
     const waiting_for_ack = new Map();
@@ -196,22 +208,31 @@ run_test("process_from_server for messages to add to narrow", ({override}) => {
 run_test("build_display_recipient", ({override}) => {
     override(current_user, "user_id", 123);
 
-    const params = {};
-    params.realm_users = [
-        {
-            user_id: 123,
-            full_name: "Iago",
-            email: "iago@zulip.com",
-        },
-        {
-            email: "cordelia@zulip.com",
-            full_name: "Cordelia",
-            user_id: 21,
-        },
-    ];
+    const params = {
+        realm_users: [
+            {
+                user_id: 123,
+                full_name: "Iago",
+                email: "iago@zulip.com",
+            },
+            {
+                email: "cordelia@zulip.com",
+                full_name: "Cordelia",
+                user_id: 21,
+            },
+        ],
+    };
+    const user_group_params = {
+        realm_user_groups: [
+            make_user_group({
+                is_system_group: true,
+                members: [123, 21],
+            }),
+        ],
+    };
     params.realm_non_active_users = [];
     params.cross_realm_bots = [];
-    people.initialize(current_user.user_id, params);
+    people.initialize(current_user.user_id, params, user_group_params);
 
     let message = {
         type: "stream",
@@ -225,6 +246,7 @@ run_test("build_display_recipient", ({override}) => {
 
     message = {
         type: "private",
+        to_user_ids: "21",
         private_message_recipient: "cordelia@zulip.com",
         sender_email: "iago@zulip.com",
         sender_full_name: "Iago",
@@ -245,6 +267,7 @@ run_test("build_display_recipient", ({override}) => {
 
     message = {
         type: "private",
+        to_user_ids: "123",
         private_message_recipient: "iago@zulip.com",
         sender_email: "iago@zulip.com",
         sender_full_name: "Iago",
@@ -298,7 +321,8 @@ run_test("insert_local_message streams", ({override}) => {
         get_topic_links_called = true;
     });
 
-    const insert_new_messages = ([message]) => {
+    const insert_new_messages = (message_data) => {
+        const [message] = message_data.raw_messages;
         assert.equal(message.display_recipient, "general");
         assert.equal(message.timestamp, fake_now);
         assert.equal(message.sender_email, "iago@zulip.com");
@@ -328,22 +352,38 @@ run_test("insert_local_message direct message", ({override}) => {
 
     override(current_user, "user_id", 123);
 
-    const params = {};
-    params.realm_users = [
-        {
-            user_id: 123,
-            full_name: "Iago",
-            email: "iago@zulip.com",
-        },
-    ];
+    const params = {
+        realm_users: [
+            {
+                user_id: 123,
+                full_name: "Iago",
+                email: "iago@zulip.com",
+            },
+            {
+                email: "cordelia@zulip.com",
+                full_name: "Cordelia",
+                user_id: 21,
+            },
+        ],
+    };
+    const user_group_params = {
+        realm_user_groups: [
+            make_user_group({
+                is_system_group: true,
+                members: [123, 21],
+            }),
+        ],
+    };
     params.realm_non_active_users = [];
     params.cross_realm_bots = [];
-    people.initialize(current_user.user_id, params);
+    people.init();
+    people.initialize(current_user.user_id, params, user_group_params);
 
     let render_called = false;
     let insert_message_called = false;
 
-    const insert_new_messages = ([message]) => {
+    const insert_new_messages = (message_data) => {
+        const [message] = message_data.raw_messages;
         assert.equal(message.display_recipient.length, 2);
         insert_message_called = true;
         return [message];
@@ -355,6 +395,7 @@ run_test("insert_local_message direct message", ({override}) => {
 
     const message_request = {
         private_message_recipient: "cordelia@zulip.com",
+        to_user_ids: "21",
         type: "private",
         sender_email: "iago@zulip.com",
         sender_full_name: "Iago",
@@ -370,6 +411,8 @@ run_test("test reify_message_id", ({override}) => {
 
     override(markdown, "render", noop);
     override(markdown, "get_topic_links", noop);
+    override(hash_util, "search_terms_to_hash", noop);
+    override(browser_history, "update_current_history_state_data", noop);
 
     const message_request = {
         type: "stream",
@@ -380,7 +423,8 @@ run_test("test reify_message_id", ({override}) => {
         sender_id: 123,
         draft_id: 100,
     };
-    echo.insert_local_message(message_request, local_id_float, (messages) => {
+    echo.insert_local_message(message_request, local_id_float, (message_data) => {
+        const messages = message_data.raw_messages;
         messages.map((message) => echo.track_local_message(message));
         return messages;
     });

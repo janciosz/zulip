@@ -3,36 +3,44 @@
 const assert = require("node:assert/strict");
 
 const {mock_banners} = require("./lib/compose_banner.cjs");
+const {make_user_group} = require("./lib/example_group.cjs");
+const {make_realm} = require("./lib/example_realm.cjs");
+const {make_stream} = require("./lib/example_stream.cjs");
+const {make_user} = require("./lib/example_user.cjs");
 const {mock_esm, set_global, zrequire} = require("./lib/namespace.cjs");
+const {make_stub} = require("./lib/stub.cjs");
 const {run_test, noop} = require("./lib/test.cjs");
-const blueslip = require("./lib/zblueslip.cjs");
 const $ = require("./lib/zjquery.cjs");
 
+const {set_current_user} = zrequire("state_data");
 const user_groups = zrequire("user_groups");
 
-const nobody = {
+const nobody = make_user_group({
     name: "role:nobody",
     id: 1,
-    members: new Set([]),
+    members: new Set(),
     is_system_group: true,
-    direct_subgroup_ids: new Set([]),
-};
-const everyone = {
+    direct_subgroup_ids: new Set(),
+});
+const everyone = make_user_group({
     name: "role:everyone",
     id: 2,
     members: new Set([30]),
     is_system_group: true,
-    direct_subgroup_ids: new Set([]),
-};
+    direct_subgroup_ids: new Set(),
+});
 user_groups.initialize({realm_user_groups: [nobody, everyone]});
 
 set_global("document", {
     to_$: () => $("document-stub"),
 });
 
+set_global("requestAnimationFrame", (func) => func());
+
 const autosize = noop;
 autosize.update = noop;
 mock_esm("autosize", {default: autosize});
+mock_esm("../src/compose_tooltips", {initialize_compose_tooltips: noop});
 
 const channel = mock_esm("../src/channel");
 const compose_fade = mock_esm("../src/compose_fade", {
@@ -40,9 +48,7 @@ const compose_fade = mock_esm("../src/compose_fade", {
     set_focused_recipient: noop,
     update_all: noop,
 });
-const compose_pm_pill = mock_esm("../src/compose_pm_pill", {
-    get_user_ids_string: () => "",
-});
+const compose_pm_pill = mock_esm("../src/compose_pm_pill");
 const compose_ui = mock_esm("../src/compose_ui", {
     autosize_textarea: noop,
     is_expanded: () => false,
@@ -57,6 +63,8 @@ const narrow_state = mock_esm("../src/narrow_state", {
 
 mock_esm("../src/reload_state", {
     is_in_progress: () => false,
+    set_csrf_failed_handler: noop,
+    is_pending: () => true,
 });
 mock_esm("../src/drafts", {
     update_draft: noop,
@@ -78,18 +86,24 @@ mock_esm("../src/resize", {
 mock_esm("../src/popovers", {
     hide_all: noop,
 });
+mock_esm("../src/saved_snippets_ui", {
+    setup_saved_snippets_dropdown_widget_if_needed: noop,
+});
 
 const people = zrequire("people");
 
 const compose_state = zrequire("compose_state");
 const compose_actions = zrequire("compose_actions");
 const compose_reply = zrequire("compose_reply");
+const compose_validate = zrequire("compose_validate");
 const message_lists = zrequire("message_lists");
 const stream_data = zrequire("stream_data");
 const compose_recipient = zrequire("compose_recipient");
 const {set_realm} = zrequire("state_data");
 
-const realm = {};
+const realm = make_realm({
+    realm_topics_policy: "disable_empty_topic",
+});
 set_realm(realm);
 
 const start = compose_actions.start;
@@ -106,12 +120,15 @@ function assert_hidden(sel) {
     assert.ok(!$(sel).visible());
 }
 
-function override_private_message_recipient({override}) {
-    let recipient;
-    override(compose_pm_pill, "set_from_emails", (value) => {
-        recipient = value;
+function override_private_message_recipient_ids({override}) {
+    let recipient_emails;
+    let recipient_user_ids;
+    override(compose_pm_pill, "set_from_user_ids", (value) => {
+        recipient_user_ids = value;
+        recipient_emails = value.map((user_id) => people.get_by_user_id(user_id).email).join(",");
     });
-    override(compose_pm_pill, "get_emails", () => recipient, {unused: false});
+    override(compose_pm_pill, "get_emails", () => recipient_emails, {unused: false});
+    override(compose_pm_pill, "get_user_ids", () => recipient_user_ids, {unused: false});
 }
 
 function test(label, f) {
@@ -143,7 +160,8 @@ test("initial_state", () => {
 
 test("start", ({override, override_rewire, mock_template}) => {
     mock_banners();
-    override_private_message_recipient({override});
+    window.addEventListener = noop;
+    override_private_message_recipient_ids({override});
     override_rewire(compose_actions, "autosize_message_content", noop);
     override_rewire(compose_actions, "expand_compose_box", noop);
     override_rewire(compose_actions, "complete_starting_tasks", noop);
@@ -157,9 +175,11 @@ test("start", ({override, override_rewire, mock_template}) => {
     $elem.set_find_results(".message-limit-indicator", $indicator);
 
     override_rewire(compose_recipient, "on_compose_select_recipient_update", noop);
-    override_rewire(compose_recipient, "check_posting_policy_for_compose_box", noop);
+    override_rewire(compose_validate, "update_posting_policy_banner_post_validation", noop);
+    override_rewire(compose_recipient, "update_recipient_row_attention_level", noop);
     override_rewire(stream_data, "can_post_messages_in_stream", () => true);
-    mock_template("inline_decorated_stream_name.hbs", false, noop);
+    override_rewire(stream_data, "can_create_new_topics_in_stream", () => true);
+    mock_template("inline_decorated_channel_name.hbs", false, noop);
 
     let compose_defaults;
     override(narrow_state, "set_compose_defaults", () => compose_defaults);
@@ -193,13 +213,12 @@ test("start", ({override, override_rewire, mock_template}) => {
     assert.ok(compose_state.composing());
 
     // Autofill stream field for single subscription
-    const denmark = {
-        subscribed: true,
+    const denmark = make_stream({
         color: "blue",
         name: "Denmark",
         stream_id: 1,
-    };
-    stream_data.add_sub(denmark);
+    });
+    stream_data.add_sub_for_tests(denmark);
 
     compose_defaults = {
         trigger: "clear topic button",
@@ -223,13 +242,12 @@ test("start", ({override, override_rewire, mock_template}) => {
     assert.equal(compose_state.stream_name(), "Denmark");
     assert.equal(compose_state.topic(), "");
 
-    const social = {
-        subscribed: true,
+    const social = make_stream({
         color: "red",
         name: "social",
         stream_id: 2,
-    };
-    stream_data.add_sub(social);
+    });
+    stream_data.add_sub_for_tests(social);
 
     compose_state.set_stream_id("");
     // More than 1 subscription, do not autofill
@@ -241,9 +259,14 @@ test("start", ({override, override_rewire, mock_template}) => {
     assert.equal(compose_state.topic(), "");
     stream_data.clear_subscriptions();
 
+    const user1 = make_user();
+    people._add_user(user1);
+    const me = make_user();
+    set_current_user(me);
+
     // Start direct message
     compose_defaults = {
-        private_message_recipient: "foo@example.com",
+        private_message_recipient_ids: [user1.user_id],
     };
 
     opts = {
@@ -256,7 +279,7 @@ test("start", ({override, override_rewire, mock_template}) => {
     assert_hidden("input#stream_message_recipient_topic");
     assert_visible("#compose-direct-recipient");
 
-    assert.equal(compose_state.private_message_recipient(), "foo@example.com");
+    assert.deepEqual(compose_state.private_message_recipient_ids(), [user1.user_id]);
     assert.equal($("textarea#compose-textarea").val(), "hello");
     assert.equal(compose_state.get_message_type(), "private");
     assert.ok(compose_state.composing());
@@ -269,7 +292,7 @@ test("start", ({override, override_rewire, mock_template}) => {
 
     start(opts);
 
-    assert.equal(compose_state.private_message_recipient(), "");
+    assert.deepEqual(compose_state.private_message_recipient_ids(), []);
     assert.equal(compose_state.get_message_type(), "private");
     assert.ok(compose_state.composing());
 
@@ -306,16 +329,22 @@ test("respond_to_message", ({override, override_rewire, mock_template}) => {
     $elem.set_find_results(".message-limit-indicator", $indicator);
 
     override_rewire(compose_recipient, "on_compose_select_recipient_update", noop);
-    override_rewire(compose_recipient, "check_posting_policy_for_compose_box", noop);
-    override_private_message_recipient({override});
-    mock_template("inline_decorated_stream_name.hbs", false, noop);
+    override_rewire(compose_validate, "update_posting_policy_banner_post_validation", noop);
+    override_rewire(compose_recipient, "update_recipient_row_attention_level", noop);
+    override_private_message_recipient_ids({override});
+    mock_template("inline_decorated_channel_name.hbs", false, noop);
+
+    override(realm, "realm_direct_message_permission_group", nobody.id);
+    override(realm, "realm_direct_message_initiator_group", everyone.id);
+
+    override_rewire(stream_data, "can_post_messages_in_stream", () => true);
 
     // Test direct message
-    const person = {
+    const person = make_user({
         user_id: 22,
         email: "alice@example.com",
         full_name: "Alice",
-    };
+    });
     people.add_active_user(person);
 
     let msg = {
@@ -330,16 +359,16 @@ test("respond_to_message", ({override, override_rewire, mock_template}) => {
     };
 
     respond_to_message(opts);
-    assert.equal(compose_state.private_message_recipient(), "alice@example.com");
+    assert.deepEqual(compose_state.private_message_recipient_ids(), [person.user_id]);
+    assert.equal(compose_state.private_message_recipient_emails(), "alice@example.com");
 
     // Test stream
-    const denmark = {
-        subscribed: true,
+    const denmark = make_stream({
         color: "blue",
         name: "Denmark",
         stream_id: 1,
-    };
-    stream_data.add_sub(denmark);
+    });
+    stream_data.add_sub_for_tests(denmark);
 
     msg = {
         type: "stream",
@@ -358,6 +387,7 @@ test("reply_with_mention", ({override, override_rewire, mock_template}) => {
     mock_banners();
     compose_state.set_message_type("stream");
     override_rewire(compose_recipient, "on_compose_select_recipient_update", noop);
+    override_rewire(compose_recipient, "update_recipient_row_attention_level", noop);
     override_rewire(compose_actions, "complete_starting_tasks", noop);
     override_rewire(compose_actions, "clear_textarea", noop);
     const $elem = $("#send_message_form");
@@ -367,17 +397,17 @@ test("reply_with_mention", ({override, override_rewire, mock_template}) => {
     $elem.set_find_results(".message-textarea", $textarea);
     $elem.set_find_results(".message-limit-indicator", $indicator);
 
-    override_private_message_recipient({override});
-    override_rewire(compose_recipient, "check_posting_policy_for_compose_box", noop);
-    mock_template("inline_decorated_stream_name.hbs", false, noop);
+    override_private_message_recipient_ids({override});
+    mock_template("inline_decorated_channel_name.hbs", false, noop);
 
-    const denmark = {
-        subscribed: true,
+    override_rewire(stream_data, "can_post_messages_in_stream", () => true);
+
+    const denmark = make_stream({
         color: "blue",
         name: "Denmark",
         stream_id: 1,
-    };
-    stream_data.add_sub(denmark);
+    });
+    stream_data.add_sub_for_tests(denmark);
 
     const msg = {
         type: "stream",
@@ -420,6 +450,7 @@ test("reply_with_mention", ({override, override_rewire, mock_template}) => {
 
 test("quote_message", ({disallow, override, override_rewire}) => {
     override_rewire(compose_recipient, "on_compose_select_recipient_update", noop);
+    override_rewire(compose_recipient, "update_recipient_row_attention_level", noop);
     override_rewire(compose_reply, "selection_within_message_id", () => undefined);
     const $elem = $("#send_message_form");
     const $textarea = $("textarea#compose-textarea");
@@ -442,7 +473,7 @@ test("quote_message", ({disallow, override, override_rewire}) => {
 
     override_rewire(compose_actions, "complete_starting_tasks", noop);
     override_rewire(compose_actions, "clear_textarea", noop);
-    override_private_message_recipient({override});
+    override_private_message_recipient_ids({override});
 
     let selected_message;
     override(message_lists.current, "get", (id) => (id === 100 ? selected_message : undefined));
@@ -455,11 +486,11 @@ test("quote_message", ({disallow, override, override_rewire}) => {
         replaced = true;
     });
 
-    const denmark_stream = {
+    const denmark_stream = make_stream({
         subscribed: false,
         name: "Denmark",
         stream_id: 20,
-    };
+    });
 
     selected_message = {
         type: "stream",
@@ -475,6 +506,15 @@ test("quote_message", ({disallow, override, override_rewire}) => {
     override(channel, "get", (opts) => {
         success_function = opts.success;
     });
+
+    function run_success_callback() {
+        success_function({
+            message: {
+                content: "Testing.",
+                content_type: "text/x-markdown",
+            },
+        });
+    }
 
     override(compose_ui, "insert_syntax_and_focus", (syntax, _$textarea, mode) => {
         assert.equal(syntax, "translated: [Quoting…]");
@@ -501,9 +541,7 @@ test("quote_message", ({disallow, override, override_rewire}) => {
 
     quote_message(opts);
 
-    success_function({
-        raw_content: "Testing.",
-    });
+    run_success_callback();
     assert.ok(replaced);
 
     opts = {
@@ -517,9 +555,7 @@ test("quote_message", ({disallow, override, override_rewire}) => {
 
     quote_message(opts);
 
-    success_function({
-        raw_content: "Testing.",
-    });
+    run_success_callback();
     assert.ok(replaced);
 
     opts = {
@@ -554,7 +590,6 @@ test("quote_message", ({disallow, override, override_rewire}) => {
         reply_type: "personal",
     };
     override(message_lists.current, "selected_id", () => 100);
-    override(message_lists.current, "selected_message", () => selected_message);
 
     selected_message = {
         type: "stream",
@@ -578,6 +613,50 @@ test("quote_message", ({disallow, override, override_rewire}) => {
     replaced = false;
     quote_message(opts);
     assert.ok(replaced);
+
+    // Quoting a highlighted(selected) part of a message using the ">" hotkey trigger
+    // should pass the message_id of the message whose text is highlighted in
+    // the `opts` to respond_to_message, to ensure the recipients of that message
+    // are used as the recipients when opening the composebox to quote.
+    opts = {
+        trigger: "hotkey",
+    };
+    override_rewire(compose_reply, "selection_within_message_id", () => 50);
+    override_rewire(compose_reply, "get_message_selection", () => "Hello world");
+
+    const stub = make_stub();
+    override_rewire(compose_reply, "respond_to_message", stub.f);
+
+    const highlighted_message = {
+        type: "stream",
+        stream_id: denmark_stream.stream_id,
+        topic: "test",
+        sender_full_name: "Steve Stephenson",
+        sender_id: 90,
+        raw_content: "[unselected text] Hello world [some extra text that is also not selected]",
+    };
+    expected_replacement =
+        "translated: @_**Steve Stephenson|90** [said](https://chat.zulip.org/#narrow/channel/92-learning/topic/Tornado):\n```quote\nHello world\n```";
+    override(message_lists.current, "get", (id) => (id === 50 ? highlighted_message : undefined));
+    quote_message(opts);
+    const {opts: opts_when_message_has_selection} = stub.get_args("opts");
+    assert.equal(opts_when_message_has_selection.trigger, "hotkey");
+    assert.equal(opts_when_message_has_selection.message_id, 50);
+    assert.ok(message_lists.current.selected_id() !== 50);
+
+    // If message text from some message is not highlighted(selected) when using the ">" hotkey
+    // to quote, then message_id passed to `respond_to_message` will be same as as the
+    // id of the message having the pointer.
+    const message_with_pointer = highlighted_message;
+    override_rewire(compose_reply, "selection_within_message_id", () => undefined);
+    override(message_lists.current, "selected_id", () => 100);
+    override(message_lists.current, "get", (id) => (id === 100 ? message_with_pointer : undefined));
+    expected_replacement =
+        "translated: @_**Steve Stephenson|90** [said](https://chat.zulip.org/#narrow/channel/92-learning/topic/Tornado):\n```quote\n[unselected text] Hello world [some extra text that is also not selected]\n```";
+    quote_message(opts);
+    const {opts: opts_when_message_has_no_selection} = stub.get_args("opts");
+    assert.equal(opts_when_message_has_no_selection.trigger, "hotkey");
+    assert.equal(opts_when_message_has_no_selection.message_id, 100);
 });
 
 test("focus_in_empty_compose", () => {
@@ -658,34 +737,33 @@ test("on_narrow", ({override, override_rewire}) => {
     narrowed_by_pm_reply = true;
     override(realm, "realm_direct_message_permission_group", nobody.id);
     override(realm, "realm_direct_message_initiator_group", everyone.id);
+    let compose_defaults;
+    override(narrow_state, "set_compose_defaults", () => compose_defaults);
+    compose_defaults = {
+        private_message_recipient_ids: [steve.user_id],
+    };
     compose_actions.on_narrow({
         force_close: false,
         trigger: "not-search",
-        private_message_recipient: "steve@example.com",
     });
     assert.ok(!start_called);
 
+    compose_defaults = {
+        private_message_recipient_ids: [bot.user_id],
+    };
     compose_actions.on_narrow({
         force_close: false,
         trigger: "not-search",
-        private_message_recipient: "bot@example.com",
-    });
-    assert.ok(start_called);
-
-    override(realm, "realm_direct_message_permission_group", everyone.id);
-    blueslip.expect("warn", "Unknown emails");
-    compose_actions.on_narrow({
-        force_close: false,
-        trigger: "not-search",
-        private_message_recipient: "not@empty.com",
     });
     assert.ok(start_called);
 
     start_called = false;
+    compose_defaults = {
+        private_message_recipient_ids: [],
+    };
     compose_actions.on_narrow({
         force_close: false,
         trigger: "search",
-        private_message_recipient: "",
     });
     assert.ok(!start_called);
 

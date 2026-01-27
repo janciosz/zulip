@@ -1,42 +1,61 @@
 import $ from "jquery";
+import _ from "lodash";
 import assert from "minimalistic-assert";
 import type * as tippy from "tippy.js";
-import {z} from "zod";
+import * as z from "zod/mini";
 
-import render_confirm_delete_user from "../templates/confirm_dialog/confirm_delete_user.hbs";
+import render_confirm_deactivate_user_group from "../templates/confirm_dialog/confirm_deactivate_user_group.hbs";
 import render_confirm_join_group_direct_member from "../templates/confirm_dialog/confirm_join_group_direct_member.hbs";
-import render_group_info_banner from "../templates/modal_banner/user_group_info_banner.hbs";
+import render_modal_banner from "../templates/modal_banner/modal_banner.hbs";
+import render_settings_checkbox from "../templates/settings/settings_checkbox.hbs";
 import render_browse_user_groups_list_item from "../templates/user_group_settings/browse_user_groups_list_item.hbs";
 import render_cannot_deactivate_group_banner from "../templates/user_group_settings/cannot_deactivate_group_banner.hbs";
 import render_change_user_group_info_modal from "../templates/user_group_settings/change_user_group_info_modal.hbs";
+import render_stream_group_permission_settings from "../templates/user_group_settings/stream_group_permission_settings.hbs";
 import render_user_group_membership_status from "../templates/user_group_settings/user_group_membership_status.hbs";
+import render_user_group_permission_settings from "../templates/user_group_settings/user_group_permission_settings.hbs";
 import render_user_group_settings from "../templates/user_group_settings/user_group_settings.hbs";
+import render_user_group_settings_empty_notice from "../templates/user_group_settings/user_group_settings_empty_notice.hbs";
 import render_user_group_settings_overlay from "../templates/user_group_settings/user_group_settings_overlay.hbs";
 
+import type {Banner} from "./banners.ts";
 import * as blueslip from "./blueslip.ts";
 import * as browser_history from "./browser_history.ts";
+import * as buttons from "./buttons.ts";
 import * as channel from "./channel.ts";
 import * as components from "./components.ts";
 import type {Toggle} from "./components.ts";
 import * as compose_banner from "./compose_banner.ts";
 import * as confirm_dialog from "./confirm_dialog.ts";
 import * as dialog_widget from "./dialog_widget.ts";
+import * as dropdown_widget from "./dropdown_widget.ts";
 import * as group_permission_settings from "./group_permission_settings.ts";
+import type {
+    GroupGroupSettingName,
+    RealmGroupSettingName,
+    StreamGroupSettingName,
+} from "./group_permission_settings.ts";
 import * as hash_util from "./hash_util.ts";
 import {$t, $t_html} from "./i18n.ts";
 import * as ListWidget from "./list_widget.ts";
 import * as loading from "./loading.ts";
 import * as overlays from "./overlays.ts";
 import * as people from "./people.ts";
+import * as resize from "./resize.ts";
 import * as scroll_util from "./scroll_util.ts";
 import type {UserGroupUpdateEvent} from "./server_event_types.ts";
+import * as settings_banner from "./settings_banner.ts";
 import * as settings_components from "./settings_components.ts";
 import * as settings_config from "./settings_config.ts";
 import * as settings_data from "./settings_data.ts";
 import * as settings_org from "./settings_org.ts";
-import {current_user, realm} from "./state_data.ts";
+import {current_user, realm, realm_schema} from "./state_data.ts";
+import type {GroupSettingValue} from "./state_data.ts";
 import * as stream_data from "./stream_data.ts";
+import * as sub_store from "./sub_store.ts";
+import type {StreamSubscription} from "./sub_store.ts";
 import * as timerender from "./timerender.ts";
+import {anonymous_group_schema, group_setting_value_schema} from "./types.ts";
 import * as ui_report from "./ui_report.ts";
 import * as user_group_components from "./user_group_components.ts";
 import * as user_group_create from "./user_group_create.ts";
@@ -45,6 +64,7 @@ import * as user_groups from "./user_groups.ts";
 import type {UserGroup} from "./user_groups.ts";
 import * as user_profile from "./user_profile.ts";
 import * as util from "./util.ts";
+import * as views_util from "./views_util.ts";
 
 type ActiveData = {
     $row: JQuery | undefined;
@@ -52,11 +72,34 @@ type ActiveData = {
     $tabs: JQuery;
 };
 
+let filters_dropdown_widget: dropdown_widget.DropdownWidget;
+export const FILTERS = {
+    ACTIVE_AND_DEACTIVATED_GROUPS: $t({defaultMessage: "Active and deactivated"}),
+    ACTIVE_GROUPS: $t({defaultMessage: "Active groups"}),
+    DEACTIVATED_GROUPS: $t({defaultMessage: "Deactivated groups"}),
+};
 export let toggler: Toggle;
 export let select_tab = "general";
+const initial_group_filter = FILTERS.ACTIVE_GROUPS;
 
 let group_list_widget: ListWidget.ListWidget<UserGroup, UserGroup>;
 let group_list_toggler: Toggle;
+
+const GROUP_INFO_BANNER: Banner = {
+    intent: "info",
+    label: $t({
+        defaultMessage:
+            "User groups offer a flexible way to manage permissions in your organization.",
+    }),
+    buttons: [
+        {
+            label: $t({defaultMessage: "Learn more"}),
+            custom_classes: "banner-external-link",
+            variant: "subtle",
+        },
+    ],
+    close_button: false,
+};
 
 function get_user_group_id(target: HTMLElement): number {
     const $row = $(target).closest(
@@ -80,9 +123,27 @@ function get_user_group_for_target(target: HTMLElement): UserGroup | undefined {
     return group;
 }
 
-export function get_edit_container(group: UserGroup): JQuery {
+export function get_edit_container(group_id: number): JQuery {
     return $(
-        `#groups_overlay .user_group_settings_wrapper[data-group-id='${CSS.escape(group.id.toString())}']`,
+        `#groups_overlay .user_group_settings_wrapper[data-group-id='${CSS.escape(group_id.toString())}']`,
+    );
+}
+
+export function update_group_creation_ui(): void {
+    const $left_panel_icon_button = $("#add_new_user_group .create_user_group_button");
+    const $right_panel_permission_text = $("#groups_overlay .right .creation-permission-text");
+    if (settings_data.user_can_create_user_groups()) {
+        $left_panel_icon_button.show();
+        $right_panel_permission_text.hide();
+    } else {
+        $left_panel_icon_button.hide();
+        $right_panel_permission_text.show();
+    }
+
+    $left_panel_icon_button.prop("disabled", !realm.zulip_plan_is_not_limited);
+    $("#groups_overlay .right .create_user_group_button").prop(
+        "disabled",
+        !realm.zulip_plan_is_not_limited || !settings_data.user_can_create_user_groups(),
     );
 }
 
@@ -96,7 +157,7 @@ function update_add_members_elements(group: UserGroup): void {
         ".edit_members_for_user_group .add_members_container",
     );
 
-    if (current_user.is_guest || realm.realm_is_zephyr_mirror_realm) {
+    if (current_user.is_guest) {
         // For guest users, we just hide the add_members feature.
         $add_members_container.hide();
         return;
@@ -105,7 +166,7 @@ function update_add_members_elements(group: UserGroup): void {
     // Otherwise, we adjust whether the widgets are disabled based on
     // whether this user is authorized to add members.
     const $input_element = $add_members_container.find(".input").expectOne();
-    const $button_element = $add_members_container.find('button[name="add_member"]').expectOne();
+    const $button_element = $add_members_container.find("#add_member").expectOne();
 
     if (settings_data.can_add_members_to_user_group(group.id)) {
         $input_element.prop("contenteditable", true);
@@ -120,9 +181,12 @@ function update_add_members_elements(group: UserGroup): void {
         $button_element.prop("disabled", true);
         $add_members_container.addClass("add_members_disabled");
 
+        const disable_hint = $t({
+            defaultMessage: "You are not allowed to add members to this group",
+        });
         settings_components.initialize_disable_button_hint_popover(
             $add_members_container,
-            $t({defaultMessage: "You are not allowed to add members to this group."}),
+            disable_hint,
         );
     }
 }
@@ -135,17 +199,13 @@ function update_group_permission_settings_elements(group: UserGroup): void {
     // We are concerned with the General tab for changing group permissions.
     const $group_permission_settings = $("#group_permission_settings");
 
-    const $permission_pill_container_elements = $group_permission_settings.find(".pill-container");
     const $permission_input_groups = $group_permission_settings.find(".input-group");
 
     if (settings_data.can_manage_user_group(group.id)) {
-        $permission_pill_container_elements.find(".input").prop("contenteditable", true);
-        $permission_input_groups.removeClass("group_setting_disabled");
-
+        settings_components.enable_group_permission_setting($permission_input_groups);
         $permission_input_groups.each(function (this: tippy.ReferenceElement) {
             $(this)[0]?._tippy?.destroy();
         });
-        settings_components.enable_opening_typeahead_on_clicking_label($group_permission_settings);
     } else {
         $permission_input_groups.each(function () {
             settings_components.initialize_disable_button_hint_popover(
@@ -158,7 +218,7 @@ function update_group_permission_settings_elements(group: UserGroup): void {
 }
 
 function show_membership_settings(group: UserGroup): void {
-    const $edit_container = get_edit_container(group);
+    const $edit_container = get_edit_container(group.id);
 
     const $member_container = $edit_container.find(".edit_members_for_user_group");
     user_group_edit_members.enable_member_management({
@@ -182,26 +242,49 @@ function show_general_settings(group: UserGroup): void {
     update_general_panel_ui(group);
 }
 
-function update_general_panel_ui(group: UserGroup): void {
-    const $edit_container = get_edit_container(group);
-
-    if (settings_data.can_manage_user_group(group.id)) {
-        $edit_container.find(".group-header .button-group").show();
+function update_deactivate_and_reactivate_buttons(group: UserGroup): void {
+    if (!settings_data.can_manage_user_group(group.id)) {
         $(
-            `.group_settings_header[data-group-id='${CSS.escape(group.id.toString())}'] .deactivate`,
-        ).show();
-    } else {
-        $edit_container.find(".group-header .button-group").hide();
+            `.group_settings_header[data-group-id='${CSS.escape(group.id.toString())}'] .reactivate`,
+        ).hide();
         $(
             `.group_settings_header[data-group-id='${CSS.escape(group.id.toString())}'] .deactivate`,
         ).hide();
+        return;
     }
+
+    if (group.deactivated) {
+        $(
+            `.group_settings_header[data-group-id='${CSS.escape(group.id.toString())}'] .deactivate`,
+        ).hide();
+        $(
+            `.group_settings_header[data-group-id='${CSS.escape(group.id.toString())}'] .reactivate`,
+        ).show();
+    } else {
+        $(
+            `.group_settings_header[data-group-id='${CSS.escape(group.id.toString())}'] .deactivate`,
+        ).show();
+        $(
+            `.group_settings_header[data-group-id='${CSS.escape(group.id.toString())}'] .reactivate`,
+        ).hide();
+    }
+}
+
+function update_general_panel_ui(group: UserGroup): void {
+    const $edit_container = get_edit_container(group.id);
+
+    if (settings_data.can_manage_user_group(group.id)) {
+        $edit_container.find(".group-header .button-group").show();
+    } else {
+        $edit_container.find(".group-header .button-group").hide();
+    }
+    update_deactivate_and_reactivate_buttons(group);
     update_group_permission_settings_elements(group);
     update_group_membership_button(group.id);
 }
 
 function update_members_panel_ui(group: UserGroup): void {
-    const $edit_container = get_edit_container(group);
+    const $edit_container = get_edit_container(group.id);
     const $member_container = $edit_container.find(".edit_members_for_user_group");
 
     user_group_edit_members.rerender_members_list({
@@ -262,9 +345,15 @@ function update_group_membership_button(group_id: number): void {
         true,
     );
     if (is_direct_member) {
-        $group_settings_button.text($t({defaultMessage: "Leave group"}));
+        $group_settings_button
+            .text($t({defaultMessage: "Leave group"}))
+            .removeClass("action-button-subtle-brand")
+            .addClass("action-button-neutral");
     } else {
-        $group_settings_button.text($t({defaultMessage: "Join group"}));
+        $group_settings_button
+            .text($t({defaultMessage: "Join group"}))
+            .removeClass("action-button-subtle-neutral")
+            .addClass("action-button-subtle-brand");
     }
 
     const can_join_group = settings_data.can_join_user_group(group_id);
@@ -401,6 +490,7 @@ export function handle_subgroup_edit_event(group_id: number, direct_subgroup_ids
         update_your_groups_list_if_needed();
         update_display_checkmark_on_group_edit(group);
     }
+    update_permissions_panel_on_subgroup_update(direct_subgroup_ids);
 }
 
 function update_status_text_on_member_update(updated_group: UserGroup): void {
@@ -467,56 +557,521 @@ export function handle_member_edit_event(group_id: number, user_ids: number[]): 
 }
 
 export function update_group_details(group: UserGroup): void {
-    const $edit_container = get_edit_container(group);
+    const $edit_container = get_edit_container(group.id);
     $edit_container.find(".group-name").text(user_groups.get_display_group_name(group.name));
     $edit_container.find(".group-description").text(group.description);
 }
 
-function update_toggler_for_group_setting(): void {
-    toggler.goto(select_tab);
+function update_toggler_for_group_setting(group: UserGroup): void {
+    if (!group.deactivated) {
+        toggler.enable_tab("permissions");
+        toggler.goto(select_tab);
+    } else {
+        if (select_tab === "permissions") {
+            toggler.goto("general");
+        } else {
+            toggler.goto(select_tab);
+        }
+        toggler.disable_tab("permissions");
+    }
 }
 
 function get_membership_status_context(group: UserGroup): {
     is_direct_member: boolean;
     is_member: boolean;
-    associated_subgroup_names_html: string | undefined;
+    associated_subgroup_names: string[] | undefined;
 } {
     const current_user_id = people.my_current_user_id();
     const is_direct_member = user_groups.is_direct_member_of(current_user_id, group.id);
 
     let is_member;
-    let associated_subgroup_names_html;
+    let associated_subgroup_names;
     if (is_direct_member) {
         is_member = true;
     } else {
         is_member = user_groups.is_user_in_group(group.id, current_user_id);
         if (is_member) {
-            const associated_subgroup_names = user_groups
+            associated_subgroup_names = user_groups
                 .get_associated_subgroups(group, current_user_id)
                 .map((subgroup) => user_groups.get_display_group_name(subgroup.name));
-            associated_subgroup_names_html = util.format_array_as_list_with_highlighted_elements(
-                associated_subgroup_names,
-                "long",
-                "unit",
-            );
         }
     }
 
     return {
         is_direct_member,
         is_member,
-        associated_subgroup_names_html,
+        associated_subgroup_names,
     };
 }
 
 function update_membership_status_text(group: UserGroup): void {
     const args = get_membership_status_context(group);
     const rendered_membership_status = render_user_group_membership_status(args);
-    const $edit_container = get_edit_container(group);
+    const $edit_container = get_edit_container(group.id);
     $edit_container.find(".membership-status").html(rendered_membership_status);
 }
 
+function save_discard_widget_handler_for_permissions_panel($subsection: JQuery): void {
+    $subsection.find(".subsection-failed-status p").hide();
+    $subsection.find(".save-button").show();
+    const properties_elements = settings_components.get_subsection_property_elements($subsection);
+    const show_change_process_button = properties_elements.some((elem) => !$(elem).prop("checked"));
+
+    const $save_button_controls = $subsection.find(".subsection-header .save-button-controls");
+    const button_state = show_change_process_button ? "unsaved" : "discarded";
+    settings_components.change_save_button_state($save_button_controls, button_state);
+}
+
+function get_request_data_for_removing_group_permission(
+    current_value: GroupSettingValue,
+    removed_group_id: number,
+): string {
+    const nobody_group = user_groups.get_user_group_from_name("role:nobody")!;
+
+    if (typeof current_value === "number") {
+        return JSON.stringify({
+            new: nobody_group.id,
+            old: current_value,
+        });
+    }
+
+    let new_setting_value: GroupSettingValue = {...anonymous_group_schema.parse(current_value)};
+    new_setting_value.direct_subgroups = new_setting_value.direct_subgroups.filter(
+        (group_id) => group_id !== removed_group_id,
+    );
+
+    if (
+        new_setting_value.direct_subgroups.length === 0 &&
+        new_setting_value.direct_members.length === 0
+    ) {
+        new_setting_value = nobody_group.id;
+    }
+    return JSON.stringify({
+        new: new_setting_value,
+        old: current_value,
+    });
+}
+
+function populate_data_for_removing_realm_permissions(
+    $subsection: JQuery,
+    group: UserGroup,
+): Record<string, string> {
+    const changed_setting_elems = settings_components
+        .get_subsection_property_elements($subsection)
+        .filter((elem) => !$(elem).prop("checked"));
+    const changed_setting_names = changed_setting_elems.map((elem) => $(elem).attr("name")!);
+
+    const data: Record<string, string> = {};
+    for (const setting_name of changed_setting_names) {
+        const current_value = realm[z.keyof(realm_schema).parse("realm_" + setting_name)];
+        data[setting_name] = get_request_data_for_removing_group_permission(
+            group_setting_value_schema.parse(current_value),
+            group.id,
+        );
+    }
+
+    return data;
+}
+
+function populate_data_for_removing_stream_permissions(
+    $subsection: JQuery,
+    group: UserGroup,
+    sub: StreamSubscription,
+): Record<string, string> {
+    const changed_setting_elems = settings_components
+        .get_subsection_property_elements($subsection)
+        .filter((elem) => !$(elem).prop("checked"));
+    const changed_setting_names = changed_setting_elems.map((elem) => $(elem).attr("name")!);
+
+    const data: Record<string, string> = {};
+    for (const setting_name of changed_setting_names) {
+        const current_value =
+            sub[z.keyof(sub_store.stream_subscription_schema).parse(setting_name)];
+        data[setting_name] = get_request_data_for_removing_group_permission(
+            group_setting_value_schema.parse(current_value),
+            group.id,
+        );
+    }
+
+    return data;
+}
+
+function populate_data_for_removing_user_group_permissions(
+    $subsection: JQuery,
+    group: UserGroup,
+    user_group: UserGroup,
+): Record<string, string> {
+    const changed_setting_elems = settings_components
+        .get_subsection_property_elements($subsection)
+        .filter((elem) => !$(elem).prop("checked"));
+    const changed_setting_names = changed_setting_elems.map((elem) => $(elem).attr("name")!);
+
+    const data: Record<string, string> = {};
+    for (const setting_name of changed_setting_names) {
+        const current_value =
+            user_group[z.keyof(user_groups.user_group_schema).parse(setting_name)];
+        data[setting_name] = get_request_data_for_removing_group_permission(
+            group_setting_value_schema.parse(current_value),
+            group.id,
+        );
+    }
+
+    return data;
+}
+
+export function add_assigned_permission_to_permissions_panel(
+    setting_name: string,
+    $subsection_elem: JQuery,
+    subsection_settings: string[],
+    rendered_checkbox_html: string,
+): void {
+    const $setting_elem = $subsection_elem.find(`.prop-element[name="${CSS.escape(setting_name)}"`);
+    if ($setting_elem.length > 0) {
+        // If there is already a checkbox for that permission, there can
+        // still be changes in permission whether the permission can be
+        // removed from the panel or not. So, just replace it with the
+        // newly rendered checkbox.
+        $setting_elem.closest(".input-group").replaceWith($(rendered_checkbox_html));
+        return;
+    }
+
+    if ($subsection_elem.hasClass("hide")) {
+        $subsection_elem.removeClass("hide");
+    }
+
+    if ($subsection_elem.closest(".group-permissions-section").hasClass("hide")) {
+        $subsection_elem.closest(".group-permissions-section").removeClass("hide");
+    }
+
+    if (!$(".group-assigned-permissions .no-permissions-for-group-text").hasClass("hide")) {
+        $(".group-assigned-permissions .no-permissions-for-group-text").addClass("hide");
+    }
+
+    let insert_position = 0;
+    for (const name of subsection_settings) {
+        if (name === setting_name) {
+            break;
+        }
+        if ($subsection_elem.find(`.prop-element[name="${CSS.escape(name)}"`).length > 0) {
+            insert_position = insert_position + 1;
+        }
+    }
+
+    if (insert_position === 0) {
+        $subsection_elem.find(".subsection-settings").prepend($(rendered_checkbox_html));
+    } else if (insert_position === $subsection_elem.find(".input-group").length) {
+        $subsection_elem.find(".subsection-settings").append($(rendered_checkbox_html));
+    } else {
+        const next_setting_elem = $subsection_elem.find(".subsection-settings .input-group")[
+            insert_position
+        ]!;
+        $(rendered_checkbox_html).insertBefore(next_setting_elem);
+    }
+}
+
+function hide_group_permissions_section_if_needed($section: JQuery): void {
+    // Hide the "Organization permissions", "Channel permissions" or
+    // "User group permissions", if there are no assigned permissions
+    // for that section.
+    if ($section.find(".input-group").length === 0) {
+        $section.addClass("hide");
+    }
+
+    // Show the text mentioning group has no permissions if required.
+    if ($section.closest(".group-assigned-permissions").find(".input-group").length === 0) {
+        $section
+            .closest(".group-assigned-permissions")
+            .find(".no-permissions-for-group-text")
+            .removeClass("hide");
+    }
+}
+function remove_setting_checkbox_from_permissions_panel($setting_elem: JQuery): void {
+    if ($setting_elem.length === 0) {
+        return;
+    }
+
+    const $subsection = $setting_elem.closest(".settings-subsection-parent");
+    $setting_elem.closest(".input-group").remove();
+
+    if ($subsection.find(".input-group").length === 0) {
+        $subsection.addClass("hide");
+    }
+
+    hide_group_permissions_section_if_needed($subsection.closest(".group-permissions-section"));
+}
+
+export function update_realm_setting_in_permissions_panel(
+    setting_name: RealmGroupSettingName,
+    new_value: GroupSettingValue,
+): void {
+    const active_group_id = get_active_data().id;
+    if (active_group_id === undefined) {
+        return;
+    }
+
+    const $setting_elem = $(`#id_group_permission_${CSS.escape(setting_name)}`);
+    const can_edit = settings_config.owner_editable_realm_group_permission_settings.has(
+        setting_name,
+    )
+        ? current_user.is_owner
+        : current_user.is_admin;
+
+    const assigned_permission_object = group_permission_settings.get_assigned_permission_object(
+        new_value,
+        setting_name,
+        active_group_id,
+        can_edit,
+        "realm",
+    );
+
+    const group_has_permission = assigned_permission_object !== undefined;
+
+    if (!group_has_permission) {
+        remove_setting_checkbox_from_permissions_panel($setting_elem);
+        return;
+    }
+
+    const subsection_obj = settings_config.realm_group_permission_settings.find((subsection) =>
+        subsection.settings.includes(setting_name),
+    )!;
+    const subsection_settings = subsection_obj.settings;
+    const $subsection_elem = $(`.${CSS.escape(subsection_obj.subsection_key)}`);
+
+    const new_setting_checkbox_html = render_settings_checkbox({
+        setting_name,
+        prefix: "id_group_permission_",
+        is_checked: true,
+        label: settings_config.all_group_setting_labels.realm[setting_name],
+        is_disabled: !assigned_permission_object.can_edit,
+        tooltip_message: assigned_permission_object.tooltip_message,
+    });
+
+    add_assigned_permission_to_permissions_panel(
+        setting_name,
+        $subsection_elem,
+        subsection_settings,
+        new_setting_checkbox_html,
+    );
+}
+
+export function update_group_permissions_panel_on_losing_stream_access(stream_id: number): void {
+    const active_group_id = get_active_data().id;
+    if (active_group_id === undefined) {
+        return;
+    }
+
+    const $edit_container = get_edit_container(active_group_id);
+    const $stream_subsection_elem = $edit_container.find(
+        `.channel-group-permissions .settings-subsection-parent[data-stream-id="${CSS.escape(stream_id.toString())}"]`,
+    );
+    if ($stream_subsection_elem.length > 0) {
+        const $stream_permissions_section = $stream_subsection_elem.closest(
+            ".group-permissions-section",
+        );
+        $stream_subsection_elem.remove();
+
+        hide_group_permissions_section_if_needed($stream_permissions_section);
+    }
+}
+
+export function update_stream_setting_in_permissions_panel(
+    setting_name: StreamGroupSettingName,
+    new_value: GroupSettingValue,
+    sub: StreamSubscription,
+): void {
+    const active_group_id = get_active_data().id;
+    if (active_group_id === undefined) {
+        return;
+    }
+
+    const $setting_elem = $(
+        `#id_group_permission_${CSS.escape(sub.stream_id.toString())}_${CSS.escape(setting_name)}`,
+    );
+
+    let can_edit = stream_data.can_change_permissions_requiring_metadata_access(sub);
+    if (
+        settings_config.stream_group_permission_settings_requiring_content_access.includes(
+            setting_name,
+        )
+    ) {
+        can_edit = stream_data.can_change_permissions_requiring_content_access(sub);
+    }
+
+    const assigned_permission_object = group_permission_settings.get_assigned_permission_object(
+        new_value,
+        setting_name,
+        active_group_id,
+        can_edit,
+        "stream",
+    );
+
+    const group_has_permission = assigned_permission_object !== undefined;
+
+    if (!group_has_permission) {
+        remove_setting_checkbox_from_permissions_panel($setting_elem);
+        return;
+    }
+
+    const subsection_settings = settings_config.stream_group_permission_settings;
+    const $subsection_elem = $(
+        `.settings-subsection-parent[data-stream-id="${CSS.escape(sub.stream_id.toString())}"]`,
+    );
+    const setting_id_prefix = "id_group_permission_" + sub.stream_id.toString() + "_";
+
+    if ($subsection_elem.length === 0) {
+        const rendered_subsection_html = render_stream_group_permission_settings({
+            stream: sub,
+            setting_labels: settings_config.all_group_setting_labels.stream,
+            id_prefix: setting_id_prefix,
+            assigned_permissions: [
+                {
+                    setting_name,
+                    can_edit: assigned_permission_object.can_edit,
+                    tooltip_message: assigned_permission_object.tooltip_message,
+                },
+            ],
+        });
+
+        if ($(".channel-group-permissions").hasClass("hide")) {
+            $(".channel-group-permissions").removeClass("hide");
+        }
+
+        if (!$(".group-assigned-permissions .no-permissions-for-group-text").hasClass("hide")) {
+            $(".group-assigned-permissions .no-permissions-for-group-text").addClass("hide");
+        }
+
+        $(".channel-group-permissions").append($(rendered_subsection_html));
+        return;
+    }
+
+    const rendered_checkbox_html = render_settings_checkbox({
+        setting_name,
+        prefix: setting_id_prefix,
+        is_checked: true,
+        label: settings_config.all_group_setting_labels.stream[setting_name],
+        is_disabled: !assigned_permission_object.can_edit,
+        tooltip_message: assigned_permission_object.tooltip_message,
+    });
+
+    add_assigned_permission_to_permissions_panel(
+        setting_name,
+        $subsection_elem,
+        subsection_settings,
+        rendered_checkbox_html,
+    );
+}
+
+export function update_group_setting_in_permissions_panel(
+    setting_name: GroupGroupSettingName,
+    new_value: GroupSettingValue,
+    group: UserGroup,
+): void {
+    const active_group_id = get_active_data().id;
+    if (active_group_id === undefined) {
+        return;
+    }
+
+    const $setting_elem = $(
+        `#id_group_permission_${CSS.escape(group.id.toString())}_${CSS.escape(setting_name)}`,
+    );
+    const can_edit = settings_data.can_manage_user_group(group.id);
+
+    const assigned_permission_object = group_permission_settings.get_assigned_permission_object(
+        new_value,
+        setting_name,
+        active_group_id,
+        can_edit,
+        "group",
+    );
+
+    const group_has_permission = assigned_permission_object !== undefined;
+
+    if (!group_has_permission) {
+        remove_setting_checkbox_from_permissions_panel($setting_elem);
+        return;
+    }
+
+    const subsection_settings = settings_config.group_permission_settings;
+    const $subsection_elem = $(
+        `.settings-subsection-parent[data-group-id="${CSS.escape(group.id.toString())}"]`,
+    );
+
+    const setting_id_prefix = "id_group_permission_" + group.id.toString() + "_";
+
+    if ($subsection_elem.length === 0) {
+        const rendered_subsection_html = render_user_group_permission_settings({
+            group_name: user_groups.get_display_group_name(group.name),
+            group_id: group.id,
+            setting_labels: settings_config.all_group_setting_labels.group,
+            id_prefix: setting_id_prefix,
+            assigned_permissions: [
+                {
+                    setting_name,
+                    can_edit: assigned_permission_object.can_edit,
+                    tooltip_message: assigned_permission_object.tooltip_message,
+                },
+            ],
+        });
+
+        if ($(".user-group-permissions").hasClass("hide")) {
+            $(".user-group-permissions").removeClass("hide");
+        }
+
+        if (!$(".group-assigned-permissions .no-permissions-for-group-text").hasClass("hide")) {
+            $(".group-assigned-permissions .no-permissions-for-group-text").addClass("hide");
+        }
+
+        $(".user-group-permissions").append($(rendered_subsection_html));
+        return;
+    }
+
+    const rendered_checkbox_html = render_settings_checkbox({
+        setting_name,
+        prefix: setting_id_prefix,
+        is_checked: true,
+        label: settings_config.all_group_setting_labels.group[setting_name],
+        is_disabled: !assigned_permission_object.can_edit,
+        tooltip_message: assigned_permission_object.tooltip_message,
+    });
+
+    add_assigned_permission_to_permissions_panel(
+        setting_name,
+        $subsection_elem,
+        subsection_settings,
+        rendered_checkbox_html,
+    );
+}
+
+export function update_group_deactivated_banner(group: UserGroup): void {
+    if (!group.deactivated) {
+        $("#user_group_settings .group-banner").empty();
+        return;
+    }
+
+    const context = {
+        banner_type: compose_banner.WARNING,
+        classname: "group_deactivated",
+        hide_close_button: true,
+        banner_text: $t({
+            defaultMessage:
+                "This group is deactivated. It can't be mentioned or used for any permissions.",
+        }),
+    };
+
+    $("#user_group_settings .group-banner").html(render_modal_banner(context));
+}
+
 export function show_settings_for(group: UserGroup): void {
+    const group_assigned_realm_permissions =
+        settings_components.get_group_assigned_realm_permissions(group);
+    const group_has_no_realm_permissions = group_assigned_realm_permissions.every(
+        (subsection_obj) => subsection_obj.assigned_permissions.length === 0,
+    );
+    const group_assigned_stream_permissions =
+        settings_components.get_group_assigned_stream_permissions(group);
+    const group_assigned_user_group_permissions =
+        settings_components.get_group_assigned_user_group_permissions(group);
+
     const html = render_user_group_settings({
         group,
         group_name: user_groups.get_display_group_name(group.name),
@@ -533,18 +1088,118 @@ export function show_settings_for(group: UserGroup): void {
         creator: stream_data.maybe_get_creator_details(group.creator_id),
         is_creator: group.creator_id === current_user.user_id,
         ...get_membership_status_context(group),
+        all_group_setting_labels: settings_config.all_group_setting_labels,
+        group_assigned_realm_permissions,
+        group_has_no_realm_permissions,
+        group_assigned_stream_permissions,
+        group_assigned_user_group_permissions,
+        group_has_no_permissions:
+            group_has_no_realm_permissions &&
+            group_assigned_stream_permissions.length === 0 &&
+            group_assigned_user_group_permissions.length === 0,
     });
 
     scroll_util.get_content_element($("#user_group_settings")).html(html);
-    update_toggler_for_group_setting();
+    update_toggler_for_group_setting(group);
 
     toggler.get().prependTo("#user_group_settings .tab-container");
-    const $edit_container = get_edit_container(group);
+    const $edit_container = get_edit_container(group.id);
     $(".nothing-selected").hide();
 
     $edit_container.show();
     show_membership_settings(group);
     show_general_settings(group);
+
+    update_group_deactivated_banner(group);
+
+    $edit_container
+        .find(".group-assigned-permissions")
+        .on("change", "input", function (this: HTMLElement, e) {
+            e.preventDefault();
+            e.stopPropagation();
+
+            const $subsection = $(this).closest(".settings-subsection-parent");
+            save_discard_widget_handler_for_permissions_panel($subsection);
+
+            return undefined;
+        });
+
+    $edit_container
+        .find(".group-assigned-permissions")
+        .on(
+            "click",
+            ".subsection-header .subsection-changes-discard button",
+            function (this: HTMLElement, e) {
+                e.preventDefault();
+                e.stopPropagation();
+                const $subsection = $(this).closest(".settings-subsection-parent");
+                $subsection.find(".prop-element").prop("checked", true);
+
+                const $save_button_controls = $subsection.find(
+                    ".subsection-header .save-button-controls",
+                );
+                settings_components.change_save_button_state($save_button_controls, "discarded");
+            },
+        );
+
+    $edit_container
+        .find(".realm-group-permissions")
+        .on(
+            "click",
+            ".subsection-header .subsection-changes-save .save-button[data-status='unsaved']",
+            function (this: HTMLElement, e: JQuery.ClickEvent) {
+                e.preventDefault();
+                e.stopPropagation();
+                const $save_button = $(this);
+                const $subsection_elem = $save_button.closest(".settings-subsection-parent");
+                const data = populate_data_for_removing_realm_permissions($subsection_elem, group);
+                settings_org.save_organization_settings(data, $save_button, "/json/realm");
+            },
+        );
+
+    $edit_container
+        .find(".channel-group-permissions")
+        .on(
+            "click",
+            ".subsection-header .subsection-changes-save .save-button[data-status='unsaved']",
+            function (this: HTMLElement, e: JQuery.ClickEvent) {
+                e.preventDefault();
+                e.stopPropagation();
+                const $save_button = $(this);
+                const $subsection_elem = $save_button.closest(".settings-subsection-parent");
+                const stream_id = Number.parseInt($subsection_elem.attr("data-stream-id")!, 10);
+                const sub = sub_store.get(stream_id)!;
+                const data = populate_data_for_removing_stream_permissions(
+                    $subsection_elem,
+                    group,
+                    sub,
+                );
+                const url = "/json/streams/" + stream_id;
+                settings_org.save_organization_settings(data, $save_button, url);
+            },
+        );
+
+    $edit_container
+        .find(".user-group-permissions")
+        .on(
+            "click",
+            ".subsection-header .subsection-changes-save .save-button[data-status='unsaved']",
+            function (this: HTMLElement, e: JQuery.ClickEvent) {
+                e.preventDefault();
+                e.stopPropagation();
+                const $save_button = $(this);
+                const $subsection_elem = $save_button.closest(".settings-subsection-parent");
+                const group_id = Number.parseInt($subsection_elem.attr("data-group-id")!, 10);
+                const user_group = user_groups.get_user_group_from_id(group_id);
+                const data = populate_data_for_removing_user_group_permissions(
+                    $subsection_elem,
+                    group,
+                    user_group,
+                );
+                const url = "/json/user_groups/" + group_id;
+                settings_org.save_organization_settings(data, $save_button, url);
+            },
+        );
 }
 
 export function setup_group_settings(group: UserGroup): void {
@@ -553,6 +1208,7 @@ export function setup_group_settings(group: UserGroup): void {
         values: [
             {label: $t({defaultMessage: "General"}), key: "general"},
             {label: $t({defaultMessage: "Members"}), key: "members"},
+            {label: $t({defaultMessage: "Permissions"}), key: "permissions"},
         ],
         callback(_name, key) {
             $(".group_setting_section").hide();
@@ -584,12 +1240,38 @@ export function setup_group_list_tab_hash(tab_key_value: string): void {
     }
 }
 
+export function update_permissions_panel_on_subgroup_update(subgroup_ids: number[]): void {
+    const active_group_id = get_active_data().id;
+    if (active_group_id === undefined) {
+        return;
+    }
+
+    for (const subgroup_id of subgroup_ids) {
+        if (
+            active_group_id === subgroup_id ||
+            // If one of the supergroup of the currently opened group
+            // is added/removed from it's supergroup, we need to update
+            // the permissions panel.
+            user_groups.is_subgroup_of_target_group(subgroup_id, active_group_id)
+        ) {
+            const group = user_groups.get_user_group_from_id(active_group_id);
+            // We can probably write some logic where we don't need to
+            // calculate everything again on such change, but this
+            // change should not be too frequent in nature and this
+            // approach keeps things simple.
+            show_settings_for(group);
+            return;
+        }
+    }
+    return;
+}
+
 function display_membership_toggle_spinner($group_row: JQuery): void {
     /* Prevent sending multiple requests by removing the button class. */
     $group_row.find(".check").removeClass("join_leave_button");
 
     /* Hide the tick. */
-    const $tick = $group_row.find("svg");
+    const $tick = $group_row.find(".sub-unsub-icon");
     $tick.addClass("hide");
 
     /* Add a spinner to show the request is in process. */
@@ -603,7 +1285,7 @@ function hide_membership_toggle_spinner($group_row: JQuery): void {
     $group_row.find(".check").addClass("join_leave_button");
 
     /* Show the tick. */
-    const $tick = $group_row.find("svg");
+    const $tick = $group_row.find(".sub-unsub-icon");
     $tick.removeClass("hide");
 
     /* Destroy the spinner. */
@@ -613,12 +1295,13 @@ function hide_membership_toggle_spinner($group_row: JQuery): void {
 
 function empty_right_panel(): void {
     $(".group-row.active").removeClass("active");
+    $("#groups_overlay .right").removeClass("show");
     user_group_components.show_user_group_settings_pane.nothing_selected();
 }
 
 function open_right_panel_empty(): void {
     empty_right_panel();
-    const tab_key = $(".user-groups-container")
+    const tab_key = $("#groups_overlay .two-pane-settings-container")
         .find("div.ind-tab.selected")
         .first()
         .attr("data-tab-key");
@@ -639,7 +1322,32 @@ export function handle_deleted_group(group_id: number): void {
     }
 
     if (is_editing_group(group_id)) {
-        open_right_panel_empty();
+        const user_group = user_groups.get_user_group_from_id(group_id);
+        $("#groups_overlay .deactivated-user-group-icon-right").show();
+
+        update_group_deactivated_banner(user_group);
+        update_deactivate_and_reactivate_buttons(user_group);
+        update_toggler_for_group_setting(user_group);
+        update_members_panel_ui(user_group);
+        update_group_membership_button(user_group.id);
+    }
+    redraw_user_group_list();
+}
+
+export function handle_reactivated_group(group_id: number): void {
+    if (!overlays.groups_open()) {
+        return;
+    }
+
+    if (is_editing_group(group_id)) {
+        const user_group = user_groups.get_user_group_from_id(group_id);
+        $("#groups_overlay .deactivated-user-group-icon-right").hide();
+
+        update_group_deactivated_banner(user_group);
+        update_deactivate_and_reactivate_buttons(user_group);
+        update_toggler_for_group_setting(user_group);
+        update_members_panel_ui(user_group);
+        update_group_membership_button(user_group.id);
     }
     redraw_user_group_list();
 }
@@ -704,7 +1412,9 @@ export function is_group_already_present(group: UserGroup): boolean {
 }
 
 export function get_active_data(): ActiveData {
-    const $active_tabs = $(".user-groups-container").find("div.ind-tab.selected");
+    const $active_tabs = $("#groups_overlay .two-pane-settings-container").find(
+        "div.ind-tab.selected",
+    );
     const active_group_id = user_group_components.active_group_id;
     let $row;
     if (active_group_id !== undefined) {
@@ -744,7 +1454,7 @@ export function switch_to_group_row(group: UserGroup): void {
 
 function show_right_section(): void {
     $(".right").addClass("show");
-    $(".user-groups-header").addClass("slide-left");
+    $("#groups_overlay .two-pane-settings-header").addClass("slide-left");
 }
 
 export function add_group_to_table(group: UserGroup): void {
@@ -780,16 +1490,37 @@ export function sync_group_permission_setting(property: string, group: UserGroup
     }
 }
 
-export function update_group(event: UserGroupUpdateEvent): void {
+export function update_group_right_panel(group: UserGroup, changed_settings: string[]): void {
+    if (changed_settings.includes("can_manage_group")) {
+        update_group_management_ui();
+        return;
+    }
+
+    if (
+        changed_settings.includes("can_add_members_group") ||
+        changed_settings.includes("can_remove_members_group")
+    ) {
+        update_group_membership_button(group.id);
+        update_members_panel_ui(group);
+        return;
+    }
+
+    if (
+        changed_settings.includes("can_join_group") ||
+        changed_settings.includes("can_leave_group")
+    ) {
+        update_group_membership_button(group.id);
+        return;
+    }
+}
+
+export function update_group(event: UserGroupUpdateEvent, group: UserGroup): void {
     if (!overlays.groups_open()) {
         return;
     }
 
-    const group_id = event.group_id;
-    const group = user_groups.get_user_group_from_id(group_id);
-
     // update left side pane
-    const $group_row = row_for_group_id(group_id);
+    const $group_row = row_for_group_id(group.id);
     if (event.data.name !== undefined) {
         $group_row.find(".group-name").text(user_groups.get_display_group_name(group.name));
         user_group_create.maybe_update_error_message();
@@ -799,44 +1530,44 @@ export function update_group(event: UserGroupUpdateEvent): void {
         $group_row.find(".description").text(group.description);
     }
 
-    if (event.data.deactivated) {
-        handle_deleted_group(group.id);
+    if (event.data.deactivated !== undefined) {
+        update_filter_widget_visibility();
+        if (event.data.deactivated) {
+            handle_deleted_group(group.id);
+        } else {
+            handle_reactivated_group(group.id);
+        }
         return;
     }
+
+    const changed_group_settings = group_permission_settings
+        .get_group_permission_settings()
+        .filter((setting_name) => event.data[setting_name] !== undefined);
 
     if (get_active_data().id === group.id) {
         // update right side pane
         update_group_details(group);
         if (event.data.name !== undefined) {
             // update settings title
-            $("#groups_overlay .user-group-info-title").text(
-                user_groups.get_display_group_name(group.name),
-            );
+            $("#groups_overlay .user-group-info-title")
+                .text(user_groups.get_display_group_name(group.name))
+                .addClass("showing-info-title");
         }
-        if (event.data.can_mention_group !== undefined) {
-            sync_group_permission_setting("can_mention_group", group);
-            update_group_management_ui();
+
+        if (changed_group_settings.length > 0) {
+            update_group_right_panel(group, changed_group_settings);
         }
-        if (event.data.can_add_members_group !== undefined) {
-            sync_group_permission_setting("can_add_members_group", group);
-            update_group_management_ui();
+    }
+
+    for (const setting_name of changed_group_settings) {
+        if (get_active_data().id === group.id) {
+            sync_group_permission_setting(setting_name, group);
         }
-        if (event.data.can_manage_group !== undefined) {
-            sync_group_permission_setting("can_manage_group", group);
-            update_group_management_ui();
-        }
-        if (event.data.can_join_group !== undefined) {
-            sync_group_permission_setting("can_join_group", group);
-            update_group_membership_button(group.id);
-        }
-        if (event.data.can_leave_group !== undefined) {
-            sync_group_permission_setting("can_leave_group", group);
-            update_group_membership_button(group.id);
-        }
-        if (event.data.can_remove_members_group !== undefined) {
-            sync_group_permission_setting("can_remove_members_group", group);
-            update_group_management_ui();
-        }
+        update_group_setting_in_permissions_panel(
+            setting_name,
+            group_setting_value_schema.parse(event.data[setting_name]),
+            group,
+        );
     }
 }
 
@@ -861,6 +1592,14 @@ export function change_state(
     if (/\d+/.test(section)) {
         const group_id = Number.parseInt(section, 10);
         const group = user_groups.get_user_group_from_id(group_id);
+        const group_visibility = group.deactivated
+            ? FILTERS.DEACTIVATED_GROUPS
+            : FILTERS.ACTIVE_GROUPS;
+
+        update_displayed_groups(group_visibility);
+        if (filters_dropdown_widget) {
+            filters_dropdown_widget.render(group_visibility);
+        }
         show_right_section();
         select_tab = right_side_tab;
 
@@ -893,9 +1632,9 @@ function compare_by_name(a: UserGroup, b: UserGroup): number {
 function redraw_left_panel(tab_name: string): void {
     let groups_list_data;
     if (tab_name === "all-groups") {
-        groups_list_data = user_groups.get_realm_user_groups();
+        groups_list_data = user_groups.get_realm_user_groups(true);
     } else if (tab_name === "your-groups") {
-        groups_list_data = user_groups.get_user_groups_of_user(people.my_current_user_id());
+        groups_list_data = user_groups.get_user_groups_of_user(people.my_current_user_id(), true);
     }
     if (groups_list_data === undefined) {
         return;
@@ -903,7 +1642,6 @@ function redraw_left_panel(tab_name: string): void {
     groups_list_data.sort(compare_by_name);
     group_list_widget.replace_list_data(groups_list_data);
     update_empty_left_panel_message();
-    maybe_reset_right_panel(groups_list_data);
 }
 
 export function redraw_user_group_list(): void {
@@ -918,24 +1656,26 @@ export function switch_group_tab(tab_name: string): void {
         the group_list_toggler widget.  You may instead want to
         use `group_list_toggler.goto`.
     */
+
     redraw_left_panel(tab_name);
     setup_group_list_tab_hash(tab_name);
 }
 
 export function add_or_remove_from_group(group: UserGroup, $group_row: JQuery): void {
     const user_id = people.my_current_user_id();
+    const is_direct_member = user_groups.is_direct_member_of(user_id, group.id);
     function success_callback(): void {
         if ($group_row.length > 0) {
             hide_membership_toggle_spinner($group_row);
             // This should only be triggered when a user is on another group
             // edit panel and they join a group via the left panel plus button.
             // In that case, the edit panel of the newly joined group should
-            // open. `is_user_in_group` with direct_members_only set to true acts
-            // as a proxy to check if it's an `add_members` event.
-            if (
-                !is_editing_group(group.id) &&
-                user_groups.is_user_in_group(group.id, user_id, true)
-            ) {
+            // open. We cannot use `is_user_in_group` or `is_direct_member_of`
+            // since that will only give correct result after the data has been
+            // updated on receiving the `add_members` event. We instead check
+            // if user was a direct member of the group or not before making
+            // the request.
+            if (!is_editing_group(group.id) && !is_direct_member) {
                 open_group_edit_panel_for_row(util.the($group_row));
             }
         }
@@ -950,7 +1690,7 @@ export function add_or_remove_from_group(group: UserGroup, $group_row: JQuery): 
     if ($group_row.length > 0) {
         display_membership_toggle_spinner($group_row);
     }
-    if (user_groups.is_direct_member_of(user_id, group.id)) {
+    if (is_direct_member) {
         user_group_edit_members.edit_user_group_membership({
             group,
             removed: [user_id],
@@ -967,41 +1707,65 @@ export function add_or_remove_from_group(group: UserGroup, $group_row: JQuery): 
     }
 }
 
-export function maybe_reset_right_panel(groups_list_data: UserGroup[]): void {
-    if (user_group_components.active_group_id === undefined) {
-        return;
-    }
-
-    const group_ids = new Set(groups_list_data.map((group) => group.id));
-    if (!group_ids.has(user_group_components.active_group_id)) {
-        user_group_components.show_user_group_settings_pane.nothing_selected();
-    }
-}
-
 export function update_empty_left_panel_message(): void {
     // Check if we have any groups in panel to decide whether to
     // display a notice.
-    let has_groups;
     const is_your_groups_tab_active =
         get_active_data().$tabs.first().attr("data-tab-key") === "your-groups";
-    if (is_your_groups_tab_active) {
-        has_groups = user_groups.get_user_groups_of_user(people.my_current_user_id()).length;
-    } else {
-        has_groups = user_groups.get_realm_user_groups().length;
+
+    let current_group_filter =
+        z.optional(z.string()).parse(filters_dropdown_widget.value()) ??
+        FILTERS.ACTIVE_AND_DEACTIVATED_GROUPS;
+
+    // When the dropdown menu is hidden.
+    if ($("#user-group-edit-filter-options").css("display") === "none") {
+        current_group_filter = FILTERS.ACTIVE_AND_DEACTIVATED_GROUPS;
     }
-    if (has_groups) {
+
+    if (
+        $("#groups_overlay").find(
+            ".user-groups-list:not(.hide-deactivated-user-groups) .group-row.deactivated-group, .user-groups-list:not(.hide-active-user-groups) .group-row:not(.deactivated-group)",
+        ).length > 0
+    ) {
         $(".no-groups-to-show").hide();
         return;
     }
-    if (is_your_groups_tab_active) {
-        $(".all_groups_tab_empty_text").hide();
-        $(".your_groups_tab_empty_text").show();
-    } else {
-        $(".your_groups_tab_empty_text").hide();
-        $(".all_groups_tab_empty_text").show();
-    }
-    $(".no-groups-to-show").show();
+
+    const empty_user_group_list_message = get_empty_user_group_list_message(
+        current_group_filter,
+        is_your_groups_tab_active,
+    );
+
+    const args = {
+        empty_user_group_list_message,
+        can_create_user_groups:
+            settings_data.user_can_create_user_groups() && realm.zulip_plan_is_not_limited,
+        all_groups_tab: !is_your_groups_tab_active,
+    };
+
+    $(".no-groups-to-show").html(render_user_group_settings_empty_notice(args)).show();
 }
+
+function get_empty_user_group_list_message(
+    current_group_filter: string,
+    is_your_groups_tab_active: boolean,
+): string {
+    const is_searching = $("#search_group_name").val() !== "";
+    if (is_searching || current_group_filter !== FILTERS.ACTIVE_AND_DEACTIVATED_GROUPS) {
+        return $t({defaultMessage: "There are no groups matching your filters."});
+    }
+
+    if (is_your_groups_tab_active) {
+        return $t({defaultMessage: "You are not a member of any user groups."});
+    }
+    return $t({
+        defaultMessage: "There are no user groups you can view in this organization.",
+    });
+}
+
+const throttled_update_empty_left_panel_message = _.throttle(() => {
+    update_empty_left_panel_message();
+}, 100);
 
 export function remove_deactivated_user_from_all_groups(user_id: number): void {
     const all_user_groups = user_groups.get_realm_user_groups(true);
@@ -1014,6 +1778,79 @@ export function remove_deactivated_user_from_all_groups(user_id: number): void {
         // update members list if currently rendered.
         if (overlays.groups_open() && is_editing_group(user_group.id)) {
             user_group_edit_members.update_member_list_widget(user_group);
+        }
+    }
+}
+
+export function update_displayed_groups(filter_id: string): void {
+    if (filter_id === FILTERS.ACTIVE_GROUPS) {
+        $(".user-groups-list").addClass("hide-deactivated-user-groups");
+        $(".user-groups-list").removeClass("hide-active-user-groups");
+    } else if (filter_id === FILTERS.DEACTIVATED_GROUPS) {
+        $(".user-groups-list").removeClass("hide-deactivated-user-groups");
+        $(".user-groups-list").addClass("hide-active-user-groups");
+    } else {
+        $(".user-groups-list").removeClass("hide-deactivated-user-groups");
+        $(".user-groups-list").removeClass("hide-active-user-groups");
+    }
+}
+
+export function filter_click_handler(
+    event: JQuery.TriggeredEvent,
+    dropdown: tippy.Instance,
+    widget: dropdown_widget.DropdownWidget,
+): void {
+    event.preventDefault();
+    event.stopPropagation();
+    const filter_id = z.string().parse(widget.value());
+    update_displayed_groups(filter_id);
+    update_empty_left_panel_message();
+    dropdown.hide();
+    widget.render();
+}
+
+function filters_dropdown_options(
+    current_value: string | number | undefined,
+): dropdown_widget.Option[] {
+    return [
+        {
+            unique_id: FILTERS.ACTIVE_GROUPS,
+            name: FILTERS.ACTIVE_GROUPS,
+            bold_current_selection: current_value === FILTERS.ACTIVE_GROUPS,
+        },
+        {
+            unique_id: FILTERS.DEACTIVATED_GROUPS,
+            name: FILTERS.DEACTIVATED_GROUPS,
+            bold_current_selection: current_value === FILTERS.DEACTIVATED_GROUPS,
+        },
+        {
+            unique_id: FILTERS.ACTIVE_AND_DEACTIVATED_GROUPS,
+            name: FILTERS.ACTIVE_AND_DEACTIVATED_GROUPS,
+            bold_current_selection: current_value === FILTERS.ACTIVE_AND_DEACTIVATED_GROUPS,
+        },
+    ];
+}
+
+function setup_dropdown_filters_widget(): void {
+    filters_dropdown_widget = new dropdown_widget.DropdownWidget({
+        ...views_util.COMMON_DROPDOWN_WIDGET_PARAMS,
+        get_options: filters_dropdown_options,
+        widget_name: "user_group_visibility_settings",
+        item_click_callback: filter_click_handler,
+        $events_container: $("#user-group-edit-filter-options"),
+        default_id: initial_group_filter,
+    });
+    filters_dropdown_widget.setup();
+}
+
+function update_filter_widget_visibility(): void {
+    if (user_groups.realm_has_deactivated_user_groups()) {
+        $("#user-group-edit-filter-options").show();
+    } else {
+        $("#user-group-edit-filter-options").hide();
+        update_displayed_groups(FILTERS.ACTIVE_GROUPS);
+        if (filters_dropdown_widget) {
+            filters_dropdown_widget.render(FILTERS.ACTIVE_GROUPS);
         }
     }
 }
@@ -1031,17 +1868,20 @@ export function setup_page(callback: () => void): void {
             },
         });
 
+        update_filter_widget_visibility();
         group_list_toggler.get().prependTo("#groups_overlay_container .list-toggler-container");
+        setup_dropdown_filters_widget();
     }
 
     function populate_and_fill(): void {
         const template_data = {
-            can_create_user_groups: settings_data.user_can_create_user_groups(),
             zulip_plan_is_not_limited: realm.zulip_plan_is_not_limited,
             upgrade_text_for_wide_organization_logo: realm.upgrade_text_for_wide_organization_logo,
             is_business_type_org:
                 realm.realm_org_type === settings_config.all_org_type_values.business.code,
             max_user_group_name_length: user_groups.max_user_group_name_length,
+            all_group_setting_labels: settings_config.all_group_setting_labels,
+            has_billing_access: settings_data.user_has_billing_access(),
         };
 
         const groups_overlay_html = render_user_group_settings_overlay(template_data);
@@ -1050,19 +1890,14 @@ export function setup_page(callback: () => void): void {
             $("#groups_overlay_container"),
         );
         $groups_overlay_container.html(groups_overlay_html);
-
-        const context = {
-            banner_type: compose_banner.INFO,
-            classname: "group_info",
-            hide_close_button: true,
-            button_text: $t({defaultMessage: "Learn more"}),
-            button_link: "/help/user-groups",
-        };
-
-        $("#groups_overlay_container .nothing-selected .group-info-banner").html(
-            render_group_info_banner(context),
+        update_displayed_groups(initial_group_filter);
+        settings_banner.set_up_banner(
+            $(".group-info-banner"),
+            GROUP_INFO_BANNER,
+            "/help/user-groups",
         );
 
+        settings_banner.set_up_upgrade_banners();
         // Initially as the overlay is build with empty right panel,
         // active_group_id is undefined.
         user_group_components.reset_active_group_id();
@@ -1117,6 +1952,8 @@ export function setup_page(callback: () => void): void {
                     );
                 },
                 onupdate() {
+                    // We throttle this to not call this check on every keypress
+                    throttled_update_empty_left_panel_message();
                     if (user_group_components.active_group_id !== undefined) {
                         const active_group = user_groups.get_user_group_from_id(
                             user_group_components.active_group_id,
@@ -1130,7 +1967,7 @@ export function setup_page(callback: () => void): void {
                 },
             },
             init_sort: ["alphabetic", "name"],
-            $simplebar_container: $container,
+            $simplebar_container: $("#groups_overlay .user-groups-list-wrapper"),
         });
 
         initialize_components();
@@ -1147,64 +1984,6 @@ export function setup_page(callback: () => void): void {
     }
 
     populate_and_fill();
-}
-
-type DeactivationBannerArgs = {
-    streams_using_group_for_setting: {
-        stream_name: string;
-        setting_url: string | undefined;
-    }[];
-    groups_using_group_for_setting: {
-        group_name: string;
-        setting_url: string;
-    }[];
-    realm_using_group_for_setting: boolean;
-};
-
-function parse_args_for_deactivation_banner(
-    objections: Record<string, unknown>[],
-): DeactivationBannerArgs {
-    const args: DeactivationBannerArgs = {
-        streams_using_group_for_setting: [],
-        groups_using_group_for_setting: [],
-        realm_using_group_for_setting: false,
-    };
-    for (const objection of objections) {
-        if (objection.type === "channel") {
-            const stream_id = objection.channel_id;
-            assert(typeof stream_id === "number");
-            const sub = stream_data.get_sub_by_id(stream_id);
-            if (sub !== undefined) {
-                args.streams_using_group_for_setting.push({
-                    stream_name: sub.name,
-                    setting_url: hash_util.channels_settings_edit_url(sub, "general"),
-                });
-            } else {
-                args.streams_using_group_for_setting.push({
-                    stream_name: $t({defaultMessage: "Unknown channel"}),
-                    setting_url: undefined,
-                });
-            }
-            continue;
-        }
-
-        if (objection.type === "user_group") {
-            const group_id = objection.group_id;
-            assert(typeof group_id === "number");
-            const group = user_groups.get_user_group_from_id(group_id);
-            const setting_url = hash_util.group_edit_url(group, "general");
-            args.groups_using_group_for_setting.push({
-                group_name: user_groups.get_display_group_name(group.name),
-                setting_url,
-            });
-            continue;
-        }
-
-        if (objection.type === "realm") {
-            args.realm_using_group_for_setting = true;
-        }
-    }
-    return args;
 }
 
 export function initialize(): void {
@@ -1248,67 +2027,143 @@ export function initialize(): void {
         },
     );
 
-    $("#groups_overlay_container").on("click", ".group_settings_header .button-danger", () => {
-        const active_group_data = get_active_data();
-        const group_id = active_group_data.id;
-        assert(group_id !== undefined);
-        const user_group = user_groups.get_user_group_from_id(group_id);
+    $("#groups_overlay_container").on(
+        "click",
+        ".group_settings_header .deactivate-group-button",
+        () => {
+            const active_group_data = get_active_data();
+            const group_id = active_group_data.id;
+            assert(group_id !== undefined);
+            const user_group = user_groups.get_user_group_from_id(group_id);
 
-        if (!user_group || !settings_data.can_manage_user_group(group_id)) {
-            return;
-        }
-        function deactivate_user_group(): void {
-            channel.post({
-                url: "/json/user_groups/" + group_id + "/deactivate",
-                data: {},
+            if (!user_group || !settings_data.can_manage_user_group(group_id)) {
+                return;
+            }
+            function deactivate_user_group(): void {
+                channel.post({
+                    url: "/json/user_groups/" + group_id + "/deactivate",
+                    data: {},
+                    success() {
+                        dialog_widget.close();
+                        active_group_data.$row?.remove();
+                    },
+                    error(xhr) {
+                        dialog_widget.hide_dialog_spinner();
+                        const parsed = z
+                            .object({
+                                code: z.string(),
+                                msg: z.string(),
+                                objections: z.array(z.record(z.string(), z.unknown())),
+                                result: z.string(),
+                            })
+                            .safeParse(xhr.responseJSON);
+                        if (
+                            parsed.success &&
+                            parsed.data.code === "CANNOT_DEACTIVATE_GROUP_IN_USE"
+                        ) {
+                            const subgroup_objections = parsed.data.objections.filter(
+                                (objection) => objection["type"] === "subgroup",
+                            );
+                            let group_used_for_permissions = true;
+                            let supergroups;
+                            if (subgroup_objections.length === parsed.data.objections.length) {
+                                // If the user group is only used as subgroups and not in
+                                // any of the permission, then we show a different error
+                                // message.
+                                const supergroup_ids = z
+                                    .array(z.number())
+                                    .parse(subgroup_objections[0]!["supergroup_ids"]);
+                                supergroups = supergroup_ids.map((group_id) => {
+                                    const group = user_groups.get_user_group_from_id(group_id);
+                                    const group_name = user_groups.get_display_group_name(
+                                        group.name,
+                                    );
+                                    return {
+                                        group_id,
+                                        group_name,
+                                        settings_url: hash_util.group_edit_url(group, "members"),
+                                    };
+                                });
+                                group_used_for_permissions = false;
+                            }
+                            $("#deactivation-confirm-modal .dialog_submit_button").prop(
+                                "disabled",
+                                true,
+                            );
+                            const rendered_error_banner = render_cannot_deactivate_group_banner({
+                                group_used_for_permissions,
+                                supergroups,
+                            });
+
+                            $("#dialog_error")
+                                .html(rendered_error_banner)
+                                .addClass("alert-error")
+                                .show();
+
+                            $("#dialog_error .permissions-button").on("click", () => {
+                                select_tab = "permissions";
+                                update_toggler_for_group_setting(user_group);
+                                dialog_widget.close();
+                            });
+                        } else {
+                            ui_report.error(
+                                $t({defaultMessage: "Failed"}),
+                                xhr,
+                                $("#dialog_error"),
+                            );
+                        }
+                    },
+                });
+            }
+
+            const group_name = user_groups.get_display_group_name(user_group.name);
+            const html_body = render_confirm_deactivate_user_group({
+                group_name,
+            });
+
+            confirm_dialog.launch({
+                html_heading: $t_html({defaultMessage: "Deactivate {group_name}?"}, {group_name}),
+                html_body,
+                on_click: deactivate_user_group,
+                close_on_submit: false,
+                loading_spinner: true,
+                id: "deactivation-confirm-modal",
+            });
+        },
+    );
+
+    $("#groups_overlay_container").on(
+        "click",
+        ".group_settings_header .reactivate-group-button",
+        function (this: HTMLElement) {
+            const active_group_data = get_active_data();
+            const group_id = active_group_data.id;
+            assert(group_id !== undefined);
+            const $button = $(this);
+            buttons.show_button_loading_indicator($button);
+            const data = {deactivated: JSON.stringify(false)};
+            channel.patch({
+                url: "/json/user_groups/" + group_id,
+                data,
                 success() {
-                    dialog_widget.close();
-                    active_group_data.$row?.remove();
+                    buttons.hide_button_loading_indicator($button);
                 },
                 error(xhr) {
-                    dialog_widget.hide_dialog_spinner();
-                    const parsed = z
-                        .object({
-                            code: z.string(),
-                            msg: z.string(),
-                            objections: z.array(z.record(z.string(), z.unknown())),
-                            result: z.string(),
-                        })
-                        .safeParse(xhr.responseJSON);
-                    if (parsed.success && parsed.data.code === "CANNOT_DEACTIVATE_GROUP_IN_USE") {
-                        $("#deactivation-confirm-modal .dialog_submit_button").prop(
-                            "disabled",
-                            true,
-                        );
-                        const objections = parsed.data.objections;
-                        const template_args = parse_args_for_deactivation_banner(objections);
-                        const rendered_error_banner =
-                            render_cannot_deactivate_group_banner(template_args);
-                        $("#dialog_error")
-                            .html(rendered_error_banner)
-                            .addClass("alert-error")
-                            .show();
-                    } else {
-                        ui_report.error($t({defaultMessage: "Failed"}), xhr, $("#dialog_error"));
-                    }
+                    const message = channel.xhr_error_message($t({defaultMessage: "Failed"}), xhr);
+                    const context = {
+                        banner_type: compose_banner.ERROR,
+                        classname: "group-reactivation-error",
+                        hide_close_button: false,
+                        banner_text: message,
+                    };
+                    $("#user_group_settings .group-reactivation-error-banner").html(
+                        render_modal_banner(context),
+                    );
+                    buttons.hide_button_loading_indicator($button);
                 },
             });
-        }
-
-        const group_name = user_groups.get_display_group_name(user_group.name);
-        const html_body = render_confirm_delete_user({
-            group_name,
-        });
-
-        confirm_dialog.launch({
-            html_heading: $t_html({defaultMessage: "Deactivate {group_name}?"}, {group_name}),
-            html_body,
-            on_click: deactivate_user_group,
-            close_on_submit: false,
-            loading_spinner: true,
-            id: "deactivation-confirm-modal",
-        });
-    });
+        },
+    );
 
     function save_group_info(e: JQuery.ClickEvent): void {
         assert(e.currentTarget instanceof HTMLElement);
@@ -1338,64 +2193,78 @@ export function initialize(): void {
         open_create_user_group();
     });
 
-    $("#groups_overlay_container").on("click", "#user_group_creation_form [data-dismiss]", (e) => {
-        e.preventDefault();
-        // we want to make sure that the click is not just a simulated
-        // click; this fixes an issue where hitting "Enter" would
-        // trigger this code path due to bootstrap magic.
-        if (e.clientY !== 0) {
-            open_right_panel_empty();
-        }
-    });
+    $("#groups_overlay_container").on(
+        "click",
+        "#user_group_creation_form .create_user_group_cancel",
+        (e) => {
+            e.preventDefault();
+            // we want to make sure that the click is not just a simulated
+            // click; this fixes an issue where hitting "Enter" would
+            // trigger this code path due to bootstrap magic.
+            if (e.clientY !== 0) {
+                open_right_panel_empty();
+            }
+        },
+    );
 
     $("#groups_overlay_container").on("click", ".group-row", show_right_section);
 
     $("#groups_overlay_container").on("click", ".fa-chevron-left", () => {
         $(".right").removeClass("show");
-        $(".user-groups-header").removeClass("slide-left");
-    });
-
-    $("#groups_overlay_container").on("click", ".join_leave_button", function (this: HTMLElement) {
-        if ($(this).hasClass("disabled") || $(this).hasClass("not-direct-member")) {
-            // We return early if user is not allowed to join or leave a group.
-            return;
-        }
-
-        const user_group_id = get_user_group_id(this);
-        const user_group = user_groups.get_user_group_from_id(user_group_id);
-        const is_member = user_groups.is_user_in_group(user_group_id, people.my_current_user_id());
-        const is_direct_member = user_groups.is_direct_member_of(
-            people.my_current_user_id(),
-            user_group_id,
-        );
-
-        if (is_member && !is_direct_member) {
-            const associated_subgroups = user_groups.get_associated_subgroups(
-                user_group,
-                people.my_current_user_id(),
-            );
-            const associated_subgroup_names = user_groups.format_group_list(associated_subgroups);
-
-            confirm_dialog.launch({
-                html_heading: $t_html({defaultMessage: "Join group?"}),
-                html_body: render_confirm_join_group_direct_member({
-                    associated_subgroup_names,
-                }),
-                id: "confirm_join_group_direct_member",
-                on_click() {
-                    const $group_row = row_for_group_id(user_group_id);
-                    add_or_remove_from_group(user_group, $group_row);
-                },
-            });
-        } else {
-            const $group_row = row_for_group_id(user_group_id);
-            add_or_remove_from_group(user_group, $group_row);
-        }
+        $("#groups_overlay_container .two-pane-settings-header").removeClass("slide-left");
+        resize.resize_settings_overlay_subheader($("#groups_overlay_container"));
     });
 
     $("#groups_overlay_container").on(
         "click",
-        ".subsection-header .subsection-changes-save button",
+        ".join_leave_button",
+        function (this: HTMLElement, e) {
+            if ($(this).hasClass("disabled") || $(this).hasClass("not-direct-member")) {
+                // We return early if user is not allowed to join or leave a group.
+                return;
+            }
+
+            const user_group_id = get_user_group_id(this);
+            const user_group = user_groups.get_user_group_from_id(user_group_id);
+            const is_member = user_groups.is_user_in_group(
+                user_group_id,
+                people.my_current_user_id(),
+            );
+            const is_direct_member = user_groups.is_direct_member_of(
+                people.my_current_user_id(),
+                user_group_id,
+            );
+
+            if (is_member && !is_direct_member) {
+                const associated_subgroups = user_groups.get_associated_subgroups(
+                    user_group,
+                    people.my_current_user_id(),
+                );
+                const associated_subgroup_names =
+                    user_groups.format_group_list(associated_subgroups);
+
+                confirm_dialog.launch({
+                    html_heading: $t_html({defaultMessage: "Join group?"}),
+                    html_body: render_confirm_join_group_direct_member({
+                        associated_subgroup_names,
+                    }),
+                    id: "confirm_join_group_direct_member",
+                    on_click() {
+                        const $group_row = row_for_group_id(user_group_id);
+                        add_or_remove_from_group(user_group, $group_row);
+                    },
+                });
+            } else {
+                const $group_row = row_for_group_id(user_group_id);
+                add_or_remove_from_group(user_group, $group_row);
+            }
+            e.stopPropagation();
+        },
+    );
+
+    $("#groups_overlay_container").on(
+        "click",
+        ".subsection-header .subsection-changes-save .save-button[data-status='unsaved']",
         function (this: HTMLElement, e) {
             e.preventDefault();
             e.stopPropagation();
@@ -1434,6 +2303,16 @@ export function initialize(): void {
             settings_org.discard_group_settings_subsection_changes($subsection, group);
         },
     );
+
+    $("#groups_overlay_container").on(
+        "click",
+        ".group-reactivation-error-banner .main-view-banner-close-button",
+        () => {
+            $(
+                "#user_group_settings .group-reactivation-error-banner .group-reactivation-error",
+            ).remove();
+        },
+    );
 }
 
 export function launch(
@@ -1450,6 +2329,8 @@ export function launch(
             },
         });
         change_state(section, left_side_tab, right_side_tab);
+        resize.resize_settings_overlay($("#groups_overlay_container"));
+        update_group_creation_ui();
     });
     if (!get_active_data().id) {
         if (section === "new") {

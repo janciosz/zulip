@@ -255,6 +255,7 @@ def realm_summary_table(export: bool) -> str:
             RealmAuditLog.HOW_REALM_CREATOR_FOUND_ZULIP_OPTIONS["other"],
             RealmAuditLog.HOW_REALM_CREATOR_FOUND_ZULIP_OPTIONS["ad"],
             RealmAuditLog.HOW_REALM_CREATOR_FOUND_ZULIP_OPTIONS["review_site"],
+            RealmAuditLog.HOW_REALM_CREATOR_FOUND_ZULIP_OPTIONS["ai_chatbot"],
         ):
             row["how_realm_creator_found_zulip"] += f": {extra_context}"
         elif how_found == RealmAuditLog.HOW_REALM_CREATOR_FOUND_ZULIP_OPTIONS["existing_user"]:
@@ -327,7 +328,7 @@ def realm_summary_table(export: bool) -> str:
             rows=rows,
             totals=total_row,
             num_active_sites=num_active_sites,
-            utctime=now.strftime("%Y-%m-%d %H:%M %Z"),
+            utctime=now.isoformat(" ", "minutes"),
             billing_enabled=settings.BILLING_ENABLED,
             export=export,
         ),

@@ -2,6 +2,7 @@
 
 const assert = require("node:assert/strict");
 
+const {make_realm} = require("./lib/example_realm.cjs");
 const {mock_esm, zrequire} = require("./lib/namespace.cjs");
 const {run_test, noop} = require("./lib/test.cjs");
 const $ = require("./lib/zjquery.cjs");
@@ -25,11 +26,12 @@ const message_events = zrequire("message_events");
 const message_helper = zrequire("message_helper");
 const {set_realm} = zrequire("state_data");
 const stream_data = zrequire("stream_data");
+const settings_config = zrequire("settings_config");
 const stream_topic_history = zrequire("stream_topic_history");
 const unread = zrequire("unread");
 const {initialize_user_settings} = zrequire("user_settings");
 
-const realm = {};
+const realm = make_realm();
 set_realm(realm);
 
 initialize_user_settings({user_settings: {}});
@@ -47,7 +49,7 @@ const denmark = {
     name: "Denmark",
     stream_id: 101,
 };
-stream_data.add_sub(denmark);
+stream_data.add_sub_for_tests(denmark);
 
 function test_helper(side_effects) {
     const events = [];
@@ -58,13 +60,11 @@ function test_helper(side_effects) {
         };
     }
 
-    const self = {};
-
-    self.verify = () => {
-        assert.deepEqual(side_effects, events);
+    return {
+        verify() {
+            assert.deepEqual(side_effects, events);
+        },
     };
-
-    return self;
 }
 
 run_test("update_messages", ({override, override_rewire}) => {
@@ -78,9 +78,15 @@ run_test("update_messages", ({override, override_rewire}) => {
         stream_id: denmark.stream_id,
         topic: "lunch",
         type: "stream",
+        reactions: [],
+        submessages: [],
+        avatar_url: `/avatar/${alice.user_id}`,
     };
 
-    const original_message = message_helper.process_new_message(raw_message);
+    const original_message = message_helper.process_new_message({
+        type: "server_message",
+        raw_message,
+    }).message;
 
     assert.equal(original_message.mentioned, true);
     assert.equal(original_message.unread, true);
@@ -119,7 +125,11 @@ run_test("update_messages", ({override, override_rewire}) => {
 
     const helper = test_helper(side_effects);
 
-    override(realm, "realm_allow_edit_history", false);
+    override(
+        realm,
+        "realm_message_edit_history_visibility_policy",
+        settings_config.message_edit_history_visibility_policy_values.never.code,
+    );
 
     const $message_edit_history_modal = $.create("#message-edit-history");
     const $modal = $.create("micromodal").addClass("modal--open");
@@ -134,6 +144,7 @@ run_test("update_messages", ({override, override_rewire}) => {
 
     assert.deepEqual(rendered_mgs, [
         {
+            avatar_url: `/avatar/${alice.user_id}`,
             display_reply_to: undefined,
             alerted: false,
             clean_reactions: new Map(),
@@ -159,6 +170,7 @@ run_test("update_messages", ({override, override_rewire}) => {
             status_emoji_info: undefined,
             stream_id: denmark.stream_id,
             stream: "Denmark",
+            submessages: [],
             topic: "lunch",
             type: "stream",
             unread: true,

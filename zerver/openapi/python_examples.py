@@ -99,6 +99,30 @@ def validate_message(client: Client, message_id: int, content: Any) -> None:
     assert result["raw_content"] == content
 
 
+def set_moderation_request_channel(client: Client, channel: str | None = "core team") -> None:
+    if channel is None:
+        # Disable moderation request feature
+        channel_id = "-1"
+    else:
+        channel_id = client.get_stream_id(channel)["stream_id"]
+
+    request = dict(moderation_request_channel_id=channel_id)
+    result = client.call_endpoint("/realm", method="PATCH", request=request)
+    assert_success_response(result)
+
+
+def get_users_messages(client: Client, user_id: int) -> list[dict[str, Any]]:
+    request: dict[str, Any] = {
+        "anchor": "newest",
+        "num_before": 100,
+        "num_after": 0,
+        "narrow": [{"operator": "sender", "operand": user_id}],
+    }
+    result = client.get_messages(request)
+    assert_success_response(result)
+    return result["messages"]
+
+
 @openapi_test_function("/users/me/subscriptions:post")
 def add_subscriptions(client: Client) -> None:
     # {code_example|start}
@@ -453,6 +477,18 @@ def resend_email_invitation(client: Client) -> None:
     validate_against_openapi_schema(result, "/invites/{invite_id}/resend", "post", "200")
 
 
+@openapi_test_function("/realm/test_welcome_bot_custom_message:post")
+def test_welcome_bot_custom_message(client: Client) -> None:
+    # {code_example|start}
+    # Send a test welcome bot custom message with the provided text.
+    request = {"welcome_message_custom_text": "Custom Welcome Message Text"}
+    result = client.call_endpoint(
+        "/realm/test_welcome_bot_custom_message", method="POST", request=request
+    )
+    # {code_example|end}
+    validate_against_openapi_schema(result, "/realm/test_welcome_bot_custom_message", "post", "200")
+
+
 @openapi_test_function("/users/{user_id}:get")
 def get_single_user(client: Client) -> None:
     user_id = 8
@@ -514,6 +550,21 @@ def update_user(client: Client) -> None:
     # {code_example|end}
     assert_success_response(result)
     validate_against_openapi_schema(result, "/users/{user_id}", "patch", "200")
+
+
+@openapi_test_function("/users/{user_id}/channels:get")
+def get_user_channels(client: Client) -> None:
+    user_id = 7
+    ensure_users([user_id], ["zoe"])
+    # {code_example|start}
+    # Get channel IDs a user is subscribed to.
+    result = client.call_endpoint(
+        url=f"/users/{user_id}/channels",
+        method="GET",
+    )
+    # {code_example|end}
+    assert_success_response(result)
+    validate_against_openapi_schema(result, "/users/{user_id}/channels", "get", "200")
 
 
 @openapi_test_function("/users/{user_id}/subscriptions/{stream_id}:get")
@@ -826,12 +877,6 @@ def get_user_groups(client: Client) -> int:
     return leadership_user_group["id"]
 
 
-def test_user_not_authorized_error(nonadmin_client: Client) -> None:
-    result = nonadmin_client.get_streams(include_all_active=True)
-    assert_error_response(result)
-    validate_against_openapi_schema(result, "/rest-error-handling", "post", "400")
-
-
 @openapi_test_function("/streams/{stream_id}/members:get")
 def get_subscribers(client: Client) -> None:
     user_ids = [11, 25]
@@ -1142,6 +1187,74 @@ def remove_attachment(client: Client, attachment_id: int) -> None:
     validate_against_openapi_schema(result, "/attachments/{attachment_id}", "delete", "200")
 
 
+@openapi_test_function("/navigation_views:get")
+def get_navigation_views(client: Client) -> None:
+    # {code_example|start}
+    # Get all navigation views for the user
+    result = client.call_endpoint(
+        url="navigation_views",
+        method="GET",
+    )
+    # {code_example|end}
+    assert_success_response(result)
+    validate_against_openapi_schema(result, "/navigation_views", "get", "200")
+
+
+@openapi_test_function("/navigation_views:post")
+def add_navigation_views(client: Client) -> None:
+    # {code_example|start}
+    # Add a navigation view
+    request = {
+        "fragment": "narrow/is/alerted",
+        "is_pinned": True,
+        "name": "Alert Word",
+    }
+    result = client.call_endpoint(
+        url="navigation_views",
+        method="POST",
+        request=request,
+    )
+    # {code_example|end}
+    assert_success_response(result)
+    validate_against_openapi_schema(result, "/navigation_views", "post", "200")
+
+
+@openapi_test_function("/navigation_views/{fragment}:patch")
+def update_navigation_views(client: Client) -> None:
+    # Fetch navigation views for updating
+    result = client.call_endpoint(url="navigation_views", method="GET")
+    fragment = result["navigation_views"][0]["fragment"]
+    # {code_example|start}
+    # Update a navigation view's location
+    request = {
+        "is_pinned": True,
+    }
+    result = client.call_endpoint(
+        url=f"navigation_views/{fragment}",
+        method="PATCH",
+        request=request,
+    )
+    # {code_example|end}
+    assert_success_response(result)
+    validate_against_openapi_schema(result, "/navigation_views/{fragment}", "patch", "200")
+
+
+@openapi_test_function("/navigation_views/{fragment}:delete")
+def remove_navigation_views(client: Client) -> None:
+    # Fetch navigation views for deletion
+    result = client.call_endpoint(url="navigation_views", method="GET")
+    fragment = result["navigation_views"][0]["fragment"]
+    # {code_example|start}
+    # Remove a navigation views
+    result = client.call_endpoint(
+        url=f"navigation_views/{fragment}",
+        method="DELETE",
+    )
+    # {code_example|end}
+    assert_success_response(result)
+    validate_against_openapi_schema(result, "/navigation_views/{fragment}", "delete", "200")
+
+
 @openapi_test_function("/saved_snippets:post")
 def create_saved_snippet(client: Client) -> None:
     # {code_example|start}
@@ -1158,7 +1271,7 @@ def create_saved_snippet(client: Client) -> None:
 
 
 @openapi_test_function("/saved_snippets:get")
-def get_saved_snippets(client: Client) -> None:
+def get_saved_snippets(client: Client) -> int:
     # {code_example|start}
     # Get all the saved snippets.
     result = client.call_endpoint(
@@ -1169,12 +1282,26 @@ def get_saved_snippets(client: Client) -> None:
     assert_success_response(result)
     validate_against_openapi_schema(result, "/saved_snippets", "get", "200")
 
+    return result["saved_snippets"][0]["id"]
+
+
+@openapi_test_function("/saved_snippets/{saved_snippet_id}:patch")
+def edit_saved_snippet(client: Client, saved_snippet_id: int) -> None:
+    # {code_example|start}
+    # Edit a saved snippet.
+    request = {"title": "New welcome message", "content": "Welcome to Zulip!"}
+    result = client.call_endpoint(
+        request=request,
+        url=f"/saved_snippets/{saved_snippet_id}",
+        method="PATCH",
+    )
+    # {code_example|end}
+    assert_success_response(result)
+    validate_against_openapi_schema(result, "/saved_snippets/{saved_snippet_id}", "patch", "200")
+
 
 @openapi_test_function("/saved_snippets/{saved_snippet_id}:delete")
-def delete_saved_snippet(client: Client) -> None:
-    saved_snippet_id = client.call_endpoint(url="/saved_snippets", method="GET")["saved_snippets"][
-        0
-    ]["id"]
+def delete_saved_snippet(client: Client, saved_snippet_id: int) -> None:
     # {code_example|start}
     # Delete a saved snippet.
     result = client.call_endpoint(
@@ -1187,7 +1314,7 @@ def delete_saved_snippet(client: Client) -> None:
 
 
 @openapi_test_function("/messages:post")
-def send_message(client: Client) -> int:
+def send_message(client: Client) -> tuple[int, str]:
     request: dict[str, Any] = {}
     # {code_example|start}
     # Send a channel message.
@@ -1223,7 +1350,7 @@ def send_message(client: Client) -> int:
     # Confirm the message was actually sent.
     message_id = result["id"]
     validate_message(client, message_id, request["content"])
-    return message_id
+    return message_id, request["content"]
 
 
 @openapi_test_function("/messages/{message_id}/reactions:post")
@@ -1290,7 +1417,11 @@ def test_private_message_invalid_recipient(client: Client) -> None:
 
 
 @openapi_test_function("/messages/{message_id}:patch")
-def update_message(client: Client, message_id: int) -> None:
+def update_message(client: Client, message_id: int, prev_content: str) -> None:
+    # We elect not to pass prev_content_sha256, because at present, it
+    # is likely to be experienced as clutter for almost all end users
+    # of this API.
+    #
     # {code_example|start}
     # Edit a message. Make sure that `message_id` is set to the ID of the
     # message you wish to update.
@@ -1401,6 +1532,25 @@ def update_message_flags(client: Client) -> None:
     validate_against_openapi_schema(result, "/messages/flags", "post", "200")
 
 
+@openapi_test_function("/messages/{message_id}/report:post")
+def report_message(client: Client) -> None:
+    set_moderation_request_channel(client)
+    ensure_users([10], ["hamlet"])
+    hamlets_messages = get_users_messages(client, 10)
+    message_id = hamlets_messages[0]["id"]
+    # {code_example|start}
+    request = {
+        "report_type": "harassment",
+        "description": "Boromir is bullying Frodo.",
+    }
+    # Report a message, given the message's ID.
+    result = client.call_endpoint(f"/messages/{message_id}/report", method="POST", request=request)
+    # {code_example|end}
+    assert_success_response(result)
+
+    validate_against_openapi_schema(result, "/messages/{message_id}/report", "post", "200")
+
+
 def register_queue_all_events(client: Client) -> str:
     # Register the queue and get all events.
     # Mainly for verifying schema of /register.
@@ -1509,7 +1659,7 @@ def get_stream_topics(client: Client, stream_id: int) -> None:
 @openapi_test_function("/users/me/apns_device_token:post")
 def add_apns_token(client: Client) -> None:
     # {code_example|start}
-    request = {"token": "apple-tokenbb", "appid": "org.zulip.Zulip"}
+    request = {"token": "c0ffee", "appid": "org.zulip.Zulip"}
     result = client.call_endpoint(url="/users/me/apns_device_token", method="POST", request=request)
     # {code_example|end}
     assert_success_response(result)
@@ -1520,7 +1670,7 @@ def add_apns_token(client: Client) -> None:
 def remove_apns_token(client: Client) -> None:
     # {code_example|start}
     request = {
-        "token": "apple-tokenbb",
+        "token": "c0ffee",
     }
     result = client.call_endpoint(
         url="/users/me/apns_device_token", method="DELETE", request=request
@@ -1554,6 +1704,23 @@ def remove_fcm_token(client: Client) -> None:
     # {code_example|end}
     assert_success_response(result)
     validate_against_openapi_schema(result, "/users/me/android_gcm_reg_id", "delete", "200")
+
+
+@openapi_test_function("/mobile_push/register:post")
+def register_push_device(client: Client) -> None:
+    # {code_example|start}
+    # Register a push device.
+    request = {
+        "token_kind": "fcm",
+        "push_account_id": 2408,
+        "push_key": "MTaUDJDMWypQ1WufZ1NRTHSSvgYtXh1qVNSjN3aBiEFt",
+        "bouncer_public_key": "bouncer-public-key",
+        "encrypted_push_registration": "encrypted-push-registration-data",
+    }
+    result = client.call_endpoint(url="/mobile_push/register", method="POST", request=request)
+    # {code_example|end}
+    assert_success_response(result)
+    validate_against_openapi_schema(result, "/mobile_push/register", "post", "200")
 
 
 @openapi_test_function("/typing:post")
@@ -1612,6 +1779,37 @@ def set_typing_status(client: Client) -> None:
     # {code_example|end}
     assert_success_response(result)
     validate_against_openapi_schema(result, "/typing", "post", "200")
+
+
+@openapi_test_function("/messages/{message_id}/typing:post")
+def set_message_edit_typing_status(client: Client, message_id: int) -> None:
+    # {code_example|start}
+    # The user has started typing while editing a message.
+    request = {
+        "op": "start",
+    }
+    result = client.call_endpoint(
+        f"/messages/{message_id}/typing",
+        method="POST",
+        request=request,
+    )
+    # {code_example|end}
+    assert_success_response(result)
+    validate_against_openapi_schema(result, f"/messages/{message_id}/typing", "post", "200")
+
+    # {code_example|start}
+    # The user has stopped typing while editing a message.
+    request = {
+        "op": "stop",
+    }
+    result = client.call_endpoint(
+        f"/messages/{message_id}/typing",
+        method="POST",
+        request=request,
+    )
+    # {code_example|end}
+    assert_success_response(result)
+    validate_against_openapi_schema(result, "/messages/{message_id}/typing", "post", "200")
 
 
 @openapi_test_function("/realm/emoji/{emoji_name}:post")
@@ -1721,6 +1919,25 @@ def update_user_group_members(client: Client, user_group_id: int) -> None:
     validate_against_openapi_schema(result, "/user_groups/{group_id}/members", "post", "200")
 
 
+@openapi_test_function("/channels/create:post")
+def add_channel(client: Client) -> None:
+    # {code_example|start}
+    # Create a new channel.
+    request = {
+        "name": "music_group",
+        "description": "Channel for discussing and learning about music.",
+        "subscribers": [12],
+    }
+    result = client.call_endpoint(
+        url="channels/create",
+        method="POST",
+        request=request,
+    )
+    # {code_example|end}
+    assert_success_response(result)
+    validate_against_openapi_schema(result, "/channels/create", "post", "200")
+
+
 def test_invalid_api_key(client_with_invalid_key: Client) -> None:
     result = client_with_invalid_key.get_subscriptions()
     assert_error_response(result, code="UNAUTHORIZED")
@@ -1760,16 +1977,18 @@ def test_invalid_stream_error(client: Client) -> None:
 
 def test_messages(client: Client, nonadmin_client: Client) -> None:
     render_message(client)
-    message_id = send_message(client)
+    message_id, content = send_message(client)
+    set_message_edit_typing_status(client, message_id)
     add_reaction(client, message_id)
     remove_reaction(client, message_id)
-    update_message(client, message_id)
+    update_message(client, message_id, content)
     get_raw_message(client, message_id)
     get_messages(client)
     check_messages_match_narrow(client)
     get_message_history(client, message_id)
     get_read_receipts(client, message_id)
     delete_message(client, message_id)
+    report_message(client)
     mark_all_as_read(client)
     mark_stream_as_read(client)
     mark_topic_as_read(client)
@@ -1792,6 +2011,7 @@ def test_users(client: Client, owner_client: Client) -> None:
     get_user_status(client)
     get_user_by_email(client)
     get_subscription_status(client)
+    get_user_channels(client)
     get_profile(client)
     update_settings(client)
     upload_file(client)
@@ -1813,18 +2033,29 @@ def test_users(client: Client, owner_client: Client) -> None:
     remove_user_mute(client)
     get_alert_words(client)
     add_alert_words(client)
+    add_navigation_views(client)
+    get_navigation_views(client)
+    update_navigation_views(client)
+    remove_navigation_views(client)
     create_saved_snippet(client)
-    get_saved_snippets(client)
-    delete_saved_snippet(client)
+    # Calling this again to pass the curl examples tests as the
+    # `delete-saved-snippet` endpoint is called before `edit-saved-snippet`
+    # causing "Saved snippet does not exist." error.
+    create_saved_snippet(client)
+    saved_snippet_id = get_saved_snippets(client)
+    edit_saved_snippet(client, saved_snippet_id)
+    delete_saved_snippet(client, saved_snippet_id)
     remove_alert_words(client)
     add_apns_token(client)
     remove_apns_token(client)
     add_fcm_token(client)
     remove_fcm_token(client)
+    register_push_device(client)
 
 
 def test_streams(client: Client, nonadmin_client: Client) -> None:
     add_subscriptions(client)
+    add_channel(client)
     test_add_subscriptions_already_subscribed(client)
     get_subscriptions(client)
     stream_id = get_stream_id(client)
@@ -1841,7 +2072,6 @@ def test_streams(client: Client, nonadmin_client: Client) -> None:
     add_default_stream(client)
     remove_default_stream(client)
 
-    test_user_not_authorized_error(nonadmin_client)
     test_authorization_errors_fatal(client, nonadmin_client)
 
 
@@ -1904,6 +2134,7 @@ def test_the_api(client: Client, nonadmin_client: Client, owner_client: Client) 
     test_server_organizations(client)
     test_errors(client)
     test_invitations(client)
+    test_welcome_bot_custom_message(client)
 
     sys.stdout.flush()
     if REGISTERED_TEST_FUNCTIONS != CALLED_TEST_FUNCTIONS:

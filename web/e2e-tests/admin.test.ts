@@ -10,20 +10,26 @@ async function submit_announcements_stream_settings(page: Page): Promise<void> {
     });
 
     const save_button = "#org-notifications .save-button";
-    assert.strictEqual(
-        await common.get_text_from_selector(page, save_button),
-        "Save changes",
-        "Save button has incorrect text.",
+    await page.waitForFunction(
+        (save_button: string) => {
+            const button = document.querySelector(save_button);
+            return button && button.textContent?.trim() === "Save changes";
+        },
+        {},
+        save_button,
     );
     await page.click(save_button);
 
     await page.waitForSelector('#org-notifications .save-button[data-status="saved"]', {
         visible: true,
     });
-    assert.strictEqual(
-        await common.get_text_from_selector(page, "#org-notifications .save-button"),
-        "Saved",
-        "Saved text didn't appear after saving new stream notifications setting",
+    await page.waitForFunction(
+        (save_button: string) => {
+            const button = document.querySelector(save_button);
+            return button && button.textContent?.trim() === "Saved";
+        },
+        {},
+        save_button,
     );
 
     await page.waitForSelector("#org-notifications .save-button", {hidden: true});
@@ -48,15 +54,20 @@ async function test_change_new_stream_announcements_stream(page: Page): Promise<
 }
 
 async function test_change_signup_announcements_stream(page: Page): Promise<void> {
-    console.log('Changing signup notifications stream to Verona by filtering with "verona"');
+    await page.click("#realm_signup_announcements_stream_id_widget.dropdown-widget-button");
+    await page.waitForSelector(".dropdown-list-container", {
+        visible: true,
+    });
 
-    await page.click("#realm_signup_announcements_stream_id_widget");
-    await page.waitForSelector(".dropdown-list-search-input", {visible: true});
+    await page.type(".dropdown-list-search-input", "rome");
 
-    await page.type(".dropdown-list-search-input", "verona");
-    await page.waitForSelector(".dropdown-list .list-item", {visible: true});
-    await page.keyboard.press("ArrowDown");
-    await page.keyboard.press("Enter");
+    const rome_in_dropdown = await page.waitForSelector(
+        `xpath///*[${common.has_class_x("list-item")}][normalize-space()="Rome"]`,
+        {visible: true},
+    );
+    assert.ok(rome_in_dropdown);
+    await rome_in_dropdown.click();
+
     await submit_announcements_stream_settings(page);
 }
 
@@ -76,49 +87,6 @@ async function test_change_zulip_update_announcements_stream(page: Page): Promis
     await rome_in_dropdown.click();
 
     await submit_announcements_stream_settings(page);
-}
-
-async function test_permissions_change_save_worked(page: Page): Promise<void> {
-    const saved_status = '#org-stream-permissions .save-button[data-status="saved"]';
-    await page.waitForSelector(saved_status, {
-        visible: true,
-    });
-    await page.waitForSelector(saved_status, {hidden: true});
-}
-
-async function submit_stream_permissions_change(page: Page): Promise<void> {
-    const save_button = "#org-stream-permissions .save-button";
-    await page.waitForSelector(save_button, {visible: true});
-    assert.strictEqual(
-        await common.get_text_from_selector(page, save_button),
-        "Save changes",
-        "Save button didn't appear for permissions change.",
-    );
-    await page.click(save_button);
-
-    await test_permissions_change_save_worked(page);
-}
-
-async function test_changing_create_streams_and_invite_to_stream_policies(
-    page: Page,
-): Promise<void> {
-    const policies = {
-        "invite to stream": "#id_realm_invite_to_stream_policy",
-    };
-    const policy_values = {
-        "admins only": 2,
-        "members and admins": 1,
-        "full members": 3,
-    };
-
-    for (const [policy, selector] of Object.entries(policies)) {
-        for (const [policy_value_name, policy_value] of Object.entries(policy_values)) {
-            console.log(`Test setting ${policy} policy to '${policy_value_name}'.`);
-            await page.waitForSelector(selector, {visible: true});
-            await page.select(selector, `${policy_value}`);
-            await submit_stream_permissions_change(page);
-        }
-    }
 }
 
 async function test_save_joining_organization_change_worked(page: Page): Promise<void> {
@@ -162,10 +130,6 @@ async function test_set_new_user_threshold_to_N_days(page: Page): Promise<void> 
 
 async function test_organization_permissions(page: Page): Promise<void> {
     await page.click("li[data-section='organization-permissions']");
-
-    // Test temporarily disabled 2024-02-07 due to nondeterminsitic failures.
-    // See https://chat.zulip.org/#narrow/channel/43-automated-testing/topic/main.20failing/near/1733342
-    console.log("Skipping", test_changing_create_streams_and_invite_to_stream_policies);
 
     // Test temporarily disabled 2024-02-25 due to nondeterminsitic failures.
     // See https://chat.zulip.org/#narrow/channel/43-automated-testing/topic/main.20failing/near/1743361
@@ -216,12 +180,9 @@ async function test_upload_realm_icon_image(page: Page): Promise<void> {
     assert.ok(upload_handle);
     await upload_handle.uploadFile("static/images/logo/zulip-icon-128x128.png");
 
-    await page.waitForSelector("#realm-icon-upload-widget .upload-spinner-background", {
-        visible: true,
-    });
-    await page.waitForSelector("#realm-icon-upload-widget .upload-spinner-background", {
-        hidden: true,
-    });
+    await common.wait_for_micromodal_to_open(page);
+    await page.click("#uppy-editor .dialog_submit_button");
+    await common.wait_for_micromodal_to_close(page);
     await page.waitForSelector(
         '#realm-icon-upload-widget .image-block[src^="/user_avatars/2/realm/icon.png?version=2"]',
         {visible: true},
@@ -297,4 +258,4 @@ async function admin_test(page: Page): Promise<void> {
     await test_authentication_methods(page);
 }
 
-common.run_test(admin_test);
+await common.run_test(admin_test);

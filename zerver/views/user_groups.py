@@ -13,6 +13,7 @@ from zerver.actions.user_groups import (
     check_add_user_group,
     do_change_user_group_permission_setting,
     do_deactivate_user_group,
+    do_reactivate_user_group,
     do_update_user_group_description,
     do_update_user_group_name,
     remove_subgroups_from_user_group,
@@ -22,7 +23,7 @@ from zerver.lib.exceptions import JsonableError
 from zerver.lib.mention import MentionBackend, silent_mention_syntax_for_user
 from zerver.lib.response import json_success
 from zerver.lib.typed_endpoint import PathOnly, typed_endpoint
-from zerver.lib.types import AnonymousSettingGroupDict
+from zerver.lib.types import UserGroupMembersData
 from zerver.lib.user_groups import (
     GroupSettingChangeRequest,
     access_user_group_for_deactivation,
@@ -33,6 +34,7 @@ from zerver.lib.user_groups import (
     get_direct_memberships_of_users,
     get_group_setting_value_for_api,
     get_subgroup_ids,
+    get_system_user_group_by_name,
     get_user_group_direct_member_ids,
     get_user_group_member_ids,
     is_user_in_group,
@@ -43,6 +45,7 @@ from zerver.lib.user_groups import (
 )
 from zerver.lib.users import access_user_by_id, user_ids_to_users
 from zerver.models import NamedUserGroup, UserProfile
+from zerver.models.groups import SystemGroups
 from zerver.models.users import get_system_bot
 from zerver.views.streams import compose_views
 
@@ -54,30 +57,33 @@ def add_user_group(
     request: HttpRequest,
     user_profile: UserProfile,
     *,
-    name: str,
-    members: Json[list[int]],
+    can_add_members_group: Json[int | UserGroupMembersData] | None = None,
+    can_join_group: Json[int | UserGroupMembersData] | None = None,
+    can_leave_group: Json[int | UserGroupMembersData] | None = None,
+    can_manage_group: Json[int | UserGroupMembersData] | None = None,
+    can_mention_group: Json[int | UserGroupMembersData] | None = None,
+    can_remove_members_group: Json[int | UserGroupMembersData] | None = None,
     description: str,
+    members: Json[list[int]],
+    name: str,
     subgroups: Json[list[int]] | None = None,
-    can_add_members_group: Json[int | AnonymousSettingGroupDict] | None = None,
-    can_join_group: Json[int | AnonymousSettingGroupDict] | None = None,
-    can_leave_group: Json[int | AnonymousSettingGroupDict] | None = None,
-    can_manage_group: Json[int | AnonymousSettingGroupDict] | None = None,
-    can_mention_group: Json[int | AnonymousSettingGroupDict] | None = None,
-    can_remove_members_group: Json[int | AnonymousSettingGroupDict] | None = None,
 ) -> HttpResponse:
     user_profile.realm.ensure_not_on_limited_plan()
-    user_profiles = user_ids_to_users(members, user_profile.realm, allow_deactivated=False)
+    user_profiles = user_ids_to_users(
+        members, user_profile.realm, allow_deactivated=False, allow_bots=True
+    )
     name = check_user_group_name(name)
 
     group_settings_map = {}
     request_settings_dict = locals()
+    nobody_group = get_system_user_group_by_name(SystemGroups.NOBODY, user_profile.realm_id)
     for setting_name, permission_config in NamedUserGroup.GROUP_PERMISSION_SETTINGS.items():
         if setting_name not in request_settings_dict:  # nocoverage
             continue
 
         if request_settings_dict[setting_name] is not None:
             setting_value = parse_group_setting_value(
-                request_settings_dict[setting_name], setting_name
+                request_settings_dict[setting_name], nobody_group
             )
             setting_value_group = access_user_group_for_setting(
                 setting_value,
@@ -116,7 +122,7 @@ def get_user_groups(
 ) -> HttpResponse:
     user_groups = user_groups_in_realm_serialized(
         user_profile.realm, include_deactivated_groups=include_deactivated_groups
-    )
+    ).api_groups
     return json_success(request, data={"user_groups": user_groups})
 
 
@@ -127,15 +133,16 @@ def edit_user_group(
     request: HttpRequest,
     user_profile: UserProfile,
     *,
-    user_group_id: PathOnly[int],
-    name: str | None = None,
-    description: str | None = None,
     can_add_members_group: Json[GroupSettingChangeRequest] | None = None,
     can_join_group: Json[GroupSettingChangeRequest] | None = None,
     can_leave_group: Json[GroupSettingChangeRequest] | None = None,
     can_manage_group: Json[GroupSettingChangeRequest] | None = None,
     can_mention_group: Json[GroupSettingChangeRequest] | None = None,
     can_remove_members_group: Json[GroupSettingChangeRequest] | None = None,
+    deactivated: Json[bool] | None = None,
+    description: str | None = None,
+    name: str | None = None,
+    user_group_id: PathOnly[int],
 ) -> HttpResponse:
     if (
         name is None
@@ -146,23 +153,13 @@ def edit_user_group(
         and can_manage_group is None
         and can_mention_group is None
         and can_remove_members_group is None
+        and deactivated is None
     ):
         raise JsonableError(_("No new data supplied"))
 
     user_group = access_user_group_for_update(
         user_group_id, user_profile, permission_setting="can_manage_group", allow_deactivated=True
     )
-
-    if user_group.deactivated and (
-        description is not None
-        or can_add_members_group is not None
-        or can_join_group is not None
-        or can_leave_group is not None
-        or can_mention_group is not None
-        or can_manage_group is not None
-        or can_remove_members_group is not None
-    ):
-        raise JsonableError(_("You can only change name of deactivated user groups"))
 
     if name is not None and name != user_group.name:
         name = check_user_group_name(name)
@@ -171,7 +168,11 @@ def edit_user_group(
     if description is not None and description != user_group.description:
         do_update_user_group_description(user_group, description, acting_user=user_profile)
 
+    if deactivated is not None and not deactivated and user_group.deactivated:
+        do_reactivate_user_group(user_group, acting_user=user_profile)
+
     request_settings_dict = locals()
+    nobody_group = get_system_user_group_by_name(SystemGroups.NOBODY, user_profile.realm_id)
     for setting_name, permission_config in NamedUserGroup.GROUP_PERMISSION_SETTINGS.items():
         if setting_name not in request_settings_dict:  # nocoverage
             continue
@@ -180,12 +181,12 @@ def edit_user_group(
             continue
 
         setting_value = request_settings_dict[setting_name]
-        new_setting_value = parse_group_setting_value(setting_value.new, setting_name)
+        new_setting_value = parse_group_setting_value(setting_value.new, nobody_group)
 
         expected_current_setting_value = None
         if setting_value.old is not None:
             expected_current_setting_value = parse_group_setting_value(
-                setting_value.old, setting_name
+                setting_value.old, nobody_group
             )
 
         current_value = getattr(user_group, setting_name)
@@ -231,11 +232,11 @@ def update_user_group_backend(
     request: HttpRequest,
     user_profile: UserProfile,
     *,
-    user_group_id: PathOnly[Json[int]],
-    delete: Json[list[int]] | None = None,
     add: Json[list[int]] | None = None,
-    delete_subgroups: Json[list[int]] | None = None,
     add_subgroups: Json[list[int]] | None = None,
+    delete: Json[list[int]] | None = None,
+    delete_subgroups: Json[list[int]] | None = None,
+    user_group_id: PathOnly[Json[int]],
 ) -> HttpResponse:
     if not add and not delete and not add_subgroups and not delete_subgroups:
         raise JsonableError(
@@ -318,6 +319,7 @@ def notify_for_user_group_subscription_changes(
                 recipient_user=recipient_user,
                 content=message,
                 mention_backend=mention_backend,
+                acting_user=acting_user,
             )
         )
 
@@ -334,20 +336,31 @@ def add_members_to_group_backend(
     if len(members) == 1 and user_profile.id == members[0]:
         try:
             user_group = access_user_group_for_update(
-                user_group_id, user_profile, permission_setting="can_join_group"
+                user_group_id,
+                user_profile,
+                permission_setting="can_join_group",
+                allow_deactivated=True,
             )
         except JsonableError:
             # User can still join the group if user has permission to add
             # anyone in the group.
             user_group = access_user_group_for_update(
-                user_group_id, user_profile, permission_setting="can_add_members_group"
+                user_group_id,
+                user_profile,
+                permission_setting="can_add_members_group",
+                allow_deactivated=True,
             )
     else:
         user_group = access_user_group_for_update(
-            user_group_id, user_profile, permission_setting="can_add_members_group"
+            user_group_id,
+            user_profile,
+            permission_setting="can_add_members_group",
+            allow_deactivated=True,
         )
 
-    member_users = user_ids_to_users(members, user_profile.realm, allow_deactivated=False)
+    member_users = user_ids_to_users(
+        members, user_profile.realm, allow_deactivated=False, allow_bots=True
+    )
     existing_member_ids = set(
         get_direct_memberships_of_users(user_group.usergroup_ptr, member_users)
     )
@@ -377,21 +390,32 @@ def remove_members_from_group_backend(
     user_group_id: int,
     members: list[int],
 ) -> HttpResponse:
-    user_profiles = user_ids_to_users(members, user_profile.realm, allow_deactivated=False)
+    user_profiles = user_ids_to_users(
+        members, user_profile.realm, allow_deactivated=False, allow_bots=True
+    )
     if len(members) == 1 and user_profile.id == members[0]:
         try:
             user_group = access_user_group_for_update(
-                user_group_id, user_profile, permission_setting="can_leave_group"
+                user_group_id,
+                user_profile,
+                permission_setting="can_leave_group",
+                allow_deactivated=True,
             )
         except JsonableError:
             # User can still leave the group if user has permission to remove
             # anyone from the group.
             user_group = access_user_group_for_update(
-                user_group_id, user_profile, permission_setting="can_remove_members_group"
+                user_group_id,
+                user_profile,
+                permission_setting="can_remove_members_group",
+                allow_deactivated=True,
             )
     else:
         user_group = access_user_group_for_update(
-            user_group_id, user_profile, permission_setting="can_remove_members_group"
+            user_group_id,
+            user_profile,
+            permission_setting="can_remove_members_group",
+            allow_deactivated=True,
         )
 
     group_member_ids = get_user_group_direct_member_ids(user_group)
@@ -485,9 +509,9 @@ def update_subgroups_of_user_group(
     request: HttpRequest,
     user_profile: UserProfile,
     *,
-    user_group_id: PathOnly[Json[int]],
-    delete: Json[list[int]] | None = None,
     add: Json[list[int]] | None = None,
+    delete: Json[list[int]] | None = None,
+    user_group_id: PathOnly[Json[int]],
 ) -> HttpResponse:
     if not add and not delete:
         raise JsonableError(_('Nothing to do. Specify at least one of "add" or "delete".'))
@@ -517,9 +541,9 @@ def get_is_user_group_member(
     request: HttpRequest,
     user_profile: UserProfile,
     *,
+    direct_member_only: Json[bool] = False,
     user_group_id: PathOnly[Json[int]],
     user_id: PathOnly[Json[int]],
-    direct_member_only: Json[bool] = False,
 ) -> HttpResponse:
     user_group = access_user_group_to_read_membership(user_group_id, user_profile.realm)
     target_user = access_user_by_id(user_profile, user_id, for_admin=False)
@@ -528,7 +552,7 @@ def get_is_user_group_member(
         request,
         data={
             "is_user_group_member": is_user_in_group(
-                user_group, target_user, direct_member_only=direct_member_only
+                user_group.id, target_user, direct_member_only=direct_member_only
             )
         },
     )
@@ -540,8 +564,8 @@ def get_user_group_members(
     request: HttpRequest,
     user_profile: UserProfile,
     *,
-    user_group_id: PathOnly[Json[int]],
     direct_member_only: Json[bool] = False,
+    user_group_id: PathOnly[Json[int]],
 ) -> HttpResponse:
     user_group = access_user_group_to_read_membership(user_group_id, user_profile.realm)
 
@@ -559,8 +583,8 @@ def get_subgroups_of_user_group(
     request: HttpRequest,
     user_profile: UserProfile,
     *,
-    user_group_id: PathOnly[Json[int]],
     direct_subgroup_only: Json[bool] = False,
+    user_group_id: PathOnly[Json[int]],
 ) -> HttpResponse:
     user_group = access_user_group_to_read_membership(user_group_id, user_profile.realm)
 

@@ -1,5 +1,7 @@
 import * as Sentry from "@sentry/browser";
-import {z} from "zod";
+import * as z from "zod/mini";
+
+import {is_browser_unsupported_old_version} from "./browser_support.ts";
 
 type UserInfo = {
     id?: string;
@@ -14,7 +16,7 @@ const sentry_params_schema = z.object({
     sample_rate: z.number(),
     server_version: z.string(),
     trace_rate: z.number(),
-    user: z.object({id: z.number(), role: z.string()}).optional(),
+    user: z.optional(z.object({id: z.number(), role: z.string()})),
 });
 
 const sentry_params_json =
@@ -45,7 +47,7 @@ export function shouldCreateSpanForRequest(url: string): boolean {
     return parsed.pathname !== "/json/events";
 }
 
-if (sentry_params !== undefined) {
+if (sentry_params !== undefined && !is_browser_unsupported_old_version()) {
     const sample_rates = new Map([
         // This is controlled by shouldCreateSpanForRequest, above, but also put here for consistency
         ["call GET /json/events", 0],

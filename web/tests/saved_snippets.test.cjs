@@ -2,7 +2,6 @@
 
 const assert = require("node:assert/strict");
 
-const {$t} = require("./lib/i18n.cjs");
 const {set_global, zrequire} = require("./lib/namespace.cjs");
 const {run_test} = require("./lib/test.cjs");
 const blueslip = require("./lib/zblueslip.cjs");
@@ -42,7 +41,7 @@ run_test("add_saved_snippet", () => {
         content: "Test content",
         date_created: 128374878,
     };
-    saved_snippets.add_saved_snippet(saved_snippet);
+    saved_snippets.update_saved_snippet_dict(saved_snippet);
 
     const my_saved_snippet = saved_snippets.get_saved_snippet_by_id(2);
     assert.equal(my_saved_snippet, saved_snippet);
@@ -55,22 +54,18 @@ run_test("options for dropdown widget", () => {
         content: "Test content",
         date_created: 128374876,
     };
-    saved_snippets.add_saved_snippet(saved_snippet);
+    saved_snippets.update_saved_snippet_dict(saved_snippet);
 
     assert.deepEqual(saved_snippets.get_options_for_dropdown_widget(), [
-        {
-            unique_id: -1,
-            name: $t({defaultMessage: "Add a new saved snippet"}),
-            description: "",
-            bold_current_selection: true,
-            has_delete_icon: false,
-        },
         {
             unique_id: 3,
             name: "Another saved snippet",
             description: "Test content",
             bold_current_selection: true,
             has_delete_icon: true,
+            has_edit_icon: true,
+            delete_icon_label: "translated: Delete snippet",
+            edit_icon_label: "translated: Edit snippet",
         },
         {
             unique_id: 2,
@@ -78,6 +73,9 @@ run_test("options for dropdown widget", () => {
             description: "Test content",
             bold_current_selection: true,
             has_delete_icon: true,
+            has_edit_icon: true,
+            delete_icon_label: "translated: Delete snippet",
+            edit_icon_label: "translated: Edit snippet",
         },
         {
             unique_id: 1,
@@ -85,6 +83,9 @@ run_test("options for dropdown widget", () => {
             description: "Test content",
             bold_current_selection: true,
             has_delete_icon: true,
+            has_edit_icon: true,
+            delete_icon_label: "translated: Delete snippet",
+            edit_icon_label: "translated: Edit snippet",
         },
     ]);
 });

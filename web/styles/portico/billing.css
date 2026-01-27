@@ -59,7 +59,7 @@
             width: 120px;
             height: 70px;
             background-color: hsl(0deg 0% 94%);
-            transition: none 0.2s ease;
+            transition: 0.2s ease;
             transition-property: background-color, border-color;
             display: inline-block;
             text-align: center;
@@ -226,8 +226,10 @@
 
     .zulip-loading-logo {
         margin: 0 auto;
-        width: 24px;
-        height: 24px;
+        width: 30px;
+        /* Adjusting height moves the loading spinner vertically.
+           Manually adjusted to align spinner and z-logo. */
+        height: 23px;
     }
 
     .zulip-loading-logo svg circle {
@@ -309,7 +311,7 @@ input[name="licenses"] {
 #confirm-licenses-modal .dialog_submit_button:active {
     /* This is needed to avoid button background changing
     when clicking on it due to "button:active" CSS in
-    landing_page.css. */
+    legacy_landing_page.css. */
     background-color: hsl(240deg 96% 68%);
 }
 
@@ -647,10 +649,10 @@ input[name="licenses"] {
     padding-top: 2px;
 }
 
-#upgrade-page-details #upgrade-payment-menthod-wrapper {
+#upgrade-page-details #upgrade-payment-method-wrapper {
     margin-left: 0;
     grid-area: payment-info;
-    width: auto;
+    width: 100%;
 }
 
 /* Used class twice to increase specificity */

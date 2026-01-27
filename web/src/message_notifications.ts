@@ -40,7 +40,7 @@ function get_notification_content(message: Message | TestNotificationMessage): s
     let content;
     // Convert the content to plain text, replacing emoji with their alt text
     const $content = $("<div>").html(message.content);
-    ui_util.replace_emoji_with_text($content);
+    ui_util.convert_unicode_eligible_emoji_to_unicode($content);
     ui_util.change_katex_to_raw_latex($content);
     ui_util.potentially_collapse_quotes($content);
     spoilers.hide_spoilers_in_notification($content);
@@ -89,16 +89,15 @@ function debug_notification_source_value(message: Message | TestNotificationMess
 }
 
 function get_notification_key(message: Message | TestNotificationMessage): string {
-    let key;
-
-    if (message.type === "private" || message.type === "test-notification") {
-        key = message.display_reply_to;
-    } else {
-        const stream_name = stream_data.get_stream_name_from_id(message.stream_id);
-        key = message.sender_full_name + " to " + stream_name + " > " + message.topic;
+    if (message.type === "test-notification") {
+        return `test:${message.display_reply_to}`;
     }
 
-    return key;
+    if (message.type === "private") {
+        return `dm:${message.to_user_ids}`;
+    }
+
+    return `channel:${message.sender_id}:${message.stream_id}:${message.topic}`;
 }
 
 function remove_sender_from_list_of_recipients(message: Message): string {
@@ -156,7 +155,8 @@ function get_notification_title(
             return title_prefix + " " + title_suffix;
         case "stream": {
             const stream_name = stream_data.get_stream_name_from_id(message.stream_id);
-            title_suffix = " (#" + stream_name + " > " + message.topic + ")";
+            const topic_display_name = util.get_final_topic_display_name(message.topic);
+            title_suffix = " (#" + stream_name + " > " + topic_display_name + ")";
             break;
         }
     }
@@ -209,12 +209,20 @@ export function process_notification(notification: {
             notification_object.addEventListener("click", () => {
                 notification_object.close();
                 if (message.type !== "test-notification") {
-                    message_view.narrow_by_topic(message.id, {trigger: "notification"});
+                    // Narrowing to message's near view helps to handle the case
+                    // where a user clicked the notification, but before narrowing
+                    // the message deletion got processed.
+                    message_view.narrow_to_message_near(message, "notification");
                 }
                 window.focus();
             });
             notification_object.addEventListener("close", () => {
-                desktop_notifications.notice_memory.delete(key);
+                const current_notice_memory = desktop_notifications.notice_memory.get(key);
+                // This check helps avoid race between close event for current notification
+                // object and the previous notification_object close handler.
+                if (current_notice_memory?.obj === notification_object) {
+                    desktop_notifications.notice_memory.delete(key);
+                }
             });
         }
     }

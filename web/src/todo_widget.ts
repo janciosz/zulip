@@ -1,27 +1,31 @@
 import $ from "jquery";
+import _ from "lodash";
 import assert from "minimalistic-assert";
-import {z} from "zod";
+import * as z from "zod/mini";
 
+import render_message_hidden_dialog from "../templates/message_hidden_dialog.hbs";
 import render_widgets_todo_widget from "../templates/widgets/todo_widget.hbs";
 import render_widgets_todo_widget_tasks from "../templates/widgets/todo_widget_tasks.hbs";
 
 import * as blueslip from "./blueslip.ts";
 import {$t} from "./i18n.ts";
+import * as message_lists from "./message_lists.ts";
 import type {Message} from "./message_store.ts";
 import {page_params} from "./page_params.ts";
 import * as people from "./people.ts";
-import type {Event} from "./poll_widget.ts";
+import type {Event} from "./widget_data.ts";
+import type {AnyWidgetData} from "./widget_schema.ts";
 
 // Any single user should send add a finite number of tasks
 // to a todo list. We arbitrarily pick this value.
 const MAX_IDX = 1000;
 
-export const todo_widget_extra_data_schema = z
-    .object({
-        task_list_title: z.string().optional(),
-        tasks: z.array(z.object({task: z.string(), desc: z.string()})).optional(),
-    })
-    .nullable();
+export const todo_widget_extra_data_schema = z.object({
+    task_list_title: z.optional(z.string()),
+    tasks: z.optional(z.array(z.object({task: z.string(), desc: z.string()}))),
+});
+
+export type TodoWidgetExtraData = z.infer<typeof todo_widget_extra_data_schema>;
 
 const todo_widget_inbound_data = z.intersection(
     z.object({
@@ -35,8 +39,8 @@ const todo_widget_inbound_data = z.intersection(
 // which should be refactored so that the code here is
 // clearer and less confusing.
 const new_task_inbound_data_schema = z.object({
-    type: z.literal("new_task").optional(),
-    key: z.number().int().nonnegative().max(MAX_IDX),
+    type: z.optional(z.literal("new_task")),
+    key: z.int().check(z.nonnegative(), z.lte(MAX_IDX)),
     task: z.string(),
     desc: z.string(),
     completed: z.boolean(),
@@ -315,23 +319,16 @@ export class TaskData {
 export function activate({
     $elem,
     callback,
-    extra_data,
+    any_data,
     message,
 }: {
     $elem: JQuery;
-    callback: (data: TodoWidgetOutboundData | undefined) => void;
-    extra_data: unknown;
+    callback: (data: TodoWidgetOutboundData) => void;
+    any_data: AnyWidgetData;
     message: Message;
 }): (events: Event[]) => void {
-    const parse_result = todo_widget_extra_data_schema.safeParse(extra_data);
-    if (!parse_result.success) {
-        blueslip.warn("invalid todo extra data", {issues: parse_result.error.issues});
-        return () => {
-            /* we send a dummy function when extra data is invalid */
-        };
-    }
-    const {data} = parse_result;
-    const {task_list_title = "", tasks = []} = data ?? {};
+    assert(any_data.widget_type === "todo");
+    const {task_list_title = "", tasks = []} = any_data.extra_data ?? {};
     const is_my_task_list = people.is_my_user_id(message.sender_id);
     const task_data = new TaskData({
         message_sender_id: message.sender_id,
@@ -341,6 +338,7 @@ export function activate({
         tasks,
         report_error_function: blueslip.warn,
     });
+    const message_container = message_lists.current?.view.message_containers.get(message.id);
 
     function update_edit_controls(): void {
         const has_title =
@@ -397,12 +395,45 @@ export function activate({
 
         // Broadcast the new task list title to our peers.
         const data = task_data.handle.new_task_list_title.outbound(new_task_list_title);
-        callback(data);
+        if (data) {
+            callback(data);
+        }
+    }
+
+    function add_task(): void {
+        $elem.find(".widget-error").text("");
+        const task = $elem.find<HTMLInputElement>("input.add-task").val()?.trim() ?? "";
+        const desc = $elem.find<HTMLInputElement>("input.add-desc").val()?.trim() ?? "";
+        if (task === "") {
+            return;
+        }
+
+        $elem.find("input.add-task").val("").trigger("focus");
+        $elem.find("input.add-desc").val("");
+
+        // This case should not generally occur.
+        const task_exists = task_data.name_in_use(task);
+        if (task_exists) {
+            $elem.find(".widget-error").text($t({defaultMessage: "Task already exists"}));
+            return;
+        }
+
+        const data = task_data.handle.new_task.outbound(task, desc);
+        if (data) {
+            callback(data);
+        }
     }
 
     function build_widget(): void {
         const html = render_widgets_todo_widget();
         $elem.html(html);
+
+        // This throttling ensures that the function runs only after the user stops typing.
+        const throttled_update_add_task_button = _.throttle(update_add_task_button, 300);
+        $elem.find("input.add-task").on("keyup", (e) => {
+            e.stopPropagation();
+            throttled_update_add_task_button();
+        });
 
         $elem.find("input.todo-task-list-title").on("keyup", (e) => {
             e.stopPropagation();
@@ -440,26 +471,40 @@ export function activate({
 
         $elem.find("button.add-task").on("click", (e) => {
             e.stopPropagation();
-            $elem.find(".widget-error").text("");
-            const task = $elem.find<HTMLInputElement>("input.add-task").val()?.trim() ?? "";
-            const desc = $elem.find<HTMLInputElement>("input.add-desc").val()?.trim() ?? "";
-
-            if (task === "") {
-                return;
-            }
-
-            $elem.find("input.add-task").val("").trigger("focus");
-            $elem.find("input.add-desc").val("");
-
-            const task_exists = task_data.name_in_use(task);
-            if (task_exists) {
-                $elem.find(".widget-error").text($t({defaultMessage: "Task already exists"}));
-                return;
-            }
-
-            const data = task_data.handle.new_task.outbound(task, desc);
-            callback(data);
+            add_task();
         });
+
+        $elem.find("input.add-task, input.add-desc").on("keydown", (e) => {
+            if (e.key === "Enter") {
+                e.stopPropagation();
+                e.preventDefault();
+                add_task();
+            }
+        });
+    }
+
+    function update_add_task_button(): void {
+        const task = $elem.find<HTMLInputElement>("input.add-task").val()?.trim() ?? "";
+        const task_exists = task_data.name_in_use(task);
+        const $add_task_wrapper = $elem.find(".add-task-wrapper");
+        const $add_task_button = $elem.find("button.add-task");
+
+        if (task === "") {
+            $add_task_wrapper.attr(
+                "data-tippy-content",
+                $t({defaultMessage: "Name the task before adding."}),
+            );
+            $add_task_button.prop("disabled", true);
+        } else if (task_exists) {
+            $add_task_wrapper.attr(
+                "data-tippy-content",
+                $t({defaultMessage: "Cannot add duplicate task."}),
+            );
+            $add_task_button.prop("disabled", true);
+        } else {
+            $add_task_wrapper.removeAttr("data-tippy-content");
+            $add_task_button.prop("disabled", false);
+        }
     }
 
     function render_results(): void {
@@ -487,9 +532,17 @@ export function activate({
             const data = task_data.handle.strike.outbound(key);
             callback(data);
         });
+
+        update_add_task_button();
     }
 
     const handle_events = function (events: Event[]): void {
+        // We don't have to handle events now since we go through
+        // handle_event loop again when we unmute the message.
+        if (message_container?.is_hidden) {
+            return;
+        }
+
         for (const event of events) {
             task_data.handle_event(event.sender_id, event.data);
         }
@@ -498,9 +551,14 @@ export function activate({
         render_results();
     };
 
-    build_widget();
-    render_task_list_title();
-    render_results();
+    if (message_container?.is_hidden) {
+        const html = render_message_hidden_dialog();
+        $elem.html(html);
+    } else {
+        build_widget();
+        render_task_list_title();
+        render_results();
+    }
 
     return handle_events;
 }

@@ -31,9 +31,7 @@ export class IdTracker {
     }
 
     max_id(): number {
-        if (this._cached_max_id === undefined) {
-            this._cached_max_id = _.max([...this.ids]);
-        }
+        this._cached_max_id ??= _.max([...this.ids]);
         return this._cached_max_id ?? -1;
     }
 
@@ -243,7 +241,8 @@ export function get_topic_recent_senders(stream_id: number, topic: string): numb
         return list2.max_id() - list1.max_id();
     }
 
-    const sorted_senders = [...sender_dict.entries()].sort(by_max_message_id);
+    const sorted_senders = [...sender_dict.entries()];
+    sorted_senders.sort(by_max_message_id);
     const recent_senders = [];
     for (const item of sorted_senders) {
         recent_senders.push(item[0]);

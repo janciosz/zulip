@@ -2,7 +2,7 @@ import * as Sentry from "@sentry/browser";
 import {SPAN_STATUS_OK} from "@sentry/core";
 import $ from "jquery";
 import assert from "minimalistic-assert";
-import {z} from "zod";
+import * as z from "zod/mini";
 
 import * as activity_ui from "./activity_ui.ts";
 import {all_messages_data} from "./all_messages_data.ts";
@@ -10,6 +10,7 @@ import * as blueslip from "./blueslip.ts";
 import * as browser_history from "./browser_history.ts";
 import * as channel from "./channel.ts";
 import * as compose_actions from "./compose_actions.ts";
+import type {NarrowActivateOpts} from "./compose_actions.ts";
 import * as compose_banner from "./compose_banner.ts";
 import * as compose_closed_ui from "./compose_closed_ui.ts";
 import * as compose_notifications from "./compose_notifications.ts";
@@ -38,6 +39,7 @@ import * as message_lists from "./message_lists.ts";
 import * as message_scroll_state from "./message_scroll_state.ts";
 import {raw_message_schema} from "./message_store.ts";
 import * as message_store from "./message_store.ts";
+import type {Message} from "./message_store.ts";
 import * as message_view_header from "./message_view_header.ts";
 import * as message_viewport from "./message_viewport.ts";
 import * as narrow_banner from "./narrow_banner.ts";
@@ -47,11 +49,15 @@ import * as narrow_title from "./narrow_title.ts";
 import {page_params} from "./page_params.ts";
 import * as people from "./people.ts";
 import * as pm_list from "./pm_list.ts";
+import * as popup_banners from "./popup_banners.ts";
 import * as recent_view_ui from "./recent_view_ui.ts";
 import * as recent_view_util from "./recent_view_util.ts";
 import * as resize from "./resize.ts";
 import * as scheduled_messages_feed_ui from "./scheduled_messages_feed_ui.ts";
-import {web_mark_read_on_scroll_policy_values} from "./settings_config.ts";
+import {
+    message_edit_history_visibility_policy_values,
+    web_mark_read_on_scroll_policy_values,
+} from "./settings_config.ts";
 import * as spectators from "./spectators.ts";
 import type {NarrowTerm} from "./state_data.ts";
 import {realm} from "./state_data.ts";
@@ -60,6 +66,7 @@ import * as stream_list from "./stream_list.ts";
 import * as submessage from "./submessage.ts";
 import * as topic_generator from "./topic_generator.ts";
 import * as typing_events from "./typing_events.ts";
+import * as unread from "./unread.ts";
 import * as unread_ops from "./unread_ops.ts";
 import * as unread_ui from "./unread_ui.ts";
 import {user_settings} from "./user_settings.ts";
@@ -74,6 +81,7 @@ const fetch_message_response_schema = z.object({
 export function reset_ui_state(opts: {trigger?: string}): void {
     // Resets the state of various visual UI elements that are
     // a function of the current narrow.
+    popup_banners.close_found_missing_unreads_banner();
     narrow_banner.hide_empty_narrow_message();
     message_feed_top_notices.hide_top_of_narrow_notices();
     message_feed_loading.hide_indicators();
@@ -83,14 +91,18 @@ export function reset_ui_state(opts: {trigger?: string}): void {
     // Most users aren't going to send a bunch of a out-of-narrow messages
     // and expect to visit a list of narrows, so let's get these out of the way.
     let skip_automatic_new_visibility_policy_banner = false;
-    if (opts && opts.trigger === "outside_current_view") {
+    if (opts?.trigger === "outside_current_view") {
         skip_automatic_new_visibility_policy_banner = true;
     }
     compose_banner.clear_message_sent_banners(true, skip_automatic_new_visibility_policy_banner);
 }
 
-export function changehash(newhash: string, trigger: string): void {
-    if (browser_history.state.changing_hash) {
+export function changehash(
+    newhash: string,
+    trigger: string,
+    remove_current_hash_from_history = false,
+): void {
+    if (browser_history.state.changing_hash || remove_current_hash_from_history) {
         // If we retargeted the narrow operation because a message was moved,
         // we want to have the current narrow hash in the browser history.
         if (trigger === "retarget message location") {
@@ -114,12 +126,16 @@ export function changehash(newhash: string, trigger: string): void {
     }
 }
 
-export function update_hash_to_match_filter(filter: Filter, trigger: string): void {
+export function update_hash_to_match_filter(
+    filter: Filter,
+    trigger: string,
+    remove_current_hash_from_history = false,
+): void {
     if (browser_history.state.changing_hash && trigger !== "retarget message location") {
         return;
     }
     const new_hash = hash_util.search_terms_to_hash(filter.terms());
-    changehash(new_hash, trigger);
+    changehash(new_hash, trigger, remove_current_hash_from_history);
 
     if (stream_list.is_zoomed_in()) {
         browser_history.update_current_history_state_data({show_more_topics: true});
@@ -130,6 +146,7 @@ type TargetMessageIdInfo = {
     target_id: number | undefined;
     final_select_id: number | undefined;
     local_select_id: number | undefined;
+    first_unread_msg_id_pending_server_verification: number | undefined;
 };
 
 function create_and_update_message_list(
@@ -143,6 +160,7 @@ function create_and_update_message_list(
     restore_rendered_list: boolean;
 } {
     const excludes_muted_topics = filter.excludes_muted_topics();
+    const excludes_muted_users = filter.excludes_muted_users();
 
     // Check if we already have a rendered message list for the `filter`.
     // TODO: If we add a message list other than `is_in_home` to be save as rendered,
@@ -172,14 +190,18 @@ function create_and_update_message_list(
         let msg_data = new MessageListData({
             filter,
             excludes_muted_topics,
+            excludes_muted_users,
         });
 
+        const original_id_info = {...id_info};
         // Populate the message list if we can apply our filter locally (i.e.
         // with no server help) and we have the message we want to select.
         // Also update id_info accordingly.
         if (!filter.requires_adjustment_for_moved_with_target) {
             const superset_datasets = message_list_data_cache.get_superset_datasets(filter);
             for (const superset_data of superset_datasets) {
+                // Reset properties that might have been set.
+                id_info = Object.assign(id_info, original_id_info);
                 maybe_add_local_messages({
                     id_info,
                     msg_data,
@@ -194,6 +216,7 @@ function create_and_update_message_list(
                 msg_data = new MessageListData({
                     filter,
                     excludes_muted_topics,
+                    excludes_muted_users,
                 });
             }
         }
@@ -208,6 +231,7 @@ function create_and_update_message_list(
             msg_data = new MessageListData({
                 filter,
                 excludes_muted_topics,
+                excludes_muted_users,
             });
         }
 
@@ -232,7 +256,21 @@ function create_and_update_message_list(
     // the current message list as we are trying to emulate the `hashchange`
     // workflow we have which calls `message_view.show` after hash is updated.
     if (opts.change_hash) {
-        update_hash_to_match_filter(filter, opts.trigger ?? "unknown");
+        let remove_current_hash_from_history = false;
+        let trigger = opts.trigger ?? "unknown";
+        if (opts.trigger === "old_unreads_missing") {
+            // We are not navigating user to a different place but want to
+            // keep user at the same place but avoid marking messages as read.
+            // Assuming current narrow doesn't have a `near` term,
+            // we replace the current history entry with
+            // the new hash which has a `near` term.
+            assert(!narrow_state.filter()!.has_operator("near"));
+            assert(msg_list.data.filter.has_operator("near"));
+            remove_current_hash_from_history = true;
+            trigger = "retarget message location";
+        }
+
+        update_hash_to_match_filter(filter, trigger, remove_current_hash_from_history);
         opts.show_more_topics = browser_history.get_current_state_show_more_topics() ?? false;
     }
 
@@ -248,10 +286,7 @@ function create_and_update_message_list(
 function handle_post_message_list_change(
     id_info: TargetMessageIdInfo,
     msg_list: MessageList,
-    opts: {
-        change_hash: boolean;
-        show_more_topics: boolean;
-    } & ShowMessageViewOpts,
+    opts: NarrowActivateOpts,
     select_immediately: boolean,
     select_opts: SelectIdOpts,
     then_select_offset: number | undefined,
@@ -285,6 +320,14 @@ export function try_rendering_locally_for_same_narrow(
     filter: Filter,
     opts: ShowMessageViewOpts,
 ): boolean {
+    if (!narrow_state.is_message_feed_visible()) {
+        // This function only works when the message feed is visible.
+        //
+        // TODO: Ideally, excluding the inbox-style channels view from
+        // this code path should be further up the call chain.
+        return false;
+    }
+
     const current_filter = narrow_state.filter();
     let target_scroll_offset;
     if (!current_filter) {
@@ -296,7 +339,7 @@ export function try_rendering_locally_for_same_narrow(
         target_id = opts.then_select_id;
         target_scroll_offset = opts.then_select_offset;
     } else if (filter.has_operator("near")) {
-        target_id = Number.parseInt(filter.operands("near")[0]!, 10);
+        target_id = Number.parseInt(filter.terms_with_operator("near")[0]!.operand, 10);
     } else if (filter.equals(current_filter)) {
         // The caller doesn't want to force rerender and the filter is the same.
         // Also, we don't have a specific message id we want to select, so we
@@ -350,6 +393,15 @@ export type ShowMessageViewOpts = {
     then_select_offset?: number | undefined;
     show_more_topics?: boolean;
 };
+
+export function get_id_info(): TargetMessageIdInfo {
+    return {
+        target_id: undefined,
+        final_select_id: undefined,
+        local_select_id: undefined,
+        first_unread_msg_id_pending_server_verification: undefined,
+    };
+}
 
 export let show = (raw_terms: NarrowTerm[], show_opts: ShowMessageViewOpts): void => {
     /* Main entry point for switching to a new view / message list.
@@ -429,7 +481,8 @@ export let show = (raw_terms: NarrowTerm[], show_opts: ShowMessageViewOpts): voi
         // policy?
         !is_combined_feed_global_view &&
         raw_terms.some(
-            (raw_term) => !hash_parser.allowed_web_public_narrows.includes(raw_term.operator),
+            (raw_term) =>
+                !hash_parser.is_an_allowed_web_public_narrow(raw_term.operator, raw_term.operand),
         )
     ) {
         spectators.login_to_access();
@@ -439,11 +492,18 @@ export let show = (raw_terms: NarrowTerm[], show_opts: ShowMessageViewOpts): voi
     const coming_from_recent_view = recent_view_util.is_visible();
     const coming_from_inbox = inbox_util.is_visible();
 
+    const preserve_zoomed_in_channel =
+        stream_list.is_zoomed_in() &&
+        stream_list.get_sidebar_stream_topic_info(filter).stream_id === narrow_state.stream_id();
+    const show_more_topics = preserve_zoomed_in_channel || show_opts.show_more_topics === true;
     const opts = {
         change_hash: true,
         trigger: "unknown",
-        show_more_topics: false,
         ...show_opts,
+        // This is a bit awkward, since `show_opts` may have already
+        // included a show_more_topics value, but we always want to
+        // prefer the value above that avoids unzooming incorrectly.
+        show_more_topics,
         then_select_id: show_opts.then_select_id ?? -1,
     };
 
@@ -452,21 +512,30 @@ export let show = (raw_terms: NarrowTerm[], show_opts: ShowMessageViewOpts): voi
         data: {raw_terms, trigger: opts.trigger},
     };
     void Sentry.startSpan({...span_data, name: "narrow"}, async (span) => {
-        const id_info: TargetMessageIdInfo = {
-            target_id: undefined,
-            local_select_id: undefined,
-            final_select_id: undefined,
-        };
-
+        const id_info = get_id_info();
         const terms = filter.terms();
 
         // These two narrowing operators specify what message should be
         // selected and should be the center of the narrow.
         if (filter.has_operator("near")) {
-            id_info.target_id = Number.parseInt(filter.operands("near")[0]!, 10);
+            id_info.target_id = Number.parseInt(filter.terms_with_operator("near")[0]!.operand, 10);
         }
         if (filter.has_operator("id")) {
-            id_info.target_id = Number.parseInt(filter.operands("id")[0]!, 10);
+            id_info.target_id = Number.parseInt(filter.terms_with_operator("id")[0]!.operand, 10);
+        }
+
+        if (
+            // Filter has `with` operator but we don't have message locally.
+            filter.requires_adjustment_for_moved_with_target &&
+            opts.then_select_id !== -1
+        ) {
+            // We have a specific message ID to select, but we cannot do so until
+            // we know user is in the correct narrow and that `then_select_id` is
+            // still in that narrow. So, we need to fetch `with` operator message
+            // from server first and then try to select `then_select_id` message.
+            // There is no risk of this hack causing any issues since the `id_info`
+            // will be reset after we fetch the `with` operator message.
+            id_info.target_id = Number.parseInt(filter.terms_with_operator("with")[0]!.operand, 10);
         }
 
         // Narrow with near / id operator. There are two possibilities:
@@ -488,9 +557,9 @@ export let show = (raw_terms: NarrowTerm[], show_opts: ShowMessageViewOpts): voi
                 // the stream/topic pair that was requested to some other
                 // location, then we should retarget this narrow operation
                 // to where the message is located now.
-                const narrow_topic = filter.operands("topic")[0]!;
+                const narrow_topic = filter.terms_with_operator("topic")[0]!.operand;
                 const narrow_stream_data = stream_data.get_sub_by_id_string(
-                    filter.operands("channel")[0]!,
+                    filter.terms_with_operator("channel")[0]!.operand,
                 );
                 if (!narrow_stream_data) {
                     // The stream id is invalid or incorrect in the URL.
@@ -533,7 +602,9 @@ export let show = (raw_terms: NarrowTerm[], show_opts: ShowMessageViewOpts): voi
 
                 if (
                     !narrow_matches_target_message &&
-                    (narrow_exists_in_edit_history || !realm.realm_allow_edit_history)
+                    (narrow_exists_in_edit_history ||
+                        realm.realm_message_edit_history_visibility_policy ===
+                            message_edit_history_visibility_policy_values.never.code)
                 ) {
                     const adjusted_terms = Filter.adjusted_terms_if_moved(
                         raw_terms,
@@ -562,7 +633,7 @@ export let show = (raw_terms: NarrowTerm[], show_opts: ShowMessageViewOpts): voi
                         // message locally available and then call
                         // message_view.show recursively, setting a flag to
                         // indicate we've already done this.
-                        message_helper.process_new_message(data.message);
+                        message_helper.process_new_server_message(data.message);
                         show(raw_terms, {
                             ...opts,
                             fetched_target_message: true,
@@ -600,10 +671,6 @@ export let show = (raw_terms: NarrowTerm[], show_opts: ShowMessageViewOpts): voi
         } else if (coming_from_inbox) {
             inbox_ui.hide();
         }
-
-        // Open tooltips are only interesting for current narrow,
-        // so hide them when activating a new one.
-        $(".tooltip").hide();
 
         blueslip.debug("Narrowed", {
             operators: terms.map((e) => e.operator),
@@ -767,6 +834,89 @@ export let show = (raw_terms: NarrowTerm[], show_opts: ShowMessageViewOpts): voi
             select_opts,
             then_select_offset,
         );
+        if (
+            id_info.first_unread_msg_id_pending_server_verification &&
+            filter.is_conversation_view()
+        ) {
+            const params = message_fetch.get_parameters_for_message_fetch_api({
+                anchor: "first_unread",
+                num_before: 0,
+                num_after: 0,
+                cont() {
+                    // Success callback is sufficient to do what we need to do
+                    // here, we don't need another post fetch callback.
+                },
+                msg_list_data: msg_list.data,
+            });
+            void channel.get({
+                url: "/json/messages",
+                data: params,
+                success(raw_data) {
+                    // If we switched narrow, there is nothing to do.
+                    if (
+                        msg_list.id !== message_lists.current?.id ||
+                        !id_info.first_unread_msg_id_pending_server_verification
+                    ) {
+                        return;
+                    }
+                    const data = message_fetch.response_schema.parse(raw_data);
+                    const first_unread_message_id = data.anchor;
+                    const current_selected_id = msg_list.selected_id();
+                    if (
+                        first_unread_message_id <
+                        id_info.first_unread_msg_id_pending_server_verification
+                    ) {
+                        // Do nothing if top of the first unread message is fully on screen
+                        // so that we don't annoyingly retarget the user.
+                        const $row = msg_list.get_row(first_unread_message_id);
+                        if ($row.length > 0) {
+                            const row_rect = util.the($row).getBoundingClientRect();
+                            const viewport_info = message_viewport.message_viewport_info();
+                            if (row_rect.top >= viewport_info.visible_top) {
+                                return;
+                            }
+                        }
+
+                        // We convert the current narrow into a `near` narrow so that
+                        // user doesn't accidentally mark msgs read which they haven't seen.
+                        let terms: NarrowTerm[] = [
+                            ...msg_list.data.filter.terms(),
+                            {
+                                operator: "near",
+                                operand: current_selected_id.toString(),
+                            },
+                        ];
+                        assert(msg_list.data.filter.is_conversation_view());
+                        // Using both /with/ and /near/ operators in a single view doesn't
+                        // make sense, and checks like is_conversation_view_with_near do not
+                        // handle that combination correctly.
+                        terms = terms.filter((term) => term.operator !== "with");
+                        const opts = {
+                            trigger: "old_unreads_missing",
+                        };
+                        show(terms, opts);
+                        const new_message_list_id = message_lists.current?.id;
+
+                        const on_jump_to_first_unread = (): void => {
+                            // This is a no-op if the user has already switched narrow.
+                            if (new_message_list_id !== message_lists.current?.id) {
+                                return;
+                            }
+
+                            show(
+                                message_lists.current.data.filter
+                                    .terms()
+                                    .filter((term) => term.operator !== "near"),
+                                {then_select_id: first_unread_message_id},
+                            );
+                        };
+                        // Show user a banner with a button to allow user to navigate
+                        // to the first unread if required.
+                        popup_banners.open_found_missing_unreads_banner(on_jump_to_first_unread);
+                    }
+                },
+            });
+        }
 
         const post_span_context = {
             name: "post-narrow busy time",
@@ -834,6 +984,7 @@ function navigate_to_anchor_message(opts: {
     assert(message_lists.current !== undefined);
     if (fetch_status_shows_anchor_fetched(message_lists.current.data.fetch_status)) {
         select_msg_id(message_list_data_to_target_message_id(message_lists.current.data));
+        return;
     } else if (fetch_status_shows_anchor_fetched(all_messages_data.fetch_status)) {
         // We can load messages into `msg_list_data` but we don't know
         // the fetch status until we contact server. If we are contacting the
@@ -846,23 +997,30 @@ function navigate_to_anchor_message(opts: {
         const msg_list_data = new MessageListData({
             filter: message_lists.current.data.filter,
             excludes_muted_topics: message_lists.current.data.excludes_muted_topics,
+            excludes_muted_users: message_lists.current.data.excludes_muted_users,
         });
         load_local_messages(msg_list_data, all_messages_data);
-        select_anchor_using_data(msg_list_data);
-    } else {
-        const msg_list_data = new MessageListData({
-            filter: message_lists.current.data.filter,
-            excludes_muted_topics: message_lists.current.data.excludes_muted_topics,
-        });
-
-        message_fetch.load_messages_around_anchor(
-            anchor,
-            () => {
-                select_anchor_using_data(msg_list_data);
-            },
-            msg_list_data,
-        );
+        // It is still possible that `all_messages_data` doesn't have any messages
+        // for the current narrow, so we check for that.
+        if (!msg_list_data.visibly_empty()) {
+            select_anchor_using_data(msg_list_data);
+            return;
+        }
     }
+
+    const msg_list_data = new MessageListData({
+        filter: message_lists.current.data.filter,
+        excludes_muted_topics: message_lists.current.data.excludes_muted_topics,
+        excludes_muted_users: message_lists.current.data.excludes_muted_users,
+    });
+
+    message_fetch.load_messages_around_anchor(
+        anchor,
+        () => {
+            select_anchor_using_data(msg_list_data);
+        },
+        msg_list_data,
+    );
 }
 
 export function fast_track_current_msg_list_to_anchor(anchor: string): void {
@@ -912,7 +1070,7 @@ function load_local_messages(msg_data: MessageListData, superset_data: MessageLi
     // cases when our local cache (superset_data) has at least
     // one message the user will expect to see in the new narrow.
 
-    const in_msgs = superset_data.all_messages();
+    const in_msgs = superset_data.all_messages_after_mute_filtering();
     const is_contiguous_history = true;
     msg_data.add_messages(in_msgs, is_contiguous_history);
 
@@ -997,7 +1155,25 @@ export function maybe_add_local_messages(opts: {
         id_info.final_select_id = min_defined(id_info.target_id, unread_info.msg_id);
         assert(id_info.final_select_id !== undefined);
 
+        // We found a message id to select from the unread data available
+        // locally but if we didn't have the complete unread data locally
+        // cached, we need to check from server if it is the first unread.
+        if (unread.old_unreads_missing) {
+            id_info.first_unread_msg_id_pending_server_verification = unread_info.msg_id;
+        }
+
         if (!load_local_messages(msg_data, superset_data)) {
+            // We don't have the message we want to select locally,
+            // and since our unread data is incomplete, we just
+            // ask server directly for `first_unread`.
+            if (
+                unread.old_unreads_missing &&
+                // Ensure our intent is to narrow to first unread.
+                id_info.final_select_id === unread_info.msg_id &&
+                id_info.target_id === undefined
+            ) {
+                id_info.final_select_id = undefined;
+            }
             return;
         }
 
@@ -1105,10 +1281,7 @@ export function render_message_list_with_selected_message(opts: {
     const id_info = opts.id_info;
     const select_offset = opts.select_offset;
 
-    let msg_id = id_info.final_select_id;
-    if (msg_id === undefined) {
-        msg_id = message_lists.current.first_unread_message_id();
-    }
+    const msg_id = id_info.final_select_id ?? message_lists.current.first_unread_message_id();
     // There should be something since it's not visibly empty.
     assert(msg_id !== undefined);
 
@@ -1141,7 +1314,7 @@ export function render_message_list_with_selected_message(opts: {
 
 function activate_stream_for_cycle_hotkey(stream_id: number): void {
     // This is the common code for A/D hotkeys.
-    const filter_expr = [{operator: "channel", operand: stream_id.toString()}];
+    const filter_expr: NarrowTerm[] = [{operator: "channel", operand: stream_id.toString()}];
     show(filter_expr, {});
 }
 
@@ -1187,6 +1360,7 @@ export function narrow_to_next_topic(opts: {trigger: string; only_followed_topic
         curr_info.stream_id,
         curr_info.topic,
         opts.only_followed_topics,
+        stream_list.get_sorted_channel_ids_for_next_unread_navigation(),
     );
 
     if (!next_narrow && opts.only_followed_topics) {
@@ -1211,7 +1385,7 @@ export function narrow_to_next_topic(opts: {trigger: string; only_followed_topic
         return;
     }
 
-    const filter_expr = [
+    const filter_expr: NarrowTerm[] = [
         {operator: "channel", operand: next_narrow.stream_id.toString()},
         {operator: "topic", operand: next_narrow.topic},
     ];
@@ -1238,7 +1412,7 @@ export function narrow_to_next_pm_string(opts = {}): void {
     const direct_message = people.user_ids_string_to_emails_string(next_direct_message);
     assert(direct_message !== undefined);
 
-    const filter_expr = [{operator: "dm", operand: direct_message}];
+    const filter_expr: NarrowTerm[] = [{operator: "dm", operand: direct_message}];
 
     // force_close parameter is true to not auto open compose_box
     const updated_opts = {
@@ -1276,7 +1450,7 @@ export function narrow_by_topic(
         unread_ops.notify_server_message_read(original);
     }
 
-    const search_terms = [
+    const search_terms: NarrowTerm[] = [
         {operator: "channel", operand: original.stream_id.toString()},
         {operator: "topic", operand: original.topic},
     ];
@@ -1353,9 +1527,9 @@ export function to_compose_target(): void {
         }
         // If we are composing to a new topic, we narrow to the stream but
         // grey-out the message view instead of narrowing to an empty view.
-        const terms = [{operator: "channel", operand: stream_id.toString()}];
+        const terms: NarrowTerm[] = [{operator: "channel", operand: stream_id.toString()}];
         const topic = compose_state.topic();
-        if (topic !== "") {
+        if (topic !== "" || stream_data.can_use_empty_topic(stream_id)) {
             terms.push({operator: "topic", operand: topic});
         }
         show(terms, opts);
@@ -1363,7 +1537,7 @@ export function to_compose_target(): void {
     }
 
     if (compose_state.get_message_type() === "private") {
-        const recipient_string = compose_state.private_message_recipient();
+        const recipient_string = compose_state.private_message_recipient_emails();
         const emails = util.extract_pm_recipients(recipient_string);
         const invalid = emails.filter((email) => !people.is_valid_email_for_compose(email));
         // If there are no recipients or any recipient is
@@ -1395,13 +1569,13 @@ function handle_post_view_change(
     typing_events.render_notifications_for_narrow();
 
     if (filter.contains_only_private_messages()) {
-        compose_closed_ui.update_buttons_for_private();
+        compose_closed_ui.update_buttons("direct");
     } else if (filter.is_conversation_view() || filter.includes_full_stream_history()) {
-        compose_closed_ui.update_buttons_for_stream_views();
+        compose_closed_ui.update_buttons("stream");
     } else {
-        compose_closed_ui.update_buttons_for_non_specific_views();
+        compose_closed_ui.update_buttons();
     }
-    compose_closed_ui.update_reply_recipient_label();
+    compose_closed_ui.update_recipient_text_for_reply_button();
 
     message_view_header.render_title_area();
 
@@ -1409,7 +1583,8 @@ function handle_post_view_change(
     left_sidebar_navigation_area.handle_narrow_activated(filter);
     stream_list.handle_narrow_activated(filter, opts.change_hash, opts.show_more_topics);
     pm_list.handle_narrow_activated(filter);
-    activity_ui.build_user_sidebar();
+    // This also builds the user sidebar.
+    activity_ui.clear_search();
 }
 
 export function rerender_combined_feed(combined_feed_msg_list: MessageList): void {
@@ -1421,4 +1596,33 @@ export function rerender_combined_feed(combined_feed_msg_list: MessageList): voi
         trigger: "stream / topic visibility policy change",
         force_rerender: true,
     });
+}
+
+export function narrow_to_message_near(message: Message, trigger: string): void {
+    // The following code is essentially equivalent to
+    // `window.location.href = hashutil.by_conversation_and_time_url(msg)`
+    // but we use `show` to pass in the `trigger` parameter.
+    switch (message.type) {
+        case "private":
+            show(
+                [
+                    {operator: "dm", operand: message.reply_to},
+                    {operator: "near", operand: String(message.id)},
+                ],
+                {trigger},
+            );
+            return;
+        case "stream":
+            show(
+                [
+                    {
+                        operator: "channel",
+                        operand: message.stream_id.toString(),
+                    },
+                    {operator: "topic", operand: message.topic},
+                    {operator: "near", operand: String(message.id)},
+                ],
+                {trigger},
+            );
+    }
 }

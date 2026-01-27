@@ -1,4 +1,5 @@
 import os
+from unittest import mock
 
 import orjson
 from django.conf import settings
@@ -8,7 +9,12 @@ from typing_extensions import ParamSpec
 from zerver.lib.cache import cache_delete, get_realm_used_upload_space_cache_key
 from zerver.lib.test_classes import ZulipTestCase
 from zerver.lib.test_helpers import create_s3_buckets, find_key_by_email, use_s3_backend
-from zerver.lib.upload import sanitize_name, upload_backend, upload_message_attachment
+from zerver.lib.upload import (
+    create_attachment,
+    sanitize_name,
+    upload_backend,
+    upload_message_attachment,
+)
 from zerver.lib.upload.s3 import S3UploadBackend
 from zerver.lib.utils import assert_is_not_none
 from zerver.models import Attachment, PreregistrationRealm, Realm
@@ -277,9 +283,9 @@ class TusdPreCreateTest(ZulipTestCase):
         realm.custom_upload_quota_gb = 1
         realm.save(update_fields=["custom_upload_quota_gb"])
 
-        path_id = upload_message_attachment("zulip.txt", "text/plain", b"zulip!", hamlet)[
-            0
-        ].removeprefix("/user_uploads/")
+        path_id = upload_message_attachment(
+            "zulip.txt", "text/plain", b"zulip!", hamlet, hamlet.realm
+        )[0].removeprefix("/user_uploads/")
         attachment = Attachment.objects.get(path_id=path_id)
         attachment.size = assert_is_not_none(realm.upload_quota_bytes()) - 10
         attachment.save(update_fields=["size"])
@@ -306,30 +312,22 @@ class TusdPreCreateTest(ZulipTestCase):
             email,
             realm_subdomain="ete-slack-import",
             realm_name="Slack import end to end",
-            # TODO: Uncomment after adding support to form.
-            # import_from="slack",
+            import_from="slack",
         )
         prereg_realm = PreregistrationRealm.objects.get(email=email)
-        # TODO: Uncomment after adding support to form.
-        # self.assertEqual(prereg_realm.data_import_metadata["import_from"], "slack")
+        self.assertEqual(prereg_realm.data_import_metadata["import_from"], "slack")
         prereg_realm.data_import_metadata["import_from"] = "slack"
         prereg_realm.save()
 
         confirmation_key = find_key_by_email(email)
         assert confirmation_key is not None
 
-        with self.assertLogs(level="WARNING") as warn_log:
-            result = self.client_post(
-                "/api/internal/tusd",
-                self.request(key=confirmation_key).model_dump(),
-                content_type="application/json",
-            )
-        self.assertEqual(result.status_code, 200)
-        # Verify if we tried to remove any existing upload.
-        self.assertEqual(
-            warn_log.output,
-            ["WARNING:root:slack.zip does not exist. Its entry in the database will be removed."],
+        result = self.client_post(
+            "/api/internal/tusd",
+            self.request(key=confirmation_key).model_dump(),
+            content_type="application/json",
         )
+        self.assertEqual(result.status_code, 200)
         result_json = result.json()
         self.assertEqual(result_json.get("HttpResponse", None), None)
         self.assertEqual(result_json.get("RejectUpload", False), False)
@@ -387,12 +385,10 @@ class TusdPreCreateTest(ZulipTestCase):
             email,
             realm_subdomain="ete-slack-import",
             realm_name="Slack import end to end",
-            # TODO: Uncomment after adding support to form.
-            # import_from="slack",
+            import_from="slack",
         )
         prereg_realm = PreregistrationRealm.objects.get(email=email)
-        # TODO: Uncomment after adding support to form.
-        # self.assertEqual(prereg_realm.data_import_metadata["import_from"], "slack")
+        self.assertEqual(prereg_realm.data_import_metadata["import_from"], "slack")
         prereg_realm.data_import_metadata["import_from"] = "slack"
         prereg_realm.save()
 
@@ -423,12 +419,10 @@ class TusdPreCreateTest(ZulipTestCase):
             email,
             realm_subdomain="ete-slack-import",
             realm_name="Slack import end to end",
-            # TODO: Uncomment after adding support to form.
-            # import_from="slack",
+            import_from="slack",
         )
         prereg_realm = PreregistrationRealm.objects.get(email=email)
-        # TODO: Uncomment after adding support to form.
-        # self.assertEqual(prereg_realm.data_import_metadata["import_from"], "slack")
+        self.assertEqual(prereg_realm.data_import_metadata["import_from"], "slack")
         prereg_realm.data_import_metadata["import_from"] = "slack"
         prereg_realm.save()
 
@@ -437,6 +431,7 @@ class TusdPreCreateTest(ZulipTestCase):
 
         request = self.request(key=confirmation_key)
 
+        assert settings.MAX_WEB_DATA_IMPORT_SIZE_MB is not None
         max_upload_size = settings.MAX_WEB_DATA_IMPORT_SIZE_MB * 1024 * 1024
         request.event.upload.size = max_upload_size + 1
         result = self.client_post(
@@ -450,7 +445,7 @@ class TusdPreCreateTest(ZulipTestCase):
         self.assertEqual(
             orjson.loads(result_json["HttpResponse"]["Body"]),
             {
-                "message": f"Uploaded file is larger than the allowed limit of {settings.MAX_WEB_DATA_IMPORT_SIZE_MB} MiB"
+                "message": f"Uploaded file exceeds the maximum file size for imports ({settings.MAX_WEB_DATA_IMPORT_SIZE_MB} MiB)."
             },
         )
         self.assertEqual(result_json["RejectUpload"], True)
@@ -480,7 +475,12 @@ class TusdPreFinishTest(ZulipTestCase):
             str(hamlet.realm.id), sanitize_name("zulip.txt")
         )
         upload_backend.upload_message_attachment(
-            path_id, "zulip.txt", "text/plain", b"zulip!", hamlet
+            path_id,
+            "zulip.txt",
+            "text/plain",
+            b"zulip!",
+            hamlet,
+            hamlet.realm,
         )
 
         info = TusUpload(
@@ -505,6 +505,7 @@ class TusdPreFinishTest(ZulipTestCase):
             "application/octet-stream",
             info.model_dump_json().encode(),
             hamlet,
+            hamlet.realm,
         )
 
         # Post the hook saying the file is in place
@@ -526,7 +527,7 @@ class TusdPreFinishTest(ZulipTestCase):
 
         attachment = Attachment.objects.get(path_id=path_id)
         self.assertEqual(attachment.size, len("zulip!"))
-        self.assertEqual(attachment.content_type, "text/plain")
+        self.assertEqual(attachment.content_type, 'text/plain; charset="ascii"')
 
         # Assert that the .info file is still there -- tusd needs it
         # to verify that the upload completed successfully
@@ -542,7 +543,9 @@ class TusdPreFinishTest(ZulipTestCase):
         path_id = upload_backend.generate_message_upload_path(
             str(hamlet.realm.id), sanitize_name("")
         )
-        upload_backend.upload_message_attachment(path_id, "", "ignored", b"zulip!", hamlet)
+        upload_backend.upload_message_attachment(
+            path_id, "", "ignored", b"zulip!", hamlet, hamlet.realm
+        )
 
         info = TusUpload(
             id=path_id,
@@ -561,6 +564,7 @@ class TusdPreFinishTest(ZulipTestCase):
             "ignored",
             info.model_dump_json().encode(),
             hamlet,
+            hamlet.realm,
         )
 
         # Post the hook saying the file is in place
@@ -662,3 +666,144 @@ class TusdPreFinishTest(ZulipTestCase):
 
         response = bucket.Object(f"{path_id}.info").get()
         self.assertEqual(response["ContentType"], "binary/octet-stream")
+
+    @use_s3_backend
+    def test_s3_upload_streaming_chardet(self) -> None:
+        assert settings.LOCAL_FILES_DIR is None
+        self.login("hamlet")
+        hamlet = self.example_user("hamlet")
+        bucket = create_s3_buckets(settings.S3_AUTH_UPLOADS_BUCKET)[0]
+        upload_backend = S3UploadBackend()
+
+        def upload_text_file(filename: str, size: int) -> str:
+            path_id = upload_backend.generate_message_upload_path(
+                str(hamlet.realm.id), sanitize_name(filename, strict=True)
+            )
+            content = "a" * (size)
+            info = TusUpload(
+                id=path_id,
+                size=len(content),
+                offset=0,
+                size_is_deferred=False,
+                meta_data={
+                    "filename": filename,
+                    "filetype": "text/plain",
+                    "name": filename,
+                    "type": "text/plain",
+                },
+                is_final=False,
+                is_partial=False,
+                partial_uploads=None,
+                storage=None,
+            )
+            bucket.Object(path_id).put(
+                Body=content.encode(),
+                ContentType="application/octet-stream",
+                Metadata={
+                    k: v.encode("ascii", "replace").decode() for k, v in info.meta_data.items()
+                },
+            )
+            bucket.Object(f"{path_id}.info").put(
+                Body=info.model_dump_json().encode(),
+            )
+
+            # Post the hook saying the file is in place
+            result = self.client_post(
+                "/api/internal/tusd",
+                self.request(info).model_dump(),
+                content_type="application/json",
+            )
+            self.assertEqual(result.status_code, 200)
+            return path_id
+
+        path_id = upload_text_file("short-ascii.txt", 2048)
+        attachment = Attachment.objects.get(path_id=path_id)
+        self.assertEqual(attachment.size, 2048)
+        self.assertEqual(attachment.content_type, 'text/plain; charset="ascii"')
+        self.assertEqual(bucket.Object(path_id).get()["ContentType"], 'text/plain; charset="ascii"')
+
+        with mock.patch("zerver.views.tusd.attachment_source") as mock_attachment_source:
+            mock_attachment_source.return_value.size = 40 * 1024
+            reader = mock_attachment_source.return_value.reader.return_value
+            # We set up 10 possible reads, but should not consume them all
+            reader.read.side_effect = (b"a" * 4096,) * 10
+            path_id = upload_text_file("big-ascii.txt", 4096 * 10)
+            # 32k / 4k reads = 8 reads total before bailing out
+            self.assertEqual(reader.read.call_count, 8)
+        attachment = Attachment.objects.get(path_id=path_id)
+        self.assertEqual(attachment.size, 40 * 1024)
+        self.assertEqual(attachment.content_type, "text/plain")
+        self.assertEqual(bucket.Object(path_id).get()["ContentType"], "text/plain")
+
+
+class TusdPreTerminateTest(ZulipTestCase):
+    def request(self, info: TusUpload) -> TusHook:
+        return TusHook(
+            type="pre-terminate",
+            event=TusEvent(
+                upload=info,
+                http_request=TusHTTPRequest(
+                    method="PATCH",
+                    uri=f"/api/v1/tus/{info.id}",
+                    remote_addr="12.34.56.78",
+                    header={},
+                ),
+            ),
+        )
+
+    def test_tusd_pre_terminate_hook(self) -> None:
+        self.login("hamlet")
+        hamlet = self.example_user("hamlet")
+
+        # Act like tusd does -- put the file and its .info in place
+        path_id = upload_backend.generate_message_upload_path(
+            str(hamlet.realm.id), sanitize_name("zulip.txt")
+        )
+        upload_backend.upload_message_attachment(
+            path_id, "zulip.txt", "text/plain", b"zulip!", hamlet, hamlet.realm
+        )
+
+        info = TusUpload(
+            id=path_id,
+            size=len("zulip!"),
+            offset=0,
+            size_is_deferred=False,
+            meta_data={
+                "filename": "zulip.txt",
+                "filetype": "text/plain",
+                "name": "zulip.txt",
+                "type": "text/plain",
+            },
+            is_final=False,
+            is_partial=False,
+            partial_uploads=None,
+            storage=None,
+        )
+
+        # Try to terminate the upload before it's in Attachments
+        result = self.client_post(
+            "/api/internal/tusd",
+            self.request(info).model_dump(),
+            content_type="application/json",
+        )
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.json(), {})
+
+        # Make the attachment
+        create_attachment(
+            "zulip.txt",
+            path_id,
+            "text/plain",
+            b"zulip!",
+            hamlet,
+            hamlet.realm,
+        )
+
+        # The terminate should get rejected now
+        result = self.client_post(
+            "/api/internal/tusd",
+            self.request(info).model_dump(),
+            content_type="application/json",
+        )
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.json(), {"RejectTermination": True})

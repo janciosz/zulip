@@ -9,7 +9,7 @@
     {
       "name": "codeblock_hilite_python",
       "input": "Hamlet said:\n~~~~.python \ndef speak(self):\n    x = 1\n~~~~",
-      "expected_output": "<p>Hamlet said:</p>\n<div class=\"codehilite\" data-code-language=\"Python\"><pre><span></span><code><span class=\"k\">def</span> <span class=\"nf\">speak</span><span class=\"p\">(</span><span class=\"bp\">self</span><span class=\"p\">):</span>\n    <span class=\"n\">x</span> <span class=\"o\">=</span> <span class=\"mi\">1</span>\n</code></pre></div>",
+      "expected_output": "<p>Hamlet said:</p>\n<div class=\"codehilite\" data-code-language=\"Python\"><pre><span></span><code><span class=\"k\">def</span><span class=\"w\"> </span><span class=\"nf\">speak</span><span class=\"p\">(</span><span class=\"bp\">self</span><span class=\"p\">):</span>\n    <span class=\"n\">x</span> <span class=\"o\">=</span> <span class=\"mi\">1</span>\n</code></pre></div>",
       "marked_expected_output": "<p>Hamlet said:</p>\n<div class=\"codehilite\" data-code-language=\"Python\"><pre><span></span><code>def speak(self):\n    x = 1\n</code></pre></div>",
       "text_content": "Hamlet said:\ndef speak(self):\n    x = 1\n"
     },
@@ -22,7 +22,7 @@
     {
       "name": "codeblock_canonicalize_lang_alias",
       "input": "``` py2\ndef speak(self):\n    x = 1\n```",
-      "expected_output": "<div class=\"codehilite\" data-code-language=\"Python 2.x\"><pre><span></span><code><span class=\"k\">def</span> <span class=\"nf\">speak</span><span class=\"p\">(</span><span class=\"bp\">self</span><span class=\"p\">):</span>\n    <span class=\"n\">x</span> <span class=\"o\">=</span> <span class=\"mi\">1</span>\n</code></pre></div>",
+      "expected_output": "<div class=\"codehilite\" data-code-language=\"Python 2.x\"><pre><span></span><code><span class=\"k\">def</span><span class=\"w\"> </span><span class=\"nf\">speak</span><span class=\"p\">(</span><span class=\"bp\">self</span><span class=\"p\">):</span>\n    <span class=\"n\">x</span> <span class=\"o\">=</span> <span class=\"mi\">1</span>\n</code></pre></div>",
       "marked_expected_output": "<div class=\"codehilite\" data-code-language=\"Python 2.x\"><pre><span></span><code>def speak(self):\n    x = 1\n</code></pre></div>",
       "text_content": "def speak(self):\n    x = 1\n"
     },
@@ -361,8 +361,8 @@
     {
       "name": "star_emoji",
       "input": "**:smile:**",
-      "expected_output": "<p><strong><span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span></strong></p>",
-      "text_content": "\ud83d\ude42"
+      "expected_output": "<p><strong><span aria-label=\"smile\" class=\"emoji emoji-1f604\" role=\"img\" title=\"smile\">:smile:</span></strong></p>",
+      "text_content": "\ud83d\ude04"
     },
     {
       "name": "star_strong_em",
@@ -472,6 +472,12 @@
       "text_content": "Google link\n"
     },
     {
+      "name": "only_inline_audio_camo",
+      "input": "![Audio link](http://example.com/audio.mp3)",
+      "expected_output": "<p><audio controls data-original-url=\"http://example.com/audio.mp3\" preload=\"metadata\" src=\"https://external-content.zulipcdn.net/external_content/57cf2db553c3f6cc2af6781c11232e70983f4762/687474703a2f2f6578616d706c652e636f6d2f617564696f2e6d7033\" title=\"Audio link\"></audio></p>",
+      "backend_only_rendering": true
+    },
+    {
       "name": "link_with_text",
       "input": "[hello](https://github.com)",
       "expected_output": "<p><a href=\"https://github.com\">hello</a></p>"
@@ -525,8 +531,8 @@
     {
       "name": "many_emoji",
       "input":  "test :smile: again :poop:\n:) foo:)bar x::y::z :wasted waste: :fakeemojithisshouldnotrender:",
-      "expected_output": "<p>test <span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span> again <span aria-label=\"poop\" class=\"emoji emoji-1f4a9\" role=\"img\" title=\"poop\">:poop:</span><br>\n:) foo:)bar x::y::z :wasted waste: :fakeemojithisshouldnotrender:</p>",
-      "text_content": "test \ud83d\ude42 again \ud83d\udca9\n:) foo:)bar x::y::z :wasted waste: :fakeemojithisshouldnotrender:"
+      "expected_output": "<p>test <span aria-label=\"smile\" class=\"emoji emoji-1f604\" role=\"img\" title=\"smile\">:smile:</span> again <span aria-label=\"poop\" class=\"emoji emoji-1f4a9\" role=\"img\" title=\"poop\">:poop:</span><br>\n:) foo:)bar x::y::z :wasted waste: :fakeemojithisshouldnotrender:</p>",
+      "text_content": "test \ud83d\ude04 again \ud83d\udca9\n:) foo:)bar x::y::z :wasted waste: :fakeemojithisshouldnotrender:"
     },
     {
       "name": "translate_emoticons_not_enabled",
@@ -538,15 +544,15 @@
     {
       "name": "translate_emoticons_enabled",
       "input": ":)",
-      "expected_output": "<p><span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span></p>",
+      "expected_output": "<p><span aria-label=\"slight smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"slight smile\">:slight_smile:</span></p>",
       "text_content": "\ud83d\ude42",
       "translate_emoticons": true
     },
     {
       "name": "translate_emoticons",
       "input":  ":) foo :( bar <3 with space : ) real emoji :smile:",
-      "expected_output": "<p><span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span> foo <span aria-label=\"frown\" class=\"emoji emoji-1f641\" role=\"img\" title=\"frown\">:frown:</span> bar <span aria-label=\"heart\" class=\"emoji emoji-2764\" role=\"img\" title=\"heart\">:heart:</span> with space : ) real emoji <span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span></p>",
-      "text_content": "\ud83d\ude42 foo \ud83d\ude41 bar \u2764 with space : ) real emoji \ud83d\ude42",
+      "expected_output": "<p><span aria-label=\"slight smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"slight smile\">:slight_smile:</span> foo <span aria-label=\"frown\" class=\"emoji emoji-1f641\" role=\"img\" title=\"frown\">:frown:</span> bar <span aria-label=\"heart\" class=\"emoji emoji-2764\" role=\"img\" title=\"heart\">:heart:</span> with space : ) real emoji <span aria-label=\"smile\" class=\"emoji emoji-1f604\" role=\"img\" title=\"smile\">:smile:</span></p>",
+      "text_content": "\ud83d\ude42 foo \ud83d\ude41 bar \u2764 with space : ) real emoji \ud83d\ude04",
       "translate_emoticons": true
     },
     {
@@ -559,7 +565,7 @@
     {
       "name": "translate_emoticons_newline",
       "input":  ":) test\n:) test",
-      "expected_output": "<p><span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span> test<br>\n<span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span> test</p>",
+      "expected_output": "<p><span aria-label=\"slight smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"slight smile\">:slight_smile:</span> test<br>\n<span aria-label=\"slight smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"slight smile\">:slight_smile:</span> test</p>",
       "text_content": "\ud83d\ude42 test\n\ud83d\ude42 test",
       "translate_emoticons": true
     },
@@ -573,14 +579,14 @@
     {
       "name": "translate_emoticons_at_sentence_end",
       "input": "Translate this :).",
-      "expected_output": "<p>Translate this <span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span>.</p>",
+      "expected_output": "<p>Translate this <span aria-label=\"slight smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"slight smile\">:slight_smile:</span>.</p>",
       "text_content": "Translate this \ud83d\ude42.",
       "translate_emoticons": true
     },
     {
       "name": "translate_emoticons_between_symbols",
       "input": "Translate this !:)?",
-      "expected_output": "<p>Translate this !<span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span>?</p>",
+      "expected_output": "<p>Translate this !<span aria-label=\"slight smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"slight smile\">:slight_smile:</span>?</p>",
       "marked_expected_output": "<p>Translate this !:)?</p>",
       "text_content": "Translate this !\ud83d\ude42?",
       "translate_emoticons": true
@@ -707,7 +713,7 @@
     {
       "name": "emoji_alongside_punctuation",
       "input": ":smile:, :smile:; :smile:",
-      "expected_output": "<p><span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span>, <span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span>; <span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span></p>"
+      "expected_output": "<p><span aria-label=\"smile\" class=\"emoji emoji-1f604\" role=\"img\" title=\"smile\">:smile:</span>, <span aria-label=\"smile\" class=\"emoji emoji-1f604\" role=\"img\" title=\"smile\">:smile:</span>; <span aria-label=\"smile\" class=\"emoji emoji-1f604\" role=\"img\" title=\"smile\">:smile:</span></p>"
     },
     {
       "name": "new_emoji_test",
@@ -748,7 +754,7 @@
     {
       "name": "valid_emoji_preceded_by_invalid_emoji",
       "input": "This is :invalidemoji: which should not prevent rendering :smile:",
-      "expected_output": "<p>This is :invalidemoji: which should not prevent rendering <span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span></p>"
+      "expected_output": "<p>This is :invalidemoji: which should not prevent rendering <span aria-label=\"smile\" class=\"emoji emoji-1f604\" role=\"img\" title=\"smile\">:smile:</span></p>"
     },
     {
       "name": "safe_html",
@@ -993,8 +999,8 @@
     },
     {
       "name": "spoilers_with_header_markdown",
-      "input": "```spoiler [Header](https://example.com) :smile:\ncontent\n```",
-      "expected_output": "<div class=\"spoiler-block\"><div class=\"spoiler-header\">\n<p><a href=\"https://example.com\">Header</a> <span aria-label=\"smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"smile\">:smile:</span></p>\n</div><div class=\"spoiler-content\" aria-hidden=\"true\">\n<p>content</p>\n</div></div>",
+      "input": "```spoiler [Header](https://example.com) :slight_smile:\ncontent\n```",
+      "expected_output": "<div class=\"spoiler-block\"><div class=\"spoiler-header\">\n<p><a href=\"https://example.com\">Header</a> <span aria-label=\"slight smile\" class=\"emoji emoji-1f642\" role=\"img\" title=\"slight smile\">:slight_smile:</span></p>\n</div><div class=\"spoiler-content\" aria-hidden=\"true\">\n<p>content</p>\n</div></div>",
       "text_content": "Header 🙂 (…)\n"
     },
     {
@@ -1074,6 +1080,16 @@
       "input": "Hello @_**Zoe|7** see [this](https://google.com).",
       "expected_output": "<p>Hello <span class=\"user-mention silent\" data-user-id=\"7\">Zoe</span> see <a href=\"https://google.com\">this</a>.</p>",
       "text_content": "Hello Zoe see this."
+    },
+    {
+      "name": "RFC2392 mid links (markdown syntax)",
+      "input": "[message](mid:960830.1639@XIson.com)",
+      "expected_output": "<p><a href=\"mid:960830.1639@XIson.com\">message</a></p>"
+    },
+    {
+      "name": "RFC2392 mid links with part ID (markdown syntax)",
+      "input": "[message](mid:960830.1639@XIson.com/partA.960830.1639@XIson.com)",
+      "expected_output": "<p><a href=\"mid:960830.1639@XIson.com/partA.960830.1639@XIson.com\">message</a></p>"
     }
   ],
   "linkify_tests": [
@@ -1431,6 +1447,26 @@
       "quora http://generate.quora.net/render?width=700&from=-4hours&until=now&height=400&bgcolor=black&lineMode=connected&title=arb%20hint%20status&target=alias(ans.hintland.hand.arb.enhint_rate%2C%22enhint%20rate%22)&target=alias(ans.hintland.hand.arb.unhint_rate%2C%22unhint%20rate%22)&target=alias(ans.hintland.hand.arb.size%2C%22hint%20size%22)&target=alias(scale(ans.vagabond.dingarb_cube_count%2C10000)%2C%22cube%20count%20x%2010K%22)&target=alias(scale(hnumbers.time.ding.gegevens.query.count%2C10)%2C%22ding%20gegevens%20query%20count%20x%2010%22)&fgcolor=white&uniq=0.44046106841415167",
       "<p>quora %s</p>",
       "http://generate.quora.net/render?width=700&amp;from=-4hours&amp;until=now&amp;height=400&amp;bgcolor=black&amp;lineMode=connected&amp;title=arb%20hint%20status&amp;target=alias(ans.hintland.hand.arb.enhint_rate%2C%22enhint%20rate%22)&amp;target=alias(ans.hintland.hand.arb.unhint_rate%2C%22unhint%20rate%22)&amp;target=alias(ans.hintland.hand.arb.size%2C%22hint%20size%22)&amp;target=alias(scale(ans.vagabond.dingarb_cube_count%2C10000)%2C%22cube%20count%20x%2010K%22)&amp;target=alias(scale(hnumbers.time.ding.gegevens.query.count%2C10)%2C%22ding%20gegevens%20query%20count%20x%2010%22)&amp;fgcolor=white&amp;uniq=0.44046106841415167"
+    ],
+    [
+      "Check this: https://podcasts.google.com?feed=abc",
+      "<p>Check this: %s</p>",
+      "https://podcasts.google.com?feed=abc"
+    ],
+    [
+      "Is this https://google.com?",
+      "<p>Is this %s?</p>",
+      "https://google.com"
+    ],
+    [
+      "New logic inside parens: (see https://podcasts.google.com?feed=abc)",
+      "<p>New logic inside parens: (see <a href=\"https://podcasts.google.com?feed=abc\">https://podcasts.google.com?feed=abc</a>)</p>",
+      "(see https://podcasts.google.com?feed=abc)"
+    ],
+    [
+      "New logic with trailing dot: Go to https://podcasts.google.com?feed=abc.",
+      "<p>New logic with trailing dot: Go to <a href=\"https://podcasts.google.com?feed=abc\">https://podcasts.google.com?feed=abc</a>.</p>",
+      "Go to https://podcasts.google.com?feed=abc."
     ]
   ]
 }

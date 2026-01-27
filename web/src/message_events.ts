@@ -1,7 +1,7 @@
 import $ from "jquery";
 import _ from "lodash";
 import assert from "minimalistic-assert";
-import {z} from "zod";
+import * as z from "zod/mini";
 
 import * as activity from "./activity.ts";
 import * as alert_words from "./alert_words.ts";
@@ -14,24 +14,34 @@ import * as compose_validate from "./compose_validate.ts";
 import * as direct_message_group_data from "./direct_message_group_data.ts";
 import * as drafts from "./drafts.ts";
 import * as echo from "./echo.ts";
+import type {RawLocalMessage} from "./echo.ts";
 import type {Filter} from "./filter.ts";
+import * as lightbox from "./lightbox.ts";
 import * as message_edit from "./message_edit.ts";
 import * as message_edit_history from "./message_edit_history.ts";
 import * as message_events_util from "./message_events_util.ts";
 import * as message_helper from "./message_helper.ts";
+import type {LocalMessage} from "./message_helper.ts";
 import * as message_list_data_cache from "./message_list_data_cache.ts";
 import * as message_lists from "./message_lists.ts";
 import * as message_notifications from "./message_notifications.ts";
 import * as message_parser from "./message_parser.ts";
 import * as message_store from "./message_store.ts";
-import {type Message, type RawMessage, raw_message_schema} from "./message_store.ts";
+import {
+    type Message,
+    type MessageEditHistoryEntry,
+    type RawMessage,
+    raw_message_schema,
+} from "./message_store.ts";
 import * as message_view from "./message_view.ts";
 import * as narrow_state from "./narrow_state.ts";
 import * as pm_list from "./pm_list.ts";
 import * as recent_senders from "./recent_senders.ts";
 import * as recent_view_ui from "./recent_view_ui.ts";
 import * as recent_view_util from "./recent_view_util.ts";
+import * as resolved_topic from "./resolved_topic.ts";
 import type {UpdateMessageEvent} from "./server_event_types.ts";
+import {message_edit_history_visibility_policy_values} from "./settings_config.ts";
 import * as starred_messages from "./starred_messages.ts";
 import * as starred_messages_ui from "./starred_messages_ui.ts";
 import {realm} from "./state_data.ts";
@@ -203,7 +213,7 @@ export let update_views_filtered_on_message_property = (
                         messages_to_remove.delete(raw_message.id);
                         const message = message_store.get(raw_message.id);
                         messages_to_add.push(
-                            message ?? message_helper.process_new_message(raw_message),
+                            message ?? message_helper.process_new_server_message(raw_message),
                         );
                     }
                     msg_list.data.remove([...messages_to_remove]);
@@ -223,7 +233,7 @@ export let update_views_filtered_on_message_property = (
                     // can be used to update other message lists and
                     // cached message data structures as well.
                 },
-                // eslint-disable-next-line no-loop-func
+                // eslint-disable-next-line @typescript-eslint/no-loop-func
                 success(data) {
                     const parsed_data = z
                         .object({
@@ -234,7 +244,7 @@ export let update_views_filtered_on_message_property = (
                     // we reach here but `message_helper.process_new_message`
                     // already handles that case.
                     for (const raw_message of parsed_data.messages) {
-                        message_helper.process_new_message(raw_message);
+                        message_helper.process_new_server_message(raw_message);
                     }
                     update_views_filtered_on_message_property(
                         message_ids,
@@ -283,14 +293,35 @@ export function rewire_update_views_filtered_on_message_property(
     update_views_filtered_on_message_property = value;
 }
 
-export function insert_new_messages(
-    raw_messages: RawMessage[],
-    sent_by_this_client: boolean,
-    deliver_locally: boolean,
-): Message[] {
-    const messages = raw_messages.map((raw_message) =>
-        message_helper.process_new_message(raw_message, deliver_locally),
-    );
+export type InsertNewMessagesOpts = {
+    sent_by_this_client: boolean;
+} & (
+    | {
+          type: "server_message";
+          raw_messages: RawMessage[];
+      }
+    | {
+          type: "local_message";
+          raw_messages: RawLocalMessage[];
+      }
+);
+
+export function insert_new_messages(opts: InsertNewMessagesOpts): Message[] {
+    const deliver_locally = opts.type === "local_message";
+    let messages: Message[] = [];
+    let local_messages: LocalMessage[] | undefined = [];
+    if (opts.type === "server_message") {
+        messages = opts.raw_messages.map((raw_message) =>
+            message_helper.process_new_server_message(raw_message),
+        );
+    } else {
+        local_messages = opts.raw_messages.map((raw_message) =>
+            message_helper.process_new_local_message(raw_message),
+        );
+        // Local messages have extra data on them that we need to access in
+        // a few places, but otherwise we can treat them like regular messages.
+        messages = local_messages;
+    }
 
     const any_untracked_unread_messages = unread.process_loaded_messages(messages, false);
     direct_message_group_data.process_loaded_messages(messages);
@@ -314,12 +345,13 @@ export function insert_new_messages(
                 continue;
             }
 
-            message_events_util.maybe_add_narrowed_messages(messages, list);
+            const messages_are_new = true;
+            message_events_util.maybe_add_narrowed_messages(messages, list, messages_are_new);
             continue;
         }
 
         // Update the message list's rendering for the newly arrived messages.
-        const render_info = list.add_messages(messages);
+        const render_info = list.add_messages(messages, {messages_are_new: true});
 
         // The render_info.need_user_to_scroll calculation, which
         // looks at message feed scroll positions to see whether the
@@ -345,7 +377,7 @@ export function insert_new_messages(
     // sent_by_this_client will be true if ANY of the messages
     // were sent by this client; notifications.notify_local_mixes
     // will filter out any not sent by us.
-    if (sent_by_this_client) {
+    if (opts.sent_by_this_client) {
         compose_notifications.notify_local_mixes(messages, need_user_to_scroll, {
             narrow_to_recipient(message_id) {
                 message_view.narrow_by_topic(message_id, {trigger: "outside_current_view"});
@@ -361,7 +393,7 @@ export function insert_new_messages(
     // tracking before we update the stream sidebar, to take advantage
     // of how stream_topic_history uses the echo data structures.
     if (deliver_locally) {
-        for (const message of messages) {
+        for (const message of local_messages) {
             echo.track_local_message(message);
         }
     }
@@ -372,6 +404,36 @@ export function insert_new_messages(
     pm_list.update_private_messages();
 
     return messages;
+}
+
+function topic_resolve_toggled(new_topic: string, original_topic: string): boolean {
+    if (resolved_topic.is_resolved(new_topic) && new_topic.slice(2) === original_topic) {
+        return true;
+    }
+    if (resolved_topic.is_resolved(original_topic) && original_topic.slice(2) === new_topic) {
+        return true;
+    }
+    return false;
+}
+
+function get_post_edit_topic(
+    topic_edited: boolean,
+    event: UpdateMessageEvent,
+    new_topic: string | undefined,
+    anchor_message: Message | undefined,
+): string {
+    const pre_edit_topic = util.get_edit_event_orig_topic(event);
+    assert(pre_edit_topic !== undefined);
+
+    if (topic_edited) {
+        assert(new_topic !== undefined);
+        return new_topic;
+    }
+    if (anchor_message !== undefined) {
+        assert(anchor_message.type === "stream");
+        return anchor_message.topic;
+    }
+    return pre_edit_topic;
 }
 
 export function update_messages(events: UpdateMessageEvent[]): void {
@@ -404,7 +466,7 @@ export function update_messages(events: UpdateMessageEvent[]): void {
             message_store.update_booleans(anchor_message, event.flags);
 
             if (event.rendered_content !== undefined) {
-                anchor_message.content = event.rendered_content;
+                message_store.update_message_content(anchor_message, event.rendered_content);
             }
 
             if (event.is_me_message !== undefined) {
@@ -419,7 +481,10 @@ export function update_messages(events: UpdateMessageEvent[]): void {
             // edits have edit_history logged for both before any
             // potential narrowing as part of the topic edit loop.
             if (event.orig_content !== undefined) {
-                if (realm.realm_allow_edit_history) {
+                if (
+                    realm.realm_message_edit_history_visibility_policy ===
+                    message_edit_history_visibility_policy_values.always.code
+                ) {
                     // Note that we do this for topic edits separately, below.
                     // If an event changed both content and topic, we'll generate
                     // two client-side events, which is probably good for display.
@@ -432,18 +497,19 @@ export function update_messages(events: UpdateMessageEvent[]): void {
                     // Add message's edit_history in message dict
                     // For messages that are edited, edit_history needs to
                     // be added to message in frontend.
-                    if (anchor_message.edit_history === undefined) {
-                        anchor_message.edit_history = [];
-                    }
                     anchor_message.edit_history = [
                         edit_history_entry,
-                        ...anchor_message.edit_history,
+                        ...(anchor_message.edit_history ?? []),
                     ];
                 }
                 any_message_content_edited = true;
 
                 // Update raw_content, so that editing a few times in a row is fast.
                 anchor_message.raw_content = event.content;
+
+                // Editing a message may change the titles for linked
+                // media, so we must invalidate the asset map.
+                lightbox.invalidate_asset_map_of_message(event.message_id);
             }
 
             if (unread.update_message_for_mention(anchor_message, any_message_content_edited)) {
@@ -515,9 +581,6 @@ export function update_messages(events: UpdateMessageEvent[]): void {
                     local_cache_missing_messages = true;
                 }
             }
-            // The event.message_ids received from the server are not in sorted order.
-            // Sorts in ascending order.
-            event_messages.sort((a, b) => a.id - b.id);
 
             if (
                 going_forward_change &&
@@ -535,6 +598,7 @@ export function update_messages(events: UpdateMessageEvent[]): void {
                 }
 
                 compose_validate.warn_if_topic_resolved(true);
+                compose_validate.inform_if_topic_is_moved(orig_topic, old_stream_id, event.user_id);
                 compose_fade.set_focused_recipient("stream");
             }
 
@@ -543,19 +607,15 @@ export function update_messages(events: UpdateMessageEvent[]): void {
             }
 
             for (const moved_message of event_messages) {
-                if (realm.realm_allow_edit_history) {
+                if (
+                    realm.realm_message_edit_history_visibility_policy !==
+                    message_edit_history_visibility_policy_values.never.code
+                ) {
                     /* Simulate the format of server-generated edit
                      * history events. This logic ensures that all
                      * messages that were moved are displayed as such
                      * without a browser reload. */
-                    const edit_history_entry: {
-                        user_id: number | null;
-                        timestamp: number;
-                        stream?: number;
-                        prev_stream?: number;
-                        topic?: string;
-                        prev_topic?: string;
-                    } = {
+                    const edit_history_entry: MessageEditHistoryEntry = {
                         user_id: event.user_id,
                         timestamp: event.edit_timestamp,
                     };
@@ -567,15 +627,20 @@ export function update_messages(events: UpdateMessageEvent[]): void {
                         edit_history_entry.topic = new_topic;
                         edit_history_entry.prev_topic = orig_topic;
                     }
-                    if (moved_message.edit_history === undefined) {
-                        moved_message.edit_history = [];
-                    }
                     moved_message.edit_history = [
                         edit_history_entry,
-                        ...moved_message.edit_history,
+                        ...(moved_message.edit_history ?? []),
                     ];
                 }
-                moved_message.last_edit_timestamp = event.edit_timestamp;
+
+                if (stream_changed) {
+                    moved_message.last_moved_timestamp = event.edit_timestamp;
+                } else if (topic_edited) {
+                    assert(new_topic !== undefined);
+                    if (!topic_resolve_toggled(new_topic, orig_topic)) {
+                        moved_message.last_moved_timestamp = event.edit_timestamp;
+                    }
+                }
 
                 // Update the unread counts; again, this must be called
                 // before we modify the topic field on the message.
@@ -605,7 +670,7 @@ export function update_messages(events: UpdateMessageEvent[]): void {
 
             // Remove the stream_topic_entry for the old topics;
             // must be called after we call set message topic since
-            // it calls `get_messages_in_topic` which thinks that
+            // it calls `get_loaded_messages_in_topic` which thinks that
             // `topic` and `stream` of the messages are correctly set.
             const num_messages = event_messages.length;
             if (num_messages > 0) {
@@ -633,7 +698,7 @@ export function update_messages(events: UpdateMessageEvent[]): void {
                 // Code further down takes care of the actual rerendering of
                 // messages within a narrow.
                 selection_changed_topic &&
-                current_filter?.has_topic(old_stream_id, orig_topic)
+                current_filter?.has_topic(String(old_stream_id), orig_topic)
             ) {
                 let new_filter = current_filter;
                 if (new_filter && stream_changed) {
@@ -746,7 +811,7 @@ export function update_messages(events: UpdateMessageEvent[]): void {
             // flag is used to indicated update_message events that are
             // triggered by server latency optimizations, not user
             // interactions; these should not generate edit history updates.
-            if (!event.rendering_only) {
+            if (!event.rendering_only && any_message_content_edited) {
                 anchor_message.last_edit_timestamp = event.edit_timestamp;
             }
 
@@ -757,20 +822,14 @@ export function update_messages(events: UpdateMessageEvent[]): void {
         if (topic_edited || stream_changed) {
             // We must be moving stream messages.
             assert(old_stream_id !== undefined);
-            let pre_edit_topic = util.get_edit_event_orig_topic(event);
+            const pre_edit_topic = util.get_edit_event_orig_topic(event);
             assert(pre_edit_topic !== undefined);
-
-            let post_edit_topic: string;
-            if (topic_edited) {
-                assert(new_topic !== undefined);
-                post_edit_topic = new_topic;
-            } else {
-                if (anchor_message !== undefined) {
-                    assert(anchor_message.type === "stream");
-                    pre_edit_topic = anchor_message.topic;
-                }
-                post_edit_topic = pre_edit_topic;
-            }
+            const post_edit_topic = get_post_edit_topic(
+                topic_edited,
+                event,
+                new_topic,
+                anchor_message,
+            );
 
             // new_stream_id is undefined if this is only a topic edit.
             const post_edit_stream_id = new_stream_id ?? old_stream_id;
@@ -782,7 +841,7 @@ export function update_messages(events: UpdateMessageEvent[]): void {
                 new_stream_id: post_edit_stream_id,
                 new_topic: post_edit_topic,
             });
-            unread.clear_and_populate_unread_mention_topics();
+            unread.clear_and_populate_unread_mentions();
             recent_view_ui.process_topic_edit(
                 old_stream_id,
                 pre_edit_topic,

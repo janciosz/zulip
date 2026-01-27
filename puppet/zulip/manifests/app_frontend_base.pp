@@ -16,6 +16,8 @@ class zulip::app_frontend_base {
   }
   zulip::safepackage {
     [
+      # For `manage.py compilemessages` when upgrading from Git.
+      'gettext',
       # For Slack import.
       'unzip',
       # Ensures `/etc/ldap/ldap.conf` exists; the default
@@ -51,17 +53,15 @@ class zulip::app_frontend_base {
     group  => 'root',
     mode   => '0755',
   }
+  file { '/etc/nginx/zulip-include/localhost.d/':
+    ensure => directory,
+    owner  => 'root',
+    group  => 'root',
+    mode   => '0755',
+  }
 
   $loadbalancers = split(zulipconf('loadbalancer', 'ips', ''), ',')
   if $loadbalancers != [] {
-    file { '/etc/nginx/zulip-include/app.d/accept-loadbalancer.conf':
-      require => File['/etc/nginx/zulip-include/app.d'],
-      owner   => 'root',
-      group   => 'root',
-      mode    => '0644',
-      content => template('zulip/accept-loadbalancer.conf.template.erb'),
-      notify  => Service['nginx'],
-    }
     file { '/etc/nginx/zulip-include/app.d/keepalive-loadbalancer.conf':
       require => File['/etc/nginx/zulip-include/app.d'],
       owner   => 'root',
@@ -71,11 +71,17 @@ class zulip::app_frontend_base {
       notify  => Service['nginx'],
     }
   } else {
-    file { ['/etc/nginx/zulip-include/app.d/accept-loadbalancer.conf',
-            '/etc/nginx/zulip-include/app.d/keepalive-loadbalancer.conf']:
+    file { '/etc/nginx/zulip-include/app.d/keepalive-loadbalancer.conf':
       ensure => absent,
       notify => Service['nginx'],
     }
+  }
+  file { '/etc/nginx/zulip-include/app.d/accept-loadbalancer.conf':
+    # This moved to /etc/nginx/zulip-include/trusted-ip, via
+    # nginx.pp. This block can be removed once direct Zulip upgrades
+    # from Zulip 11 are no longer supported.
+    ensure => absent,
+    notify => Service['nginx'],
   }
   file { '/etc/nginx/zulip-include/app.d/healthcheck.conf':
     require => File['/etc/nginx/zulip-include/app.d'],
@@ -151,6 +157,7 @@ class zulip::app_frontend_base {
     'embed_links',
     'embedded_bots',
     'email_senders',
+    'deferred_email_senders',
     'missedmessage_emails',
     'missedmessage_mobile_notifications',
     'outgoing_webhooks',
@@ -173,8 +180,13 @@ class zulip::app_frontend_base {
 
   # Not the different naming scheme for sharded workers, where each gets its own queue,
   # vs when multiple workers service the same queue.
-  $thumbnail_workers = Integer(zulipconf('application_server', 'thumbnail_workers', 1))
+  $worker_counts = Hash(zulipconf_keys('application_server').filter |$key| {
+    $key =~ /_workers$/
+  }.map |$key| {
+    [regsubst($key, '_workers$', ''), Integer(zulipconf('application_server', $key, 1))]
+  })
   $mobile_notification_shards = Integer(zulipconf('application_server', 'mobile_notification_shards', 1))
+  $user_activity_shards = Integer(zulipconf('application_server', 'user_activity_shards', 1))
   $tornado_ports = $zulip::tornado_sharding::tornado_ports
 
   $proxy_host = zulipconf('http_proxy', 'host', 'localhost')

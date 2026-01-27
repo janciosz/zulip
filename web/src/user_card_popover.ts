@@ -21,17 +21,20 @@ import {show_copied_confirmation} from "./copied_tooltip.ts";
 import * as dialog_widget from "./dialog_widget.ts";
 import {is_overlay_hash} from "./hash_parser.ts";
 import * as hash_util from "./hash_util.ts";
-import {$t_html} from "./i18n.ts";
+import {$t, $t_html} from "./i18n.ts";
 import * as message_lists from "./message_lists.ts";
 import {user_can_send_direct_message} from "./message_util.ts";
 import * as message_view from "./message_view.ts";
+import * as mouse_drag from "./mouse_drag.ts";
 import * as muted_users from "./muted_users.ts";
 import * as overlays from "./overlays.ts";
 import {page_params} from "./page_params.ts";
 import type {User} from "./people.ts";
 import * as people from "./people.ts";
 import * as popover_menus from "./popover_menus.ts";
+import * as popovers from "./popovers.ts";
 import {hide_all} from "./popovers.ts";
+import * as presence from "./presence.ts";
 import * as rows from "./rows.ts";
 import * as settings_panel_menu from "./settings_panel_menu.ts";
 import * as sidebar_ui from "./sidebar_ui.ts";
@@ -92,7 +95,7 @@ class PopoverMenu {
 
         const $popover = $(this.instance.popper);
 
-        const $items = $("[tabindex='0']", $popover).filter(":visible");
+        const $items = $("[tabindex='0']", $popover);
 
         popover_items_handle_keyboard_with_overrides(key, $items);
     }
@@ -110,10 +113,8 @@ function popover_items_handle_keyboard_with_overrides(key: string, $items: JQuer
     const index = $items.index($items.filter(":focus"));
 
     if (index === -1) {
-        const first_menu_option_index = $items.index(
-            $items.filter(".link-item .popover-menu-link"),
-        );
-        $items.eq(first_menu_option_index).trigger("focus");
+        const $menu_options = $items.filter(".link-item .popover-menu-link");
+        [...$menu_options].find((option) => option.getClientRects().length)?.focus();
         return;
     }
 
@@ -237,6 +238,65 @@ type UserCardPopoverData = {
     bot_owner?: User;
 };
 
+export let fetch_presence_for_popover = (user_id: number): void => {
+    if (page_params.is_spectator) {
+        return;
+    }
+
+    if (!people.is_active_user_for_popover(user_id) || people.get_by_user_id(user_id).is_bot) {
+        return;
+    }
+
+    const url = `json/users/${user_id}/presence`;
+    const selector_to_update = `#user_card_popover .popover-menu-list[data-user-id="${CSS.escape(user_id.toString())}"] .user-last-seen-time`;
+    channel.get({
+        url,
+        success(data: unknown) {
+            const parsed_data = presence.user_last_seen_response_schema.safeParse(data);
+
+            if (!parsed_data.success) {
+                blueslip.error("Failed to parse presence API response");
+                return;
+            }
+
+            const response = parsed_data.data;
+
+            if (response.result === "success" && response.presence) {
+                const {aggregated} = response.presence;
+                presence.presence_info.set(user_id, {
+                    status: aggregated.status,
+                    last_active: aggregated.timestamp,
+                });
+
+                // Update the user's last seen time in the user card
+                // popover once we have their presence information, if
+                // we still have that user card still open.
+                $(selector_to_update).text(buddy_data.user_last_seen_time_status(user_id));
+            }
+        },
+        error() {
+            // Fallback logic for users who haven't generated any presence data.
+            // A non-bot active user account might have no presence data either
+            // because they have always been in "invisible mode" or because the
+            // account was imported from another chat system.
+            //
+            // Store the fact that this user hasn't been online since
+            // account creation, to avoid uselessly asking the server
+            // again in this session.
+            const user = people.get_by_user_id(user_id);
+            presence.presence_info.set(user_id, {
+                status: "offline",
+                last_active: new Date(user.date_joined).getTime() / 1000,
+            });
+            $(selector_to_update).text(buddy_data.user_last_seen_time_status(user_id));
+        },
+    });
+};
+
+export function rewire_fetch_presence_for_popover(value: (user_id: number) => string): void {
+    fetch_presence_for_popover = value;
+}
+
 function get_user_card_popover_data(
     user: User,
     has_message_context: boolean,
@@ -283,6 +343,10 @@ function get_user_card_popover_data(
     const can_send_private_message =
         user_can_send_direct_message(user_id_string) && is_active && !is_me;
 
+    const user_last_seen_time_status =
+        buddy_data.user_last_seen_time_status(user.user_id, fetch_presence_for_popover) ||
+        $t({defaultMessage: "Loading…"});
+
     const args: UserCardPopoverData = {
         invisible_mode,
         can_send_private_message,
@@ -292,14 +356,14 @@ function get_user_card_popover_data(
         is_bot: user.is_bot,
         is_me,
         is_sender_popover,
-        pm_with_url: hash_util.pm_with_url(user.email),
+        pm_with_url: hash_util.pm_with_url(user.user_id.toString()),
         user_circle_class: buddy_data.get_user_circle_class(user.user_id),
         private_message_class: private_msg_class,
         sent_by_url: hash_util.by_sender_url(user.email),
         user_email: user.delivery_email,
         user_full_name: user.full_name,
         user_id: user.user_id,
-        user_last_seen_time_status: buddy_data.user_last_seen_time_status(user.user_id),
+        user_last_seen_time_status,
         user_time: people.get_user_time(user.user_id),
         user_type: people.get_user_type(user.user_id),
         status_content_available: Boolean(status_text ?? status_emoji_info),
@@ -466,7 +530,7 @@ function load_medium_avatar(user: User, $elt: JQuery): void {
 // user is the user whose profile to show.
 // sender_id is the user id of the sender for the message we are
 // showing the popover from.
-function toggle_user_card_popover_for_message(
+export function toggle_user_card_popover_for_message(
     element: HTMLElement,
     user: User,
     sender_id: number,
@@ -493,7 +557,14 @@ export function unsaved_message_user_mention_event_handler(
     this: HTMLElement,
     e: JQuery.ClickEvent,
 ): void {
+    // We stop propagation because, if this event was fired from drafts,
+    // it would otherwise trigger this handler twice: once from the
+    // `.user-mention` listener for drafts and again from the
+    // `.messagebox .user-mention` listener.
     e.stopPropagation();
+    if (mouse_drag.is_drag(e)) {
+        return;
+    }
 
     const id_string = $(this).attr("data-user-id")!;
     // Do not open popover for @all mention
@@ -518,6 +589,14 @@ export function toggle_sender_info(): void {
         message_user_card.hide();
         return;
     }
+
+    // The "View user card" tooltip shown when hovering the avatar can
+    // block this from opening properly, so close it first.
+    //
+    // This isn't necessary for the click handler, because the click
+    // naturally closes the Tippy tooltip.
+    popovers.hide_all();
+
     const $message = $(".selected_message");
     let $sender = $message.find(".message-avatar");
     if ($sender.length === 0) {
@@ -541,7 +620,7 @@ function focus_user_card_popover_item(): void {
     // For now I recommend only calling this when the user opens the menu with a hotkey.
     // Our popup menus act kind of funny when you mix keyboard and mouse.
     const $items = get_user_card_popover_for_message_items();
-    popover_menus.focus_first_popover_item($items);
+    [...($items ?? [])].find((item) => item.getClientRects().length)?.focus();
 }
 
 function get_user_card_popover_for_message_items(): JQuery | undefined {
@@ -558,7 +637,7 @@ function get_user_card_popover_for_message_items(): JQuery | undefined {
 
     // Return only the popover menu options that are visible, and not the
     // copy buttons or the link items in the custom profile fields.
-    return $(".link-item .popover-menu-link", $popover).filter(":visible");
+    return $(".link-item .popover-menu-link", $popover);
 }
 
 // Functions related to the user card popover in the user sidebar.
@@ -599,10 +678,13 @@ function toggle_sidebar_user_card_popover($target: JQuery): void {
 function register_click_handlers(): void {
     $("#main_div").on(
         "click",
-        ".sender_name, .inline_profile_picture",
+        ".sender_name, .inline-profile-picture-wrapper",
         function (this: HTMLElement, e) {
-            const $row = $(this).closest(".message_row");
             e.stopPropagation();
+            if (mouse_drag.is_drag(e)) {
+                return;
+            }
+            const $row = $(this).closest(".message_row");
             assert(message_lists.current !== undefined);
             const message = message_lists.current.get(rows.id($row));
             assert(message !== undefined);
@@ -612,6 +694,10 @@ function register_click_handlers(): void {
     );
 
     $("#main_div").on("click", ".user-mention", function (this: HTMLElement, e) {
+        e.stopPropagation();
+        if (mouse_drag.is_drag(e)) {
+            return;
+        }
         const id_string = $(this).attr("data-user-id");
         // We fallback to email to handle legacy Markdown that was rendered
         // before we cut over to using data-user-id
@@ -620,7 +706,6 @@ function register_click_handlers(): void {
             return;
         }
         const $row = $(this).closest(".message_row");
-        e.stopPropagation();
         assert(message_lists.current !== undefined);
         const message = message_lists.current.get(rows.id($row));
         assert(message !== undefined);
@@ -854,11 +939,10 @@ function register_click_handlers(): void {
 
     $("body").on("click", ".respond_personal_button, .compose_private_message", function (e) {
         const user_id = elem_to_user_id($(this).parents("ul"));
-        const email = people.get_by_user_id(user_id).email;
         compose_actions.start({
             message_type: "private",
             trigger: "popover send private",
-            private_message_recipient: email,
+            private_message_recipient_ids: [user_id],
         });
         hide_all();
         if (overlays.any_active()) {

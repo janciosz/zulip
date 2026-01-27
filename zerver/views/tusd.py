@@ -14,19 +14,20 @@ from pydantic.alias_generators import to_pascal
 from confirmation.models import Confirmation, ConfirmationKeyError, get_object_from_key
 from zerver.decorator import get_basic_credentials, validate_api_key
 from zerver.lib.exceptions import AccessDeniedError, JsonableError
-from zerver.lib.mime_types import INLINE_MIME_TYPES, guess_type
+from zerver.lib.mime_types import INLINE_MIME_TYPES, bare_content_type, guess_type
 from zerver.lib.rate_limiter import is_local_addr
 from zerver.lib.typed_endpoint import JsonBodyPayload, typed_endpoint
 from zerver.lib.upload import (
     RealmUploadQuotaError,
-    attachment_vips_source,
+    attachment_source,
     check_upload_within_quota,
     create_attachment,
     delete_message_attachment,
+    maybe_add_charset,
     sanitize_name,
     upload_backend,
 )
-from zerver.models import PreregistrationRealm, Realm, UserProfile
+from zerver.models import ArchivedAttachment, Attachment, PreregistrationRealm, Realm, UserProfile
 
 
 # See https://tus.github.io/tusd/advanced-topics/hooks/ for the spec
@@ -154,6 +155,8 @@ def handle_upload_pre_finish_hook(
         content_type = guess_type(filename)[0]
         if content_type is None:
             content_type = "application/octet-stream"
+    file_data = attachment_source(path_id)
+    content_type = maybe_add_charset(content_type, file_data)
 
     if settings.LOCAL_UPLOADS_DIR is None:
         # We "copy" the file to itself to update the Content-Type,
@@ -165,7 +168,7 @@ def handle_upload_pre_finish_hook(
             "realm_id": str(user_profile.realm_id),
         }
 
-        is_attachment = content_type not in INLINE_MIME_TYPES
+        is_attachment = bare_content_type(content_type) not in INLINE_MIME_TYPES
         content_disposition = content_disposition_header(is_attachment, filename) or "inline"
 
         from zerver.lib.upload.s3 import S3UploadBackend
@@ -200,7 +203,7 @@ def handle_upload_pre_finish_hook(
             filename,
             path_id,
             content_type,
-            attachment_vips_source(path_id),
+            file_data,
             user_profile,
             user_profile.realm,
         )
@@ -217,6 +220,22 @@ def handle_upload_pre_finish_hook(
             },
         }
     )
+
+
+def handle_upload_pre_terminate_hook(
+    request: HttpRequest, user_profile: UserProfile, data: TusUpload
+) -> HttpResponse:
+    path_id = data.id.partition("+")[0]
+
+    if (
+        Attachment.objects.filter(path_id=path_id).exists()
+        or ArchivedAttachment.objects.filter(path_id=path_id).exists()
+    ):
+        # Once we have it in our Attachments table (i.e. the
+        # pre-upload-finished hook has run), it is ours to manage and
+        # we no longer accept terminations.
+        return tusd_json_response({"RejectTermination": True})
+    return tusd_json_response({})
 
 
 def authenticate_user(request: HttpRequest) -> UserProfile | AnonymousUser:
@@ -241,16 +260,18 @@ def authenticate_user(request: HttpRequest) -> UserProfile | AnonymousUser:
 def handle_preregistration_pre_create_hook(
     request: HttpRequest, preregistration_realm: PreregistrationRealm, data: TusUpload
 ) -> HttpResponse:
-    max_upload_size = settings.MAX_WEB_DATA_IMPORT_SIZE_MB * 1024 * 1024  # 1G
     if data.size_is_deferred or data.size is None:
         return reject_upload("SizeIsDeferred is not supported", 411)
-    if data.size > max_upload_size:
-        return reject_upload(
-            _("Uploaded file is larger than the allowed limit of {max_file_size} MiB").format(
-                max_file_size=settings.MAX_WEB_DATA_IMPORT_SIZE_MB
-            ),
-            413,
-        )
+
+    if settings.MAX_WEB_DATA_IMPORT_SIZE_MB is not None:
+        max_upload_size = settings.MAX_WEB_DATA_IMPORT_SIZE_MB * 1024 * 1024  # 1G
+        if data.size > max_upload_size:
+            return reject_upload(
+                _(
+                    "Uploaded file exceeds the maximum file size for imports ({max_file_size} MiB)."
+                ).format(max_file_size=settings.MAX_WEB_DATA_IMPORT_SIZE_MB),
+                413,
+            )
 
     filename = f"import/{preregistration_realm.id}/slack.zip"
 
@@ -291,6 +312,8 @@ def handle_tusd_hook(
             return handle_upload_pre_create_hook(request, maybe_user, payload.event.upload)
         elif hook_name == "pre-finish":
             return handle_upload_pre_finish_hook(request, maybe_user, payload.event.upload)
+        elif hook_name == "pre-terminate":
+            return handle_upload_pre_terminate_hook(request, maybe_user, payload.event.upload)
         else:
             return HttpResponseNotFound()
 
@@ -300,7 +323,7 @@ def handle_tusd_hook(
         return reject_upload("Unauthenticated upload", 401)
     try:
         prereg_object = get_object_from_key(
-            key, [Confirmation.REALM_CREATION], mark_object_used=False
+            key, [Confirmation.NEW_REALM_USER_REGISTRATION], mark_object_used=False
         )
     except ConfirmationKeyError:
         return reject_upload("Unauthenticated upload", 401)

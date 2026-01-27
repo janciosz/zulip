@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 const _ = require("lodash");
 const MockDate = require("mockdate");
 
+const {make_realm} = require("./lib/example_realm.cjs");
 const {set_global, with_overrides, zrequire} = require("./lib/namespace.cjs");
 const {run_test} = require("./lib/test.cjs");
 
@@ -12,7 +13,7 @@ const blueslip = zrequire("blueslip");
 const {set_realm} = zrequire("state_data");
 const {initialize_user_settings} = zrequire("user_settings");
 
-const realm = {};
+const realm = make_realm();
 set_realm(realm);
 
 set_global("document", {});
@@ -336,6 +337,11 @@ run_test("filter_by_word_prefix_match", () => {
     assert.deepEqual(util.filter_by_word_prefix_match(values, "unders", item_to_string, /\s/), []);
 });
 
+run_test("prefix_match", () => {
+    assert.ok(util.prefix_match({value: "VIEWS", search_term: "V"}));
+    assert.ok(!util.prefix_match({value: "VIEWS", search_term: "I"}));
+});
+
 run_test("get_string_diff", () => {
     assert.deepEqual(
         util.get_string_diff("#ann is for updates", "#**announce** is for updates"),
@@ -367,9 +373,15 @@ run_test("format_array_as_list", () => {
         util.format_array_as_list(array, "long", "conjunction"),
         "apple, banana, and orange",
     );
+
+    // Conjunction format
     assert.equal(
-        util.format_array_as_list_with_highlighted_elements(array, "long", "conjunction"),
-        "<b>apple</b>, <b>banana</b>, and <b>orange</b>",
+        util.format_array_as_list_with_conjunction(array, "narrow"),
+        "apple, banana, orange",
+    );
+    assert.equal(
+        util.format_array_as_list_with_conjunction(array, "long"),
+        "apple, banana, and orange",
     );
 
     // when Intl.ListFormat does not exist
@@ -379,9 +391,14 @@ run_test("format_array_as_list", () => {
             util.format_array_as_list(array, "long", "conjunction"),
             "apple, banana, orange",
         );
+
         assert.equal(
-            util.format_array_as_list_with_highlighted_elements(array, "long", "conjunction"),
-            "<b>apple</b>, <b>banana</b>, <b>orange</b>",
+            util.format_array_as_list_with_conjunction(array, "narrow"),
+            "apple, banana, orange",
+        );
+        assert.equal(
+            util.format_array_as_list_with_conjunction(array, "long"),
+            "apple, banana, orange",
         );
     });
 });
@@ -486,10 +503,10 @@ run_test("compare_a_b", () => {
     };
     const unsorted = [user2, user1, user4, user3];
 
-    const sorted_by_id = [...unsorted].sort((a, b) => util.compare_a_b(a.id, b.id));
+    const sorted_by_id = unsorted.toSorted((a, b) => util.compare_a_b(a.id, b.id));
     assert.deepEqual(sorted_by_id, [user1, user2, user3, user4]);
 
-    const sorted_by_name = [...unsorted].sort((a, b) => util.compare_a_b(a.name, b.name));
+    const sorted_by_name = unsorted.toSorted((a, b) => util.compare_a_b(a.name, b.name));
     assert.deepEqual(sorted_by_name, [user2, user4, user3, user1]);
 });
 
@@ -509,4 +526,112 @@ run_test("get_final_topic_display_name", ({override}) => {
     assert.deepEqual(util.get_final_topic_display_name(""), "translated: general chat");
     override(realm, "realm_empty_topic_display_name", "random topic name");
     assert.deepEqual(util.get_final_topic_display_name(""), "random topic name");
+});
+
+run_test("is_topic_name_considered_empty", ({override}) => {
+    // Topic is not considered empty if it is distinct string
+    // other than "(no topic)", or the displayed topic name for empty string.
+    assert.ok(!util.is_topic_name_considered_empty("some topic"));
+
+    // Topic is considered empty if it is an empty string.
+    assert.ok(util.is_topic_name_considered_empty(""));
+
+    // Topic is considered empty if it is equal to "(no topic)".
+    assert.ok(util.is_topic_name_considered_empty("(no topic)"));
+
+    // Topic name is considered empty if it is equal to the displayed
+    // topic name for empty string.
+    override(realm, "realm_empty_topic_display_name", "general chat");
+    assert.ok(util.is_topic_name_considered_empty("translated: general chat"));
+});
+
+run_test("get_retry_backoff_seconds", () => {
+    const xhr_500_error = {
+        status: 500,
+    };
+
+    // Shorter backoff scale
+    // First retry should be between 1-2 seconds.
+    let backoff = util.get_retry_backoff_seconds(xhr_500_error, 1, true);
+    assert.ok(backoff >= 1);
+    assert.ok(backoff < 3);
+    // 100th retry should be between 16-32 seconds.
+    backoff = util.get_retry_backoff_seconds(xhr_500_error, 100, true);
+    assert.ok(backoff >= 16);
+    assert.ok(backoff <= 32);
+
+    // Longer backoff scale
+    // First retry should be between 1-2 seconds.
+    backoff = util.get_retry_backoff_seconds(xhr_500_error, 1);
+    assert.ok(backoff >= 1);
+    assert.ok(backoff <= 3);
+    // 100th retry should be between 45-90 seconds.
+    backoff = util.get_retry_backoff_seconds(xhr_500_error, 100);
+    assert.ok(backoff >= 45);
+    assert.ok(backoff <= 90);
+
+    const xhr_rate_limit_error = {
+        status: 429,
+        responseJSON: {
+            code: "RATE_LIMIT_HIT",
+            msg: "API usage exceeded rate limit",
+            result: "error",
+            "retry-after": 28.706807374954224,
+        },
+    };
+    // First retry should be greater than the retry-after value.
+    backoff = util.get_retry_backoff_seconds(xhr_rate_limit_error, 1);
+    assert.ok(backoff >= 28.706807374954224);
+    // 100th retry should be between 45-90 seconds.
+    backoff = util.get_retry_backoff_seconds(xhr_rate_limit_error, 100);
+    assert.ok(backoff >= 45);
+    assert.ok(backoff <= 90);
+});
+
+run_test("sha256_hash", async ({override}) => {
+    const expected_hash = "f8e27cb511cd469712e3e0f2ac05a990481c0a39e11830b4f6aee729a894b769";
+    const data = "@*hamlet_and_cordelia* and #**channel>topic**";
+    let hash = await util.sha256_hash(data);
+    assert.equal(hash, undefined);
+    override(window, "isSecureContext", true);
+    hash = await util.sha256_hash(data);
+    assert.equal(hash, expected_hash);
+});
+
+run_test("call_function_periodically", () => {
+    let num_set_timeout_calls = 0;
+    let num_callback_calls = 0;
+
+    set_global("setTimeout", (callbacK_function, delay) => {
+        assert.equal(delay, 42);
+
+        num_set_timeout_calls += 1;
+        if (num_set_timeout_calls === 100) {
+            return;
+        }
+        callbacK_function();
+    });
+
+    function callback_func() {
+        num_callback_calls += 1;
+    }
+
+    util.call_function_periodically(callback_func, 42);
+    assert.equal(num_set_timeout_calls, 100);
+    assert.equal(num_callback_calls, 99);
+});
+
+run_test("unique_array_insert", () => {
+    const array = [{a: "foo", b: "bar"}];
+    util.unique_array_insert(array, {c: "beep", d: "boop"});
+    assert.deepEqual(array, [
+        {a: "foo", b: "bar"},
+        {c: "beep", d: "boop"},
+    ]);
+    util.unique_array_insert(array, {c: "beep", d: "boop"});
+    util.unique_array_insert(array, {a: "foo", b: "bar"});
+    assert.deepEqual(array, [
+        {a: "foo", b: "bar"},
+        {c: "beep", d: "boop"},
+    ]);
 });

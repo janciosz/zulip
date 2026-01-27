@@ -3,16 +3,17 @@ import assert from "minimalistic-assert";
 import * as tippy from "tippy.js";
 
 import render_message_edit_notice_tooltip from "../templates/message_edit_notice_tooltip.hbs";
-import render_message_inline_image_tooltip from "../templates/message_inline_image_tooltip.hbs";
+import render_message_media_preview_tooltip from "../templates/message_media_preview_tooltip.hbs";
 import render_narrow_tooltip from "../templates/narrow_tooltip.hbs";
+import render_narrow_tooltip_list_of_topics from "../templates/narrow_tooltip_list_of_topics.hbs";
 
 import * as compose_validate from "./compose_validate.ts";
 import {$t} from "./i18n.ts";
 import * as message_lists from "./message_lists.ts";
-import type {Message} from "./message_store.ts";
 import * as popover_menus from "./popover_menus.ts";
 import * as reactions from "./reactions.ts";
 import * as rows from "./rows.ts";
+import {message_edit_history_visibility_policy_values} from "./settings_config.ts";
 import {realm} from "./state_data.ts";
 import * as timerender from "./timerender.ts";
 import {
@@ -123,15 +124,9 @@ export function destroy_all_message_list_tooltips(): void {
     message_list_tippy_instances.clear();
 }
 
-function get_last_edit_timestr(message: Message): string {
-    let last_edit_timestamp;
-    if (message.local_edit_timestamp !== undefined) {
-        last_edit_timestamp = message.local_edit_timestamp;
-    } else {
-        last_edit_timestamp = message.last_edit_timestamp!;
-    }
-    const last_edit_time = new Date(last_edit_timestamp * 1000);
-    let date = timerender.render_date(last_edit_time).textContent;
+function get_time_string(timestamp: number): string {
+    const last_modified_time = new Date(timestamp * 1000);
+    let date = timerender.render_date(last_modified_time).textContent;
     // If the date is today or yesterday, we don't want to show the date as capitalized.
     // Thus, we need to check if the date string contains a digit or not using regex,
     // since any other date except today/yesterday will contain a digit.
@@ -142,7 +137,7 @@ function get_last_edit_timestr(message: Message): string {
         {defaultMessage: "{date} at {time}"},
         {
             date,
-            time: timerender.stringify_time(last_edit_time),
+            time: timerender.stringify_time(last_modified_time),
         },
     );
 }
@@ -151,6 +146,19 @@ export function initialize(): void {
     message_list_tooltip(".tippy-narrow-tooltip", {
         delay: LONG_HOVER_DELAY,
         onCreate(instance) {
+            // We sniff the href, rather than looking up the user's settings
+            // so that the tooltip always matches the link.
+            if (
+                instance.reference.hasAttribute("href") &&
+                instance.reference.getAttribute("href")!.startsWith("#topics/")
+            ) {
+                instance.setContent(
+                    parse_html(
+                        render_narrow_tooltip_list_of_topics({content: instance.props.content}),
+                    ),
+                );
+                return;
+            }
             instance.setContent(
                 parse_html(render_narrow_tooltip({content: instance.props.content})),
             );
@@ -238,9 +246,14 @@ export function initialize(): void {
             if (tippy_content !== undefined) {
                 instance.setContent(tippy_content);
             } else {
-                const $template = $(`#${CSS.escape($elem.attr("data-tooltip-template-id")!)}`);
+                const template_id = $elem.attr("data-tooltip-template-id");
+                if (template_id === undefined) {
+                    return false;
+                }
+                const $template = $(`#${CSS.escape(template_id)}`);
                 instance.setContent(parse_html($template.html()));
             }
+            return undefined;
         },
         onHidden(instance) {
             instance.destroy();
@@ -311,39 +324,59 @@ export function initialize(): void {
         },
     );
 
-    message_list_tooltip("#message_feed_container .change_visibility_policy > i", {
-        ...topic_visibility_policy_tooltip_props,
-    });
-
     message_list_tooltip(
-        "#message_feed_container .recipient_bar_icon:not(.recipient-row-topic-menu)",
+        "#message_feed_container .change_visibility_policy > .recipient-bar-control-icon",
         {
-            delay: LONG_HOVER_DELAY,
-            onHidden(instance) {
-                instance.destroy();
-            },
+            ...topic_visibility_policy_tooltip_props,
         },
     );
 
-    message_list_tooltip(".rendered_markdown time", {
-        // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
-        content: timerender.get_markdown_time_tooltip as tippy.Content,
+    message_list_tooltip("#message_feed_container .recipient-bar-control-icon", {
+        delay: LONG_HOVER_DELAY,
+        onShow(instance) {
+            const $reference = $(instance.reference);
+            if ($reference.hasClass("loading-resolve-topic-state")) {
+                // Don't show tooltip when the loading indicator is being
+                // displayed while resolving/unresolving a topic.
+                return false;
+            }
+            return undefined;
+        },
         onHidden(instance) {
             instance.destroy();
         },
     });
 
-    message_list_tooltip(".message_inline_image > a > img", {
+    message_list_tooltip(".rendered_markdown time", {
+        content: timerender.get_markdown_time_tooltip,
+        onHidden(instance) {
+            instance.destroy();
+        },
+    });
+
+    message_list_tooltip(".media-image-element", {
         // Add a short delay so the user can mouseover several inline images without
         // tooltips showing and hiding rapidly
         delay: [300, 20],
         onShow(instance) {
-            // Some message_inline_images aren't actually images with a title,
-            // for example youtube videos, so we default to the actual href
+            // Some message images do not include a title, such as YouTube
+            // video previews, so we fall back to displaying the href value
             const title =
                 $(instance.reference).parent().attr("aria-label") ??
                 $(instance.reference).parent().attr("href");
-            instance.setContent(parse_html(render_message_inline_image_tooltip({title})));
+            instance.setContent(parse_html(render_message_media_preview_tooltip({title})));
+        },
+        onHidden(instance) {
+            instance.destroy();
+        },
+    });
+
+    message_list_tooltip(".media-audio-download", {
+        delay: LONG_HOVER_DELAY,
+        onShow(instance) {
+            const title = $(instance.reference).attr("aria-label");
+            assert(title !== undefined);
+            instance.setContent(title);
         },
         onHidden(instance) {
             instance.destroy();
@@ -365,7 +398,7 @@ export function initialize(): void {
         },
     });
 
-    message_list_tooltip(".message_edit_notice", {
+    message_list_tooltip(".message_edit_notice, .edit-notifications", {
         trigger: "mouseenter",
         delay: LONG_HOVER_DELAY,
         popperOptions: {
@@ -385,16 +418,59 @@ export function initialize(): void {
             assert(message_lists.current !== undefined);
             const message_container = message_lists.current.view.message_containers.get(message_id);
             assert(message_container !== undefined);
-            const last_edit_timestr = get_last_edit_timestr(message_container.msg);
+            // If there is no indicator that the message has been modified (saving,
+            // edited, moved), then we don't show the message edit notice tooltip.
+            if (!message_container.modified) {
+                return false;
+            }
+            let edited_time_string = "";
+            let moved_time_string = "";
+            if (message_container.edited) {
+                // We know the message has been edited, so we either have a timestamp
+                // from the server or from a local edit.
+                assert(message_container.last_edit_timestamp !== undefined);
+                edited_time_string = get_time_string(message_container.last_edit_timestamp);
+            }
+            if (message_container.moved) {
+                // We know the message has been moved, so we have a timestamp from
+                // the server.
+                assert(message_container.last_moved_timestamp !== undefined);
+                moved_time_string = get_time_string(message_container.last_moved_timestamp);
+            }
+            const edit_history_access =
+                realm.realm_message_edit_history_visibility_policy ===
+                message_edit_history_visibility_policy_values.always.code;
+            const message_moved_and_move_history_access =
+                realm.realm_message_edit_history_visibility_policy ===
+                    message_edit_history_visibility_policy_values.moves_only.code &&
+                message_container.moved;
             instance.setContent(
                 parse_html(
                     render_message_edit_notice_tooltip({
                         moved: message_container.moved,
-                        last_edit_timestr,
-                        realm_allow_edit_history: realm.realm_allow_edit_history,
+                        edited: message_container.edited,
+                        edited_time_string,
+                        moved_time_string,
+                        edit_history_access,
+                        message_moved_and_move_history_access,
                     }),
                 ),
             );
+            return undefined;
+        },
+        onHidden(instance) {
+            instance.destroy();
+        },
+    });
+
+    message_list_tooltip(".message_expander, .message_condenser", {
+        delay: LONG_HOVER_DELAY,
+        onShow(instance) {
+            const is_disabled = $(instance.reference).attr("data-enable-tooltip") === "false";
+            if (is_disabled) {
+                return false;
+            }
+            return undefined;
         },
         onHidden(instance) {
             instance.destroy();

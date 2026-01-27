@@ -6,7 +6,7 @@ from django.db import transaction
 from django.http import HttpRequest, HttpResponse
 from django.utils.timezone import now as timezone_now
 from django.utils.translation import gettext as _
-from pydantic import Json
+from pydantic import Json, StringConstraints
 
 from confirmation import settings as confirmation_settings
 from zerver.actions.invites import (
@@ -20,11 +20,18 @@ from zerver.actions.invites import (
 from zerver.decorator import require_member_or_admin
 from zerver.lib.exceptions import InvitationError, JsonableError, OrganizationOwnerRequiredError
 from zerver.lib.response import json_success
-from zerver.lib.streams import access_stream_by_id
+from zerver.lib.streams import access_stream_by_id, get_streams_to_which_user_cannot_add_subscribers
 from zerver.lib.typed_endpoint import ApiParamConfig, PathOnly, typed_endpoint
 from zerver.lib.typed_endpoint_validators import check_int_in_validator
-from zerver.lib.user_groups import access_user_group_for_update
-from zerver.models import MultiuseInvite, NamedUserGroup, PreregistrationUser, Stream, UserProfile
+from zerver.lib.user_groups import UserGroupMembershipDetails, access_user_group_for_update
+from zerver.models import (
+    MultiuseInvite,
+    NamedUserGroup,
+    PreregistrationUser,
+    Realm,
+    Stream,
+    UserProfile,
+)
 
 # Convert INVITATION_LINK_VALIDITY_DAYS into minutes.
 # Because mypy fails to correctly infer the type of the validator, we want this constant
@@ -79,22 +86,70 @@ def access_multiuse_invite_by_id(user_profile: UserProfile, invite_id: int) -> M
     return invite
 
 
+def access_streams_for_invite(stream_ids: list[int], user_profile: UserProfile) -> list[Stream]:
+    streams: list[Stream] = []
+
+    for stream_id in stream_ids:
+        try:
+            (stream, _sub) = access_stream_by_id(user_profile, stream_id)
+        except JsonableError:
+            raise JsonableError(
+                _("Invalid channel ID {channel_id}. No invites were sent.").format(
+                    channel_id=stream_id
+                )
+            )
+        streams.append(stream)
+
+    user_group_membership_details = UserGroupMembershipDetails(user_recursive_group_ids=None)
+    streams_to_which_user_cannot_add_subscribers = get_streams_to_which_user_cannot_add_subscribers(
+        streams,
+        user_profile,
+        allow_default_streams=True,
+        user_group_membership_details=user_group_membership_details,
+    )
+    if len(streams_to_which_user_cannot_add_subscribers) > 0:
+        raise JsonableError(_("You do not have permission to subscribe other users to channels."))
+
+    return streams
+
+
+def access_user_groups_for_invite(
+    group_ids: list[int] | None, user_profile: UserProfile
+) -> list[NamedUserGroup]:
+    user_groups: list[NamedUserGroup] = []
+    if group_ids:
+        with transaction.atomic(durable=True):
+            for group_id in group_ids:
+                user_group = access_user_group_for_update(
+                    group_id, user_profile, permission_setting="can_add_members_group"
+                )
+                user_groups.append(user_group)
+
+    return user_groups
+
+
 @require_member_or_admin
 @typed_endpoint
 def invite_users_backend(
     request: HttpRequest,
     user_profile: UserProfile,
     *,
-    invitee_emails_raw: Annotated[str, ApiParamConfig("invitee_emails")],
-    invite_expires_in_minutes: Json[int | None] = INVITATION_LINK_VALIDITY_MINUTES,
+    group_ids: Json[list[int]] | None = None,
+    include_realm_default_subscriptions: Json[bool] = False,
     invite_as: Annotated[
         Json[int],
         check_int_in_validator(list(PreregistrationUser.INVITE_AS.values())),
     ] = PreregistrationUser.INVITE_AS["MEMBER"],
+    invite_expires_in_minutes: Json[int | None] = INVITATION_LINK_VALIDITY_MINUTES,
+    invitee_emails_raw: Annotated[str, ApiParamConfig("invitee_emails")],
     notify_referrer_on_join: Json[bool] = True,
     stream_ids: Json[list[int]],
-    group_ids: Json[list[int]] | None = None,
-    include_realm_default_subscriptions: Json[bool] = False,
+    welcome_message_custom_text: Annotated[
+        str | None,
+        StringConstraints(
+            max_length=Realm.MAX_REALM_WELCOME_MESSAGE_CUSTOM_TEXT_LENGTH,
+        ),
+    ] = None,
 ) -> HttpResponse:
     if not user_profile.can_invite_users_by_email():
         # Guest users case will not be handled here as it will
@@ -115,29 +170,11 @@ def invite_users_backend(
 
     invitee_emails = get_invitee_emails_set(invitee_emails_raw)
 
-    streams: list[Stream] = []
-    for stream_id in stream_ids:
-        try:
-            (stream, sub) = access_stream_by_id(user_profile, stream_id)
-        except JsonableError:
-            raise JsonableError(
-                _("Invalid channel ID {channel_id}. No invites were sent.").format(
-                    channel_id=stream_id
-                )
-            )
-        streams.append(stream)
+    streams = access_streams_for_invite(stream_ids, user_profile)
+    user_groups = access_user_groups_for_invite(group_ids, user_profile)
 
-    if len(streams) and not user_profile.can_subscribe_other_users():
-        raise JsonableError(_("You do not have permission to subscribe other users to channels."))
-
-    user_groups: list[NamedUserGroup] = []
-    if group_ids:
-        with transaction.atomic(durable=True):
-            for group_id in group_ids:
-                user_group = access_user_group_for_update(
-                    group_id, user_profile, permission_setting="can_add_members_group"
-                )
-                user_groups.append(user_group)
+    if welcome_message_custom_text is not None and not user_profile.is_realm_admin:
+        raise JsonableError(_("Must be an organization administrator"))
 
     skipped = do_invite_users(
         user_profile,
@@ -148,6 +185,7 @@ def invite_users_backend(
         invite_expires_in_minutes=invite_expires_in_minutes,
         include_realm_default_subscriptions=include_realm_default_subscriptions,
         invite_as=invite_as,
+        welcome_message_custom_text=welcome_message_custom_text,
     )
 
     if skipped:
@@ -217,14 +255,20 @@ def generate_multiuse_invite_backend(
     request: HttpRequest,
     user_profile: UserProfile,
     *,
-    invite_expires_in_minutes: Json[int | None] = INVITATION_LINK_VALIDITY_MINUTES,
+    group_ids: Json[list[int]] | None = None,
+    include_realm_default_subscriptions: Json[bool] = False,
     invite_as: Annotated[
         Json[int],
         check_int_in_validator(list(PreregistrationUser.INVITE_AS.values())),
     ] = PreregistrationUser.INVITE_AS["MEMBER"],
+    invite_expires_in_minutes: Json[int | None] = INVITATION_LINK_VALIDITY_MINUTES,
     stream_ids: Json[list[int]] | None = None,
-    group_ids: Json[list[int]] | None = None,
-    include_realm_default_subscriptions: Json[bool] = False,
+    welcome_message_custom_text: Annotated[
+        str | None,
+        StringConstraints(
+            max_length=Realm.MAX_REALM_WELCOME_MESSAGE_CUSTOM_TEXT_LENGTH,
+        ),
+    ] = None,
 ) -> HttpResponse:
     if stream_ids is None:
         stream_ids = []
@@ -242,29 +286,11 @@ def generate_multiuse_invite_backend(
     ]
     check_role_based_permissions(invite_as, user_profile, require_admin=require_admin)
 
-    streams = []
-    for stream_id in stream_ids:
-        try:
-            (stream, sub) = access_stream_by_id(user_profile, stream_id)
-        except JsonableError:
-            raise JsonableError(
-                _("Invalid channel ID {channel_id}. No invites were sent.").format(
-                    channel_id=stream_id
-                )
-            )
-        streams.append(stream)
+    streams = access_streams_for_invite(stream_ids, user_profile)
+    user_groups = access_user_groups_for_invite(group_ids, user_profile)
 
-    if len(streams) and not user_profile.can_subscribe_other_users():
-        raise JsonableError(_("You do not have permission to subscribe other users to channels."))
-
-    user_groups: list[NamedUserGroup] = []
-    if group_ids:
-        with transaction.atomic(durable=True):
-            for group_id in group_ids:
-                user_group = access_user_group_for_update(
-                    group_id, user_profile, permission_setting="can_add_members_group"
-                )
-                user_groups.append(user_group)
+    if welcome_message_custom_text is not None and not user_profile.is_realm_admin:
+        raise JsonableError(_("Must be an organization administrator"))
 
     invite_link = do_create_multiuse_invite_link(
         user_profile,
@@ -273,5 +299,6 @@ def generate_multiuse_invite_backend(
         include_realm_default_subscriptions,
         streams,
         user_groups,
+        welcome_message_custom_text,
     )
     return json_success(request, data={"invite_link": invite_link})

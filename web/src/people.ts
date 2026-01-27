@@ -1,12 +1,12 @@
 import md5 from "blueimp-md5";
 import assert from "minimalistic-assert";
-import type {z} from "zod";
-
-import * as typeahead from "../shared/src/typeahead.ts";
+import * as z from "zod/mini";
 
 import * as blueslip from "./blueslip.ts";
+import * as channel from "./channel.ts";
 import {FoldDict} from "./fold_dict.ts";
 import {$t} from "./i18n.ts";
+import * as internal_url from "./internal_url.ts";
 import type {DisplayRecipientUser, Message, MessageWithBooleans} from "./message_store.ts";
 import * as message_user_ids from "./message_user_ids.ts";
 import * as muted_users from "./muted_users.ts";
@@ -14,9 +14,10 @@ import {page_params} from "./page_params.ts";
 import * as reload_state from "./reload_state.ts";
 import * as settings_config from "./settings_config.ts";
 import * as settings_data from "./settings_data.ts";
-import type {CurrentUser, StateData, profile_datum_schema, user_schema} from "./state_data.ts";
-import {current_user, realm} from "./state_data.ts";
+import type {CurrentUser, StateData, profile_datum_schema} from "./state_data.ts";
+import {current_user, realm, user_schema} from "./state_data.ts";
 import * as timerender from "./timerender.ts";
+import * as typeahead from "./typeahead.ts";
 import {is_user_in_setting_group} from "./user_groups.ts";
 import {user_settings} from "./user_settings.ts";
 import * as util from "./util.ts";
@@ -48,9 +49,37 @@ let cross_realm_dict: Map<number, User>;
 let pm_recipient_count_dict: Map<number, number>;
 let duplicate_full_name_data: FoldDict<Set<number>>;
 let my_user_id: number;
+let valid_user_ids: Set<number>;
+let fetch_users_storage: {
+    pending_user_ids: Set<number>;
+    in_transit_user_ids: Set<number>;
+    // Will be resolved when fetch for `pending_user_ids` is complete.
+    promise_for_pending: Promise<void> | undefined;
+    promise_resolver_for_pending: (() => void) | undefined;
+    // Contains sets of `pending_user_ids` that have been requested via
+    // `start_fetch_for_requested_users`.
+    promise_for_requested: Map<
+        Set<number>,
+        {
+            promise: Promise<void>;
+            resolver: () => void;
+        }
+    >;
+    // Contains sets of user ids that are currently being fetched.
+    promise_for_in_transit: Map<
+        Set<number>,
+        {
+            promise: Promise<void>;
+            resolver: () => void;
+        }
+    >;
+};
 
 export let INACCESSIBLE_USER_NAME: string;
 export let WELCOME_BOT: User;
+export let EMAIL_GATEWAY_BOT: User;
+
+export const MAX_USER_NAME_LENGTH = 100;
 
 // We have an init() function so that our automated tests
 // can easily clear data.
@@ -70,15 +99,49 @@ export function init(): void {
     non_active_user_dict = new Map();
     cross_realm_dict = new Map(); // keyed by user_id
     pm_recipient_count_dict = new Map();
+    valid_user_ids = new Set();
 
     // This maintains a set of ids of people with same full names.
     duplicate_full_name_data = new FoldDict();
 
     INACCESSIBLE_USER_NAME = $t({defaultMessage: "Unknown user"});
+
+    fetch_users_storage = {
+        pending_user_ids: new Set(),
+        in_transit_user_ids: new Set(),
+        promise_for_pending: undefined,
+        promise_resolver_for_pending: undefined,
+        promise_for_requested: new Map(),
+        promise_for_in_transit: new Map(),
+    };
 }
 
 // WE INITIALIZE DATA STRUCTURES HERE!
 init();
+
+export const user_fetch_response_schema = z.object({
+    members: z.array(user_schema),
+    result: z.string(),
+    msg: z.string(),
+});
+
+type UsersFetchResponse = z.infer<typeof user_fetch_response_schema>;
+
+type FetchUserDataParams = {
+    user_ids: string;
+    client_gravatar?: boolean;
+    include_custom_profile_fields?: boolean;
+    success?: (users: UsersFetchResponse["members"]) => void;
+    error?: (xhr?: JQuery.jqXHR) => void;
+};
+
+export function add_valid_user_id(user_id: number): void {
+    valid_user_ids.add(user_id);
+}
+
+export function is_valid_user_id(user_id: number): boolean {
+    return valid_user_ids.has(user_id);
+}
 
 export function split_to_ints(lst: string): number[] {
     return lst.split(",").map((s) => Number.parseInt(s, 10));
@@ -89,14 +152,13 @@ export function get_users_from_ids(user_ids: number[]): User[] {
 }
 
 // Use this function only when you are sure that user_id is valid.
-export let get_by_user_id = (user_id: number): User => {
+export function get_by_user_id(user_id: number): User {
     const person = people_by_user_id_dict.get(user_id);
+    if (person === undefined && is_valid_user_id(user_id)) {
+        blueslip.error(`User ID: ${user_id} is valid but not found in people_by_user_id_dict`);
+    }
     assert(person, `Unknown user_id in get_by_user_id: ${user_id}`);
     return person;
-};
-
-export function rewire_get_by_user_id(value: typeof get_by_user_id): void {
-    get_by_user_id = value;
 }
 
 // This is type unsafe version of get_by_user_id for the callers that expects undefined values.
@@ -127,7 +189,7 @@ export function validate_user_ids(user_ids: number[]): number[] {
     return good_ids;
 }
 
-export let get_by_email = (email: string): User | undefined => {
+export function get_by_email(email: string): User | undefined {
     const person = people_dict.get(email);
 
     if (!person) {
@@ -141,10 +203,6 @@ export let get_by_email = (email: string): User | undefined => {
     }
 
     return person;
-};
-
-export function rewire_get_by_email(value: typeof get_by_email): void {
-    get_by_email = value;
 }
 
 export function get_bot_owner_user(user: User & {is_bot: true}): User | undefined {
@@ -188,6 +246,18 @@ export function update_email(user_id: number, new_email: string): void {
     // still work correctly.
 }
 
+export function sort_user_ids_by_username(user_ids: number[]): number[] {
+    const name_id_dict = user_ids.map((user_id, index) => ({
+        name: people_by_user_id_dict.has(user_id)
+            ? people_by_user_id_dict.get(user_id)?.full_name
+            : "?",
+        user_id: user_ids[index]!,
+    }));
+
+    name_id_dict.sort((a, b) => util.strcmp(a.name!, b.name!));
+    return name_id_dict.map(({user_id}) => user_id);
+}
+
 // A function that sorts Email according to the user's full name
 export function sort_emails_by_username(emails: string[]): (string | undefined)[] {
     const user_ids = emails.map((email) => get_user_id(email));
@@ -198,12 +268,8 @@ export function sort_emails_by_username(emails: string[]): (string | undefined)[
                 : "?",
         email: emails[index],
     }));
-
-    const sorted_emails = name_email_dict
-        .sort((a, b) => util.strcmp(a.name!, b.name!))
-        .map(({email}) => email);
-
-    return sorted_emails;
+    name_email_dict.sort((a, b) => util.strcmp(a.name!, b.name!));
+    return name_email_dict.map(({email}) => email);
 }
 
 export function get_visible_email(user: User): string {
@@ -248,12 +314,6 @@ export function is_known_user_id(user_id: number): boolean {
     return true;
 }
 
-function sort_numerically(user_ids: number[]): number[] {
-    user_ids.sort((a, b) => a - b);
-
-    return user_ids;
-}
-
 export function direct_message_group_string(message: Message): string | undefined {
     if (message.type !== "private") {
         return undefined;
@@ -273,14 +333,17 @@ export function direct_message_group_string(message: Message): string | undefine
         return undefined;
     }
 
-    user_ids = sort_numerically(user_ids);
+    user_ids = util.sorted_ids(user_ids);
 
     return user_ids.join(",");
 }
 
 export function user_ids_string_to_emails_string(user_ids_string: string): string | undefined {
     const user_ids = split_to_ints(user_ids_string);
+    return user_ids_to_emails_string(user_ids);
+}
 
+export function user_ids_to_emails_string(user_ids: number[]): string | undefined {
     let emails = util.try_parse_as_truthy(
         user_ids.map((user_id) => {
             const person = people_by_user_id_dict.get(user_id);
@@ -289,7 +352,7 @@ export function user_ids_string_to_emails_string(user_ids_string: string): strin
     );
 
     if (emails === undefined) {
-        blueslip.warn("Unknown user ids: " + user_ids_string);
+        blueslip.warn("Unknown user ids: " + user_ids.join(","));
         return undefined;
     }
 
@@ -300,7 +363,11 @@ export function user_ids_string_to_emails_string(user_ids_string: string): strin
 
 export function user_ids_string_to_ids_array(user_ids_string: string): number[] {
     const user_ids = user_ids_string.length === 0 ? [] : user_ids_string.split(",");
-    const ids = user_ids.map(Number);
+    const ids = user_ids.map((user_id_string) => {
+        const user_id = Number(user_id_string);
+        assert(!Number.isNaN(user_id));
+        return user_id;
+    });
     return ids;
 }
 
@@ -343,22 +410,20 @@ export function reply_to_to_user_ids_string(emails_string: string): string | und
         return undefined;
     }
 
-    user_ids = sort_numerically(user_ids);
+    user_ids = util.sorted_ids(user_ids);
 
     return user_ids.join(",");
 }
 
-export function emails_to_full_names_string(emails: string[]): string {
-    const names = emails.map((email) => {
-        email = email.trim();
-        const person = get_by_email(email);
+export function user_ids_to_full_names_string(user_ids: number[]): string {
+    const sorted_names = user_ids.map((user_id) => {
+        const person = maybe_get_user_by_id(user_id);
         if (person !== undefined) {
             return person.full_name;
         }
         return INACCESSIBLE_USER_NAME;
     });
-
-    const sorted_names = names.sort(util.make_strcmp());
+    sorted_names.sort(util.make_strcmp());
     return sorted_names.join(", ");
 }
 
@@ -386,11 +451,18 @@ export function get_user_type(user_id: number): string | undefined {
 }
 
 export function emails_strings_to_user_ids_string(emails_string: string): string | undefined {
-    const emails = emails_string.split(",");
+    const emails = emails_string.split(",").map((email) => email.trim());
     return email_list_to_user_ids_string(emails);
 }
 
-export let email_list_to_user_ids_string = (emails: string[]): string | undefined => {
+export function emails_string_to_user_ids(emails_string: string): number[] {
+    const user_ids_string = email_list_to_user_ids_string(
+        util.extract_pm_recipients(emails_string),
+    );
+    return user_ids_string ? user_ids_string_to_ids_array(user_ids_string) : [];
+}
+
+export function email_list_to_user_ids_string(emails: string[]): string | undefined {
     let user_ids = util.try_parse_as_truthy(
         emails.map((email) => {
             const person = get_by_email(email);
@@ -403,15 +475,9 @@ export let email_list_to_user_ids_string = (emails: string[]): string | undefine
         return undefined;
     }
 
-    user_ids = sort_numerically(user_ids);
+    user_ids = util.sorted_ids(user_ids);
 
     return user_ids.join(",");
-};
-
-export function rewire_email_list_to_user_ids_string(
-    value: typeof email_list_to_user_ids_string,
-): void {
-    email_list_to_user_ids_string = value;
 }
 
 export function get_full_names_for_poll_option(user_ids: number[]): string {
@@ -454,20 +520,31 @@ function _calc_user_and_other_ids(user_ids_string: string): {
     return {user_ids, other_ids};
 }
 
-export function get_recipients(user_ids_string: string): string {
+export function get_recipients(user_ids_string: string): string[] {
     // See message_store.get_pm_full_names() for a similar function.
 
     const {other_ids} = _calc_user_and_other_ids(user_ids_string);
 
     if (other_ids.length === 0) {
         // direct message with oneself
-        return my_full_name();
+        return [my_full_name()];
     }
 
-    const names = get_display_full_names(other_ids);
-    const sorted_names = names.sort(util.make_strcmp());
+    const sorted_names = get_display_full_names(other_ids);
+    sorted_names.sort(util.make_strcmp());
 
-    return sorted_names.join(", ");
+    return sorted_names;
+}
+
+export function format_recipients(
+    users_ids_string: string,
+    join_strategy: "long" | "narrow",
+): string {
+    const formatted_recipients_string = util.format_array_as_list_with_conjunction(
+        get_recipients(users_ids_string),
+        join_strategy,
+    );
+    return formatted_recipients_string;
 }
 
 export function pm_reply_user_string(message: Message | MessageWithBooleans): string | undefined {
@@ -513,7 +590,7 @@ export function sorted_other_user_ids(user_ids: number[]): number[] {
         user_ids = [my_user_id];
     }
 
-    user_ids = sort_numerically(user_ids);
+    user_ids = util.sorted_ids(user_ids);
 
     return user_ids;
 }
@@ -526,7 +603,7 @@ export function concat_direct_message_group(user_ids: number[], user_id: number)
         The only logic we're encapsulating here is
         how to encode direct message group.
     */
-    const sorted_ids = sort_numerically([...user_ids, user_id]);
+    const sorted_ids = util.sorted_ids([...user_ids, user_id]);
     return sorted_ids.join(",");
 }
 
@@ -562,7 +639,7 @@ export function all_user_ids_in_pm(message: Message): number[] | undefined {
 
     let user_ids = message.display_recipient.map((recip) => recip.id);
 
-    user_ids = sort_numerically(user_ids);
+    user_ids = util.sorted_ids(user_ids);
     return user_ids;
 }
 
@@ -575,6 +652,12 @@ export function pm_with_user_ids(message: Message | MessageWithBooleans): number
         typeof message.display_recipient !== "string",
         "Private messages should have list of recipients",
     );
+    // Ideally display_recipient would be not optional in LocalMessage
+    // or MessageWithBooleans, ideally by refactoring the use of
+    // `build_display_recipient`, but that's complicated to type right now.
+    // When we have a new format for `display_recipient` in message objects in
+    // the API itself, we'll naturally clean this up.
+    assert(message.display_recipient !== undefined);
 
     if (message.display_recipient.length === 0) {
         blueslip.error("Empty recipient list in message");
@@ -606,6 +689,13 @@ export function pm_perma_link(message: Message): string | undefined {
     return url;
 }
 
+export function get_slug_from_full_name(full_name: string): string {
+    // We don't use \p{C} or \p{Cs} due to https://bugs.webkit.org/show_bug.cgi?id=267011
+    return internal_url.encodeHashComponent(
+        full_name.replaceAll(/[ "%/<>`\p{Cc}\p{Cf}\p{Co}\p{Cn}]+/gu, "-"),
+    );
+}
+
 export function pm_with_url(message: Message | MessageWithBooleans): string | undefined {
     const user_ids = pm_with_user_ids(message);
 
@@ -620,7 +710,7 @@ export function pm_with_url(message: Message | MessageWithBooleans): string | un
     } else {
         const person = maybe_get_user_by_id(user_ids[0]);
         if (person?.full_name) {
-            suffix = person.full_name.replaceAll(/[ "%/<>`\p{C}]+/gu, "-");
+            suffix = get_slug_from_full_name(person.full_name);
         } else {
             blueslip.error("Unknown people in message");
             suffix = "unk";
@@ -682,9 +772,21 @@ export function pm_with_operand_ids(operand: string): number[] | undefined {
 
     let user_ids = persons.map((person) => person.user_id);
 
-    user_ids = sort_numerically(user_ids);
+    user_ids = util.sorted_ids(user_ids);
 
     return user_ids;
+}
+
+export function filter_other_guest_ids(user_ids: number[]): number[] {
+    return util.sorted_ids(
+        user_ids.filter((id) => id !== current_user.user_id && get_by_user_id(id)?.is_guest),
+    );
+}
+
+export function user_ids_to_full_names_array(user_ids: number[]): string[] {
+    const names = user_ids.map((user_id) => get_by_user_id(user_id).full_name);
+    names.sort(util.strcmp);
+    return names;
 }
 
 export function emails_to_slug(emails_string: string): string | undefined {
@@ -701,13 +803,34 @@ export function emails_to_slug(emails_string: string): string | undefined {
     if (emails.length === 1 && emails[0] !== undefined) {
         const person = get_by_email(emails[0]);
         assert(person !== undefined, "Unknown person in emails_to_slug");
-        const name = person.full_name;
-        slug += name.replaceAll(/[ "%/<>`\p{C}]+/gu, "-");
+        slug += get_slug_from_full_name(person.full_name);
     } else {
         slug += "group";
     }
 
     return slug;
+}
+
+export function user_ids_to_slug(user_ids: number[]): string | undefined {
+    if (user_ids.length === 0) {
+        return undefined;
+    }
+
+    let slug = String(user_ids);
+    slug += "-";
+    if (user_ids.length === 1 && user_ids[0] !== undefined) {
+        const person = get_by_user_id(user_ids[0]);
+        assert(person !== undefined, "Unknown person in user_ids_string_to_slug");
+        slug += get_slug_from_full_name(person.full_name);
+    } else {
+        slug += "group";
+    }
+    return slug;
+}
+
+export function user_ids_string_to_slug(user_ids_string: string): string | undefined {
+    const user_ids = user_ids_string_to_ids_array(user_ids_string);
+    return user_ids_to_slug(user_ids);
 }
 
 export function slug_to_emails(slug: string): string | undefined {
@@ -762,6 +885,14 @@ export function sender_is_guest(message: Message): boolean {
     if (message.sender_id) {
         const person = get_by_user_id(message.sender_id);
         return person.is_guest;
+    }
+    return false;
+}
+
+export function sender_is_deactivated(message: Message): boolean {
+    const sender_id = message.sender_id;
+    if (sender_id) {
+        return !is_active_user_for_popover(message.sender_id);
     }
     return false;
 }
@@ -924,6 +1055,25 @@ export function small_avatar_url(message: Message): string {
     return gravatar_url_for_email(email);
 }
 
+export function get_muted_user_avatar_url(): string {
+    return "/static/images/muted-user/muted-sender.png";
+}
+
+export function is_valid_user_id_for_compose(user_id: number): boolean {
+    if (cross_realm_dict.has(user_id)) {
+        return true;
+    }
+
+    const person = maybe_get_user_by_id(user_id);
+    if (!person || person.is_inaccessible_user) {
+        return false;
+    }
+
+    // we allow deactivated users in compose so that
+    // one can attempt to reply to threads that contained them.
+    return true;
+}
+
 export function is_valid_email_for_compose(email: string): boolean {
     if (is_cross_realm_email(email)) {
         return true;
@@ -949,6 +1099,16 @@ export function is_valid_bulk_emails_for_compose(emails: string[]): boolean {
     });
 }
 
+export function is_valid_bulk_user_ids_for_compose(user_ids: number[]): boolean {
+    // Returns false if at least one of the user_ids is invalid.
+    return user_ids.every((user_id) => {
+        if (!is_valid_user_id_for_compose(user_id)) {
+            return false;
+        }
+        return true;
+    });
+}
+
 export function is_active_user_for_popover(user_id: number): boolean {
     // For popover menus, we include cross-realm bots as active
     // users.
@@ -964,6 +1124,14 @@ export function is_active_user_for_popover(user_id: number): boolean {
     //       deactivated users at page-load time. For now just warn.
     if (!people_by_user_id_dict.has(user_id)) {
         blueslip.warn("Unexpectedly invalid user_id in user popover query", {user_id});
+        // We return true for inaccessible users. We can assume
+        // this code will not be called for invalid IDs.
+        return true;
+    }
+
+    const user = people_by_user_id_dict.get(user_id)!;
+    if (user.is_inaccessible_user) {
+        return true;
     }
 
     return false;
@@ -1009,6 +1177,14 @@ export function filter_all_users(pred: (person: User) => boolean): User[] {
 export function get_realm_users(): User[] {
     // includes humans and bots from your realm
     return [...active_user_dict.values()];
+}
+
+export function get_realm_users_and_welcome_bot(): User[] {
+    return [...active_user_dict.values(), WELCOME_BOT];
+}
+
+export function get_realm_users_and_system_bots(): User[] {
+    return [...active_user_dict.values(), ...cross_realm_dict.values()];
 }
 
 export function get_realm_active_human_users(): User[] {
@@ -1189,20 +1365,39 @@ export function get_people_for_search_bar(query: string): User[] {
     return filter_all_persons(pred);
 }
 
-export function build_termlet_matcher(termlet: string): (user: User) => boolean {
-    termlet = termlet.trim();
+export function should_remove_diacritics_for_query(query_lower_case: string): boolean {
+    // We only do diacritic-sensitive matching for queries that do not
+    // contain diacritics themselves.
+    //
+    // TODO: This check is too strict; ideally we'd check for presence
+    // of diacritics; punctuation should not be relevant.
+    return /^[a-z]+$/.test(query_lower_case);
+}
 
-    const is_ascii = /^[a-z]+$/.test(termlet);
+export function maybe_remove_diacritics_from_name(
+    user: User,
+    should_remove_diacritics: boolean,
+): string {
+    // Callers should compute should_remove_diacritics using
+    // should_remove_diacritics_for_query. It's fastest if the caller
+    // computes that once outside the loop over all users.
+    if (should_remove_diacritics) {
+        // Reuse removed diacritics version of the `full_name` if
+        // present, since it's expensive to compute.
+        user.name_with_diacritics_removed ??= typeahead.remove_diacritics(user.full_name);
+        return user.name_with_diacritics_removed;
+    }
+    return user.full_name;
+}
+
+export function build_termlet_matcher(termlet: string): (user: User) => boolean {
+    // Note: termlets are required to be lower case.
+    termlet = termlet.trim();
+    const should_remove_diacritics = should_remove_diacritics_for_query(termlet);
 
     return function (user: User): boolean {
-        let full_name = user.full_name;
-        // Only ignore diacritics if the query is plain ascii
-        if (is_ascii) {
-            if (user.name_with_diacritics_removed === undefined) {
-                user.name_with_diacritics_removed = typeahead.remove_diacritics(full_name);
-            }
-            full_name = user.name_with_diacritics_removed;
-        }
+        const full_name = maybe_remove_diacritics_from_name(user, should_remove_diacritics);
+
         const names = full_name.toLowerCase().split(" ");
 
         return names.some((name) => name.startsWith(termlet));
@@ -1357,6 +1552,27 @@ export function is_duplicate_full_name(full_name: string): boolean {
     return ids !== undefined && ids.size > 1;
 }
 
+export function get_from_unique_full_name(query: string): User | undefined {
+    // Check for `full_name|user_id` syntax and return `user_id`.
+    const parts = query.split("|");
+    if (parts.length !== 2) {
+        return undefined;
+    }
+    const user_id = Number(parts[1]?.trim());
+    if (!Number.isNaN(user_id) && is_valid_user_id(user_id)) {
+        return get_by_user_id(user_id);
+    }
+    return undefined;
+}
+
+export function get_unique_full_name(full_name: string, user_id: number): string {
+    let unique_full_name = full_name;
+    if (is_duplicate_full_name(full_name)) {
+        unique_full_name += `|${user_id}`;
+    }
+    return unique_full_name;
+}
+
 export function get_mention_syntax(full_name: string, user_id?: number, silent = false): string {
     let mention = "";
     if (silent) {
@@ -1395,7 +1611,13 @@ export function _add_user(person: User): void {
         our realm (like cross-realm bots).
     */
     person.is_moderator = false;
-    if (person.role === settings_config.user_role_values.moderator.code) {
+    if (
+        [
+            settings_config.user_role_values.moderator.code,
+            settings_config.user_role_values.admin.code,
+            settings_config.user_role_values.owner.code,
+        ].includes(person.role)
+    ) {
         person.is_moderator = true;
     }
     if (person.user_id) {
@@ -1404,8 +1626,8 @@ export function _add_user(person: User): void {
         // We eventually want to lock this down completely
         // and report an error and not update other the data
         // structures here, but we have a lot of edge cases
-        // with cross-realm bots, zephyr users, etc., deactivated
-        // users, where we are probably fine for now not to
+        // with cross-realm bots, deactivated users, etc.,
+        // where we are probably fine for now not to
         // find them via user_id lookups.
         blueslip.warn("No user_id provided", {email: person.email});
     }
@@ -1415,14 +1637,29 @@ export function _add_user(person: User): void {
     people_by_name_dict.set(person.full_name, person);
 }
 
-export function add_active_user(person: User): void {
+export function add_active_user(person: User, source = "initial_fetch"): void {
+    // To maintain the valid_user_ids data structure, we must add new
+    // users to that set when we learn about them.
+    if (source === "server_events") {
+        add_valid_user_id(person.user_id);
+    }
+
     active_user_dict.set(person.user_id, person);
     _add_user(person);
     non_active_user_dict.delete(person.user_id);
 }
 
-export const is_person_active = (user_id: number): boolean => {
+export const is_person_active = (user_id: number, allow_missing_user?: boolean): boolean => {
     if (!people_by_user_id_dict.has(user_id)) {
+        // settings_data.user_can_access_all_other_users can be
+        // cheap, so we avoid computing it unless it's actually
+        // required.
+        allow_missing_user ??= !settings_data.user_can_access_all_other_users();
+
+        if (allow_missing_user) {
+            // We consider all inaccessible users as active.
+            return true;
+        }
         blueslip.error("No user found", {user_id});
     }
 
@@ -1440,7 +1677,16 @@ export function add_cross_realm_user(person: User): void {
     cross_realm_dict.set(person.user_id, person);
     if (person.full_name === "Welcome Bot") {
         WELCOME_BOT = person;
+    } else if (person.full_name === "Email Gateway") {
+        EMAIL_GATEWAY_BOT = person;
     }
+}
+
+export function user_can_change_their_own_role(): boolean {
+    if (is_current_user_only_owner()) {
+        return false;
+    }
+    return current_user.is_admin;
 }
 
 export function deactivate(person: User): void {
@@ -1499,7 +1745,6 @@ export function make_user(user_id: number, email: string, full_name: string): Us
         is_guest: false,
         is_bot: false,
         is_moderator: false,
-        is_billing_admin: false,
         // We explicitly don't set `avatar_url` for fake person objects so that fallback code
         // will ask the server or compute a gravatar URL only once we need the avatar URL,
         // it's important for performance that we not hash every user's email to get gravatar URLs.
@@ -1536,11 +1781,7 @@ export function get_user_by_id_assert_valid(
         return get_by_user_id(user_id);
     }
 
-    let person = maybe_get_user_by_id(user_id, true);
-    if (person === undefined) {
-        person = add_inaccessible_user(user_id);
-    }
-    return person;
+    return maybe_get_user_by_id(user_id, true) ?? add_inaccessible_user(user_id);
 }
 
 function get_involved_people(message: MessageWithBooleans): DisplayRecipientUser[] {
@@ -1559,6 +1800,7 @@ function get_involved_people(message: MessageWithBooleans): DisplayRecipientUser
             typeof message.display_recipient !== "string",
             "Private messages should have list of recipients",
         );
+        assert(message.display_recipient !== undefined);
         involved_people = message.display_recipient;
     }
 
@@ -1642,6 +1884,8 @@ export function maybe_incr_recipient_count(
         return;
     }
 
+    assert(message.display_recipient !== undefined);
+
     // Track the number of direct messages we've sent to this person
     // to improve autocomplete
     for (const recip of message.display_recipient) {
@@ -1681,14 +1925,6 @@ export function set_custom_profile_field_data(
             rendered_value: field.rendered_value,
         };
     }
-}
-
-export function is_current_user(email?: string | null): boolean {
-    if (email === null || email === undefined || page_params.is_spectator) {
-        return false;
-    }
-
-    return email.toLowerCase() === my_current_email().toLowerCase();
 }
 
 export function initialize_current_user(user_id: number): void {
@@ -1747,6 +1983,13 @@ export function is_my_user_id(user_id: number): boolean {
     return user_id === my_user_id;
 }
 
+export function is_direct_message_conversation_with_self(user_ids: number[]): boolean {
+    if (user_ids.length === 1) {
+        return is_my_user_id(user_ids[0]!);
+    }
+    return false;
+}
+
 export function compare_by_name(a: User, b: User): number {
     return util.strcmp(a.full_name, b.full_name);
 }
@@ -1766,19 +2009,310 @@ export function is_displayable_conversation_participant(user_id: number): boolea
     return !is_valid_bot_user(user_id) && is_person_active(user_id);
 }
 
-export function initialize(my_user_id: number, params: StateData["people"]): void {
-    for (const person of params.realm_users) {
-        add_active_user(person);
+export function populate_valid_user_ids(params: StateData["user_groups"]): void {
+    // Every valid user ID is guaranteed to exist in at least one
+    // system group, so we can us that to compute the set of valid
+    // user IDs in the realm.
+    for (const user_group of params.realm_user_groups) {
+        if (user_group.is_system_group) {
+            valid_user_ids = valid_user_ids.union(new Set(user_group.members));
+        }
+    }
+}
+
+function get_combined_promise_for_user_ids(user_ids: Set<number>): {
+    promise_for_all_requested_users: Promise<unknown>;
+    user_ids_pending_fetch: Set<number>;
+} {
+    // Remove users which are already fetched.
+    // Since start_fetch_for_requested_users is called after a `setTimeout`,
+    // it is possible that some users have already been fetched.
+    for (const user_id of user_ids) {
+        if (people_by_user_id_dict.has(user_id)) {
+            /* istanbul ignore next */
+            user_ids.delete(user_id);
+        }
     }
 
-    for (const person of params.realm_non_active_users) {
+    const promises: Promise<void>[] = [];
+    let user_ids_pending_fetch = new Set<number>(user_ids);
+    // Check if we have an ongoing fetch that includes some of the
+    // users needed by this request.
+    for (const [user_ids_set, promise_data] of fetch_users_storage.promise_for_in_transit) {
+        if (user_ids_set.intersection(user_ids_pending_fetch).size > 0) {
+            user_ids_pending_fetch = user_ids_pending_fetch.difference(user_ids_set);
+            promises.push(promise_data.promise);
+        }
+    }
+
+    if (user_ids_pending_fetch.size > 0) {
+        // Store a promise to be resolved when user_ids_pending_fetch is fetched.
+        // This avoids future requests for subset of `user_ids_pending_fetch` to wait
+        // for the completion of `user_ids_to_fetch`.
+        let resolver_for_promise_for_pending_fetch: () => void = () => {
+            // This will reassigned instantly below but Typescript thinks
+            // this function is unassigned.
+        };
+        const promise_for_pending_fetch = new Promise<void>((resolve) => {
+            resolver_for_promise_for_pending_fetch = resolve;
+        });
+        promises.push(promise_for_pending_fetch);
+
+        fetch_users_storage.promise_for_in_transit.set(user_ids_pending_fetch, {
+            promise: promise_for_pending_fetch,
+            resolver: resolver_for_promise_for_pending_fetch,
+        });
+    }
+
+    return {
+        promise_for_all_requested_users: Promise.all(promises),
+        user_ids_pending_fetch,
+    };
+}
+
+async function start_fetch_for_requested_users(): Promise<void> {
+    const user_ids_to_fetch = fetch_users_storage.pending_user_ids;
+    fetch_users_storage.pending_user_ids = new Set();
+    fetch_users_storage.in_transit_user_ids =
+        fetch_users_storage.in_transit_user_ids.union(user_ids_to_fetch);
+
+    const {promise_for_all_requested_users, user_ids_pending_fetch} =
+        get_combined_promise_for_user_ids(user_ids_to_fetch);
+
+    // This promise will be resolved when all users are fetched.
+    fetch_users_storage.promise_for_requested.set(user_ids_to_fetch, {
+        promise: fetch_users_storage.promise_for_pending!,
+        resolver: fetch_users_storage.promise_resolver_for_pending!,
+    });
+
+    fetch_users_storage.promise_for_pending = undefined;
+    fetch_users_storage.promise_resolver_for_pending = undefined;
+
+    let fetched_users;
+    for (let num_attempts = 1; ; num_attempts += 1) {
+        try {
+            fetched_users = await fetch_users(user_ids_pending_fetch);
+            break;
+        } catch (error) {
+            // Retry on error.
+            const retry_delay_secs = util.get_retry_backoff_seconds(undefined, num_attempts);
+
+            // Since users are in `valid_user_ids`, we expect
+            // the fetch to eventually succeed, so we log a warning
+            // and retry after a delay.
+            blueslip.warn(
+                `Fetch for users failed, retrying after ${Math.round(retry_delay_secs)} seconds. ` +
+                    String(error),
+            );
+            await new Promise((resolve) => {
+                setTimeout(resolve, retry_delay_secs * 1000);
+            });
+        }
+    }
+
+    for (const user of fetched_users) {
+        if (user.is_active) {
+            add_active_user(user);
+        } else {
+            non_active_user_dict.set(user.user_id, user);
+            _add_user(user);
+        }
+    }
+
+    // Resolve promises waiting on this fetch after updating the data locally.
+    fetch_users_storage.promise_for_in_transit.get(user_ids_pending_fetch)!.resolver();
+    // Clean up in transit promise for this fetch.
+    fetch_users_storage.promise_for_in_transit.delete(user_ids_pending_fetch);
+    // Remove fetched users from in transit user ids.
+    fetch_users_storage.in_transit_user_ids =
+        fetch_users_storage.in_transit_user_ids.difference(user_ids_pending_fetch);
+
+    await promise_for_all_requested_users;
+    // Resolve promises waiting on the complete fetch.
+    fetch_users_storage.promise_for_requested.get(user_ids_to_fetch)!.resolver();
+    fetch_users_storage.promise_for_requested.delete(user_ids_pending_fetch);
+}
+
+export let fetch_users_from_ids_internal = async (user_ids: number[]): Promise<unknown> => {
+    // NOTE: NEVER USE THIS FUNCTION DIRECTLY.
+    // Call get_or_fetch_users_from_ids instead.
+    const unknown_user_ids = new Set(
+        user_ids.filter((user_id) => !people_by_user_id_dict.has(user_id)),
+    );
+
+    // We already have data for all requested users.
+    if (unknown_user_ids.size === 0) {
+        return undefined;
+    }
+
+    // If the fetches in progress contain all of the unknown user IDs,
+    // return a promise that resolves when that fetch completes.
+    if (
+        unknown_user_ids.intersection(fetch_users_storage.in_transit_user_ids).size ===
+        unknown_user_ids.size
+    ) {
+        // Await for all the fetches in progress for the unknown user IDs.
+        const {promise_for_all_requested_users, user_ids_pending_fetch} =
+            get_combined_promise_for_user_ids(unknown_user_ids);
+        assert(user_ids_pending_fetch.size === 0);
+        return promise_for_all_requested_users;
+    }
+
+    // Add users to be fetched in the next fetch attempt.
+    fetch_users_storage.pending_user_ids =
+        fetch_users_storage.pending_user_ids.union(unknown_user_ids);
+
+    // Return promise for pending fetch if it exists.
+    if (fetch_users_storage.promise_for_pending !== undefined) {
+        return fetch_users_storage.promise_for_pending;
+    }
+
+    // Create promise for a next fetch attempt.
+    const promise = new Promise<void>((resolve) => {
+        fetch_users_storage.promise_resolver_for_pending = resolve;
+    });
+    fetch_users_storage.promise_for_pending = promise;
+    // To club multiple fetch requests together,
+    // we queue the fetch after current call stack.
+    setTimeout(() => {
+        if (fetch_users_storage.pending_user_ids.size > 0) {
+            void start_fetch_for_requested_users();
+        }
+    }, 0);
+    return promise;
+};
+
+export function rewire_fetch_users_from_ids_internal(
+    value: typeof fetch_users_from_ids_internal,
+): void {
+    fetch_users_from_ids_internal = value;
+}
+
+export async function get_or_fetch_users_from_ids(user_ids: number[]): Promise<User[]> {
+    await fetch_users_from_ids_internal(user_ids);
+    // In case `valid_user_ids` got updated while we were fetching,
+    // re-filter the user_ids to only return valid ones.
+    const user_ids_valid = valid_user_ids.intersection(new Set(user_ids));
+    // Server doesn't return data for inaccessible users, so we need to
+    // make fake user objects for them if needed.
+    const ignore_missing = !settings_data.user_can_access_all_other_users();
+    const users: User[] = [];
+    for (const user_id of user_ids_valid) {
+        const person = maybe_get_user_by_id(user_id, ignore_missing);
+        if (person) {
+            users.push(person);
+        } else {
+            // maybe_get_user_by_id will throw an error if ignore_missing is false.
+            // User is inaccessible, create a fake user object.
+            users.push(add_inaccessible_user(user_id));
+        }
+    }
+    return users;
+}
+
+export function fetch_users_from_server(opts: FetchUserDataParams): void {
+    const params = {
+        user_ids: opts.user_ids,
+        client_gravatar: opts.client_gravatar,
+        include_custom_profile_fields: opts.include_custom_profile_fields,
+    };
+
+    channel.get({
+        url: "/json/users",
+        data: params,
+        success(data) {
+            if (opts.success) {
+                const members = user_fetch_response_schema.parse(data).members;
+                opts.success(members);
+            }
+        },
+        error(xhr: JQuery.jqXHR<unknown>) {
+            if (opts.error) {
+                opts.error(xhr);
+            }
+        },
+    });
+}
+export function get_users_that_match_role_ids(
+    user_ids: Set<number>,
+    role_ids: Set<number>,
+): User[] {
+    const users = new Array<User>();
+    for (const user_id of user_ids) {
+        const person = get_by_user_id(user_id);
+        if (person && role_ids.has(person.role)) {
+            users.push(person);
+        }
+    }
+    return users;
+}
+
+export async function fetch_users(user_ids: Set<number>): Promise<UsersFetchResponse["members"]> {
+    // Requested users outside the set of known valid user IDs likely
+    // reflect some sort of Zulip bug, so fetch and log them.
+    const invalid_user_ids = user_ids.difference(valid_user_ids);
+    if (invalid_user_ids.size > 0) {
+        blueslip.error("Ignored invalid user_ids: " + [...invalid_user_ids].join(", "));
+    }
+
+    const user_ids_to_fetch = valid_user_ids.intersection(user_ids);
+    if (user_ids_to_fetch.size === 0) {
+        return [];
+    }
+    return new Promise((resolve, reject) => {
+        fetch_users_from_server({
+            // POST /register obtains custom profile field data if and only if
+            // the current user is not a spectator. Mimic this behavior.
+            include_custom_profile_fields: !page_params.is_spectator,
+            user_ids: JSON.stringify([...user_ids_to_fetch]),
+            success(users) {
+                resolve(users);
+            },
+            error(xhr) {
+                let error_message = "Failed to fetch users.";
+                if (xhr) {
+                    const error = z
+                        .object({msg: z.optional(z.string())})
+                        .safeParse(xhr.responseJSON);
+                    if (error.success && error.data.msg) {
+                        error_message = error.data.msg;
+                    }
+                }
+                reject(new Error(error_message));
+            },
+        });
+    });
+}
+
+export async function initialize(
+    my_user_id: number,
+    people_params: StateData["people"],
+    user_group_params: StateData["user_groups"],
+): Promise<void> {
+    initialize_current_user(my_user_id);
+    populate_valid_user_ids(user_group_params);
+
+    // Compute the set of user IDs that we know are valid in the
+    // organization, but do not have a copy of.
+    const user_ids_to_fetch = new Set(valid_user_ids);
+    for (const person of people_params.realm_users) {
+        add_active_user(person);
+        user_ids_to_fetch.delete(person.user_id);
+    }
+
+    for (const person of people_params.realm_non_active_users) {
         non_active_user_dict.set(person.user_id, person);
         _add_user(person);
+        user_ids_to_fetch.delete(person.user_id);
     }
 
-    for (const person of params.cross_realm_bots) {
+    for (const person of people_params.cross_realm_bots) {
         add_cross_realm_user(person);
+        user_ids_to_fetch.delete(person.user_id);
     }
 
-    initialize_current_user(my_user_id);
+    // Fetch all the missing users. This code path is temporary: We
+    // plan to move to a model where the web app expects to have an
+    // incomplete users dataset in large organizations.
+    await get_or_fetch_users_from_ids([...user_ids_to_fetch]);
 }

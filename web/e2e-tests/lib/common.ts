@@ -7,10 +7,10 @@ import * as url from "node:url";
 import "css.escape";
 import ErrorStackParser from "error-stack-parser";
 import type {Browser, ConsoleMessage, ConsoleMessageLocation, ElementHandle, Page} from "puppeteer";
-import puppeteer from "puppeteer";
+import * as puppeteer from "puppeteer";
 import StackFrame from "stackframe";
 import StackTraceGPS from "stacktrace-gps";
-import {z} from "zod";
+import * as z from "zod/mini";
 
 const root_dir = url.fileURLToPath(new URL("../../..", import.meta.url));
 const puppeteer_dir = path.join(root_dir, "var/puppeteer");
@@ -23,11 +23,12 @@ type Message = Record<string, string | boolean> & {
     recipient?: string;
     content: string;
     stream_name?: string;
+    topic?: string;
 };
 
 let browser: Browser | null = null;
 let screenshot_id = 0;
-export const is_firefox = process.env.PUPPETEER_PRODUCT === "firefox";
+export const is_firefox = process.env["PUPPETEER_PRODUCT"] === "firefox";
 let realm_url = "http://zulip.zulipdev.com:9981/";
 const gps = new StackTraceGPS({ajax: async (url) => (await fetch(url)).text()});
 
@@ -37,7 +38,11 @@ export const pm_recipient = {
     async set(page: Page, recipient: string): Promise<void> {
         // Without using the delay option here there seems to be
         // a flake where the typeahead doesn't show up.
-        await page.type("#private_message_recipient", recipient, {delay: 100});
+        // The flake seems to be due to some method that triggers focus on
+        // compose textarea, which causes the typeahead to not show up.
+        // Add a delay before typing.
+        await timersPromises.setTimeout(100);
+        await page.type("#private_message_recipient", recipient);
 
         // PM typeaheads always have an image. This ensures we are waiting for the right typeahead to appear.
         const entry = await page.waitForSelector(".typeahead .active a .typeahead-image", {
@@ -49,7 +54,9 @@ export const pm_recipient = {
     },
 
     async expect(page: Page, expected: string): Promise<void> {
-        const actual_recipients = await page.evaluate(() => zulip_test.private_message_recipient());
+        const actual_recipients = await page.evaluate(() =>
+            zulip_test.private_message_recipient_emails(),
+        );
         assert.equal(actual_recipients, expected);
     },
 };
@@ -66,19 +73,17 @@ export const window_size = {
 };
 
 export async function ensure_browser(): Promise<Browser> {
-    if (browser === null) {
-        browser = await puppeteer.launch({
-            args: [
-                `--window-size=${window_size.width},${window_size.height}`,
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-            ],
-            // TODO: Change defaultViewport to 1280x1024 when puppeteer fixes the window size issue with firefox.
-            // Here is link to the issue that is tracking the above problem https://github.com/puppeteer/puppeteer/issues/6442.
-            defaultViewport: null,
-            headless: true,
-        });
-    }
+    browser ??= await puppeteer.launch({
+        args: [
+            `--window-size=${window_size.width},${window_size.height}`,
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+        ],
+        // TODO: Change defaultViewport to 1280x1024 when puppeteer fixes the window size issue with firefox.
+        // Here is link to the issue that is tracking the above problem https://github.com/puppeteer/puppeteer/issues/6442.
+        defaultViewport: null,
+        headless: true,
+    });
     return browser;
 }
 
@@ -94,9 +99,8 @@ export async function screenshot(page: Page, name: string | null = null): Promis
         screenshot_id += 1;
     }
 
-    const screenshot_path = path.join(puppeteer_dir, `${name}.png`);
     await page.screenshot({
-        path: screenshot_path,
+        path: `${path.join(puppeteer_dir, name)}.png`,
     });
 }
 
@@ -224,7 +228,7 @@ export async function check_compose_state(
         );
     }
     if (params.topic) {
-        form_params.stream_message_recipient_topic = params.topic;
+        form_params["stream_message_recipient_topic"] = params.topic;
     }
     await check_form_contents(page, "form#send_message_form", form_params);
 }
@@ -256,14 +260,11 @@ export async function get_internal_email_from_name(
 
 export async function log_in(
     page: Page,
-    credentials: {username: string; password: string} | null = null,
+    credentials: {username: string; password: string} = test_credentials.default_user,
 ): Promise<void> {
     console.log("Logging in");
     await page.goto(realm_url + "login/");
     assert.equal(realm_url + "login/", page.url());
-    if (credentials === null) {
-        credentials = test_credentials.default_user;
-    }
     // fill login form
     const params = {
         username: credentials.username,
@@ -318,7 +319,7 @@ export async function assert_compose_box_content(
     expected_value: string,
 ): Promise<void> {
     const compose_box_element = await page.waitForSelector("textarea#compose-textarea");
-    assert(compose_box_element !== null);
+    assert.ok(compose_box_element !== null);
     const compose_box_content = await page.evaluate(
         (element) => element.value,
         compose_box_element,
@@ -408,7 +409,7 @@ export async function select_stream_in_compose_via_dropdown(
     const stream_to_select = `.dropdown-list-container .list-item[data-name="${stream_name}"]`;
     await page.waitForSelector(stream_to_select, {visible: true});
     await page.click(stream_to_select);
-    assert((await page.$(".dropdown-list-container")) === null);
+    assert.ok((await page.$(".dropdown-list-container")) === null);
 }
 
 // Wait for any previous send to finish, then send a message.
@@ -440,7 +441,7 @@ export async function send_message(
     }
 
     if (params.topic) {
-        params.stream_message_recipient_topic = params.topic;
+        params["stream_message_recipient_topic"] = params.topic;
         delete params.topic;
     }
 
@@ -560,7 +561,7 @@ export async function open_streams_modal(page: Page): Promise<void> {
 
     await page.waitForSelector("#subscription_overlay", {visible: true});
     const url = await page_url_with_fragment(page);
-    assert.ok(url.includes("#channels/notsubscribed"));
+    assert.ok(url.includes("#channels/available"));
 }
 
 export async function open_personal_menu(page: Page): Promise<void> {
@@ -600,12 +601,7 @@ export async function select_item_via_typeahead(
     );
     assert.ok(entry);
     await entry.hover();
-    await page.evaluate((entry) => {
-        if (!(entry instanceof HTMLElement)) {
-            throw new TypeError("expected HTMLElement");
-        }
-        entry.click();
-    }, entry);
+    await entry.click();
 }
 
 export async function wait_for_modal_to_close(page: Page): Promise<void> {
@@ -625,7 +621,7 @@ export async function wait_for_micromodal_to_close(page: Page): Promise<void> {
     await page.waitForFunction(() => document.querySelector(".modal--open") === null);
 }
 
-export async function run_test_async(test_function: (page: Page) => Promise<void>): Promise<void> {
+export async function run_test(test_function: (page: Page) => Promise<void>): Promise<void> {
     // Pass a page instance to test so we can take
     // a screenshot of it when the test fails.
     const browser = await ensure_browser();
@@ -672,25 +668,31 @@ export async function run_test_async(test_function: (page: Page) => Promise<void
     });
 
     let page_errored = false;
-    page.on("pageerror", (error: Error) => {
+    page.on("pageerror", (error: unknown) => {
         page_errored = true;
 
         const console_ready1 = console_ready;
         console_ready = (async () => {
-            const frames = await Promise.all(
-                ErrorStackParser.parse(error).map(async (frame) => {
-                    try {
-                        frame = await gps.getMappedLocation(frame);
-                    } catch {
-                        // Ignore source mapping errors
-                    }
-                    return `\n    at ${String(frame.functionName)} (${String(
-                        frame.fileName,
-                    )}:${String(frame.lineNumber)}:${String(frame.columnNumber)})`;
-                }),
-            );
+            let message;
+            if (error instanceof Error) {
+                const frames = await Promise.all(
+                    ErrorStackParser.parse(error).map(async (frame) => {
+                        try {
+                            frame = await gps.getMappedLocation(frame);
+                        } catch {
+                            // Ignore source mapping errors
+                        }
+                        return `\n    at ${String(frame.functionName)} (${String(
+                            frame.fileName,
+                        )}:${String(frame.lineNumber)}:${String(frame.columnNumber)})`;
+                    }),
+                );
+                message = error.toString() + frames.join("");
+            } else {
+                message = String(error);
+            }
             await console_ready1;
-            console.error("Page error:", error.message + frames.join(""));
+            console.error("Page error:", message);
         })();
 
         const console_ready2 = console_ready;
@@ -728,13 +730,6 @@ export async function run_test_async(test_function: (page: Page) => Promise<void
     }
 }
 
-export function run_test(test_function: (page: Page) => Promise<void>): void {
-    run_test_async(test_function).catch((error: unknown) => {
-        console.error(error);
-        process.exit(1);
-    });
-}
-
 export async function get_current_msg_list_id(
     page: Page,
     wait_for_change = false,
@@ -757,6 +752,6 @@ export async function get_current_msg_list_id(
         );
     }
     last_current_msg_list_id = await page.evaluate(() => zulip_test.current_msg_list?.id);
-    assert(last_current_msg_list_id !== undefined);
+    assert.ok(last_current_msg_list_id !== undefined);
     return last_current_msg_list_id;
 }

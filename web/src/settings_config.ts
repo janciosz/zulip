@@ -1,6 +1,11 @@
 import Handlebars from "handlebars/runtime.js";
 
 import {page_params} from "./base_page_params.ts";
+import type {
+    GroupGroupSettingName,
+    RealmGroupSettingName,
+    StreamGroupSettingName,
+} from "./group_permission_settings.ts";
 import {$t, $t_html} from "./i18n.ts";
 import type {RealmDefaultSettings} from "./realm_user_settings_defaults.ts";
 import {realm} from "./state_data.ts";
@@ -11,6 +16,7 @@ import type {
     StreamNotificationSettings,
     UserSettings,
 } from "./user_settings.ts";
+import * as util from "./util.ts";
 
 /*
     This file contains translations between the integer values used in
@@ -61,6 +67,14 @@ export const web_channel_default_view_values = {
         code: 1,
         description: $t({defaultMessage: "Top topic in the channel"}),
     },
+    top_unread_topic_in_channel: {
+        code: 4,
+        description: $t({defaultMessage: "Top unread topic in the channel"}),
+    },
+    list_of_topics: {
+        code: 3,
+        description: $t({defaultMessage: "List of topics"}),
+    },
     channel_feed: {
         code: 2,
         description: $t({defaultMessage: "Channel feed"}),
@@ -76,7 +90,7 @@ export const user_list_style_values: {
         code: number;
         description: string;
     };
-    with_avatar?: {
+    with_avatar: {
         code: number;
         description: string;
     };
@@ -107,6 +121,21 @@ export const web_animate_image_previews_values = {
     never: {
         code: "never",
         description: $t({defaultMessage: "Only in image viewer"}),
+    },
+};
+
+export const resolved_topic_notice_auto_read_policy_values = {
+    always: {
+        code: "always",
+        description: $t({defaultMessage: "Always"}),
+    },
+    except_followed: {
+        code: "except_followed",
+        description: $t({defaultMessage: "Except in topics I'm following"}),
+    },
+    never: {
+        code: "never",
+        description: $t({defaultMessage: "Never"}),
     },
 };
 
@@ -183,17 +212,6 @@ export type DisplaySettings = {
 };
 
 /* istanbul ignore next */
-export const information_section_checkbox_group: DisplaySettings = {
-    settings: {
-        user_preferences: [
-            "starred_message_counts",
-            "receives_typing_notifications",
-            "fluid_layout_width",
-        ],
-    },
-};
-
-/* istanbul ignore next */
 export const get_information_density_preferences = (): DisplaySettings => ({
     render_group: page_params.development_environment,
     settings: {
@@ -202,7 +220,7 @@ export const get_information_density_preferences = (): DisplaySettings => ({
 });
 
 type SettingsRenderOnly = {
-    dense_mode: boolean;
+    hide_ai_features: boolean;
     high_contrast_mode: boolean;
     web_font_size_px: boolean;
     web_line_height_percent: boolean;
@@ -210,7 +228,9 @@ type SettingsRenderOnly = {
 
 /* istanbul ignore next */
 export const get_settings_render_only = (): SettingsRenderOnly => ({
-    dense_mode: page_params.development_environment,
+    // Offer the UI for hiding AI features exactly when the server
+    // supports doing so.
+    hide_ai_features: realm.server_can_summarize_topics,
     high_contrast_mode: page_params.development_environment,
     web_font_size_px: page_params.development_environment,
     web_line_height_percent: page_params.development_environment,
@@ -262,37 +282,75 @@ export const common_policy_values = {
     },
 };
 
-export const wildcard_mention_policy_values = {
-    by_everyone: {
-        order: 1,
-        code: 1,
-        description: $t({defaultMessage: "Admins, moderators, members and guests"}),
+export const message_edit_history_visibility_policy_values = {
+    always: {
+        code: "all",
+        description: $t({defaultMessage: "Show edits and moves"}),
     },
-    by_members: {
-        order: 2,
-        code: 2,
-        description: $t({defaultMessage: "Admins, moderators and members"}),
+    moves_only: {
+        code: "moves",
+        description: $t({defaultMessage: "Move history only"}),
     },
-    by_full_members: {
-        order: 3,
-        code: 3,
-        description: $t({defaultMessage: "Admins, moderators and full members"}),
+    never: {
+        code: "none",
+        description: $t({defaultMessage: "Don't allow"}),
     },
-    by_moderators_only: {
-        order: 4,
-        code: 7,
-        description: $t({defaultMessage: "Admins and moderators"}),
-    },
-    by_admins_only: {
-        order: 5,
-        code: 5,
-        description: $t({defaultMessage: "Admins only"}),
-    },
-    nobody: {
-        order: 6,
-        code: 6,
-        description: $t({defaultMessage: "Nobody"}),
-    },
+};
+
+type PolicyValue = {
+    code: string;
+    description: string;
+};
+
+type RealmTopicsPolicyValues = {
+    allow_empty_topic: PolicyValue;
+    disable_empty_topic: PolicyValue;
+};
+
+type StreamTopicsPolicyValues = {
+    inherit: PolicyValue;
+    empty_topic_only: PolicyValue;
+} & RealmTopicsPolicyValues;
+
+export const get_realm_topics_policy_values = (): RealmTopicsPolicyValues => {
+    const empty_topic_name = util.get_final_topic_display_name("");
+
+    return {
+        allow_empty_topic: {
+            code: "allow_empty_topic",
+            description: $t({defaultMessage: "Allow “{empty_topic_name}”"}, {empty_topic_name}),
+        },
+        disable_empty_topic: {
+            code: "disable_empty_topic",
+            description: $t({defaultMessage: "No “{empty_topic_name}” topic"}, {empty_topic_name}),
+        },
+    };
+};
+
+export const get_stream_topics_policy_values = (): StreamTopicsPolicyValues => {
+    const realm_topics_policy_values = get_realm_topics_policy_values();
+    const empty_topic_name = util.get_final_topic_display_name("");
+
+    return {
+        inherit: {
+            code: "inherit",
+            description: $t(
+                {defaultMessage: "Organization default ({org_level_topics_policy})"},
+                {
+                    org_level_topics_policy:
+                        realm_topics_policy_values[realm.realm_topics_policy].description,
+                },
+            ),
+        },
+        ...realm_topics_policy_values,
+        empty_topic_only: {
+            code: "empty_topic_only",
+            description: $t(
+                {defaultMessage: "Only “{empty_topic_name}” topic allowed"},
+                {empty_topic_name},
+            ),
+        },
+    };
 };
 
 export const time_limit_dropdown_values = [
@@ -527,7 +585,7 @@ export const realm_deletion_in_values = {
         description: $t({defaultMessage: "30 days"}),
         default: false,
     },
-    ninty_days: {
+    ninety_days: {
         value: 90 * 24 * 60,
         description: $t({defaultMessage: "90 days"}),
         default: false,
@@ -563,7 +621,6 @@ export const user_role_map = new Map(user_role_array.map((role) => [role.code, r
 
 export const preferences_settings_labels = {
     default_language_settings_label: $t({defaultMessage: "Language"}),
-    dense_mode: $t({defaultMessage: "Compact mode"}),
     display_emoji_reaction_users: new Handlebars.SafeString(
         $t_html({
             defaultMessage:
@@ -571,16 +628,26 @@ export const preferences_settings_labels = {
         }),
     ),
     fluid_layout_width: $t({defaultMessage: "Use full width on wide screens"}),
+    hide_ai_features: $t({defaultMessage: "Hide AI features"}),
     high_contrast_mode: $t({defaultMessage: "High contrast mode"}),
     enter_sends: new Handlebars.SafeString(
         $t_html({defaultMessage: "<kbd>Enter</kbd> sends when composing a message"}),
     ),
     receives_typing_notifications: $t({defaultMessage: "Show when other users are typing"}),
     starred_message_counts: $t({defaultMessage: "Show counts for starred messages"}),
+    web_inbox_show_channel_folders: $t({
+        defaultMessage: "Group channels by folder in the inbox",
+    }),
+    web_left_sidebar_show_channel_folders: $t({
+        defaultMessage: "Group channels by folder in the left sidebar",
+    }),
+    web_left_sidebar_unreads_count_summary: $t({
+        defaultMessage: "Show unread count total on home view",
+    }),
     twenty_four_hour_time: $t({defaultMessage: "Time format"}),
     translate_emoticons: new Handlebars.SafeString(
         $t_html({
-            defaultMessage: "Convert emoticons before sending (<code>:)</code> becomes 😃)",
+            defaultMessage: "Convert emoticons before sending (<code>:)</code> becomes 🙂)",
         }),
     ),
     web_suggest_update_timezone: $t({
@@ -638,18 +705,214 @@ export const realm_user_settings_defaults_labels = {
     }),
     enable_digest_emails: $t({defaultMessage: "Send digest emails when user is away"}),
 
-    realm_presence_enabled: $t({
+    presence_enabled: $t({
         defaultMessage: "Display availability to other users",
     }),
-    realm_presence_enabled_parens_text: $t({defaultMessage: "invisible mode off"}),
-    realm_send_read_receipts: $t({defaultMessage: "Allow other users to view read receipts"}),
-    realm_send_private_typing_notifications: $t({
+    presence_enabled_parens_text: $t({defaultMessage: "invisible mode off"}),
+    send_read_receipts: $t({defaultMessage: "Allow other users to view read receipts"}),
+    send_private_typing_notifications: $t({
         defaultMessage: "Let recipients see when a user is typing direct messages",
     }),
-    realm_send_stream_typing_notifications: $t({
+    send_stream_typing_notifications: $t({
         defaultMessage: "Let recipients see when a user is typing channel messages",
     }),
 };
+
+export const all_group_setting_labels = {
+    realm: {
+        create_multiuse_invite_group: $t({
+            defaultMessage: "Who can create reusable invitation links",
+        }),
+        can_invite_users_group: $t({defaultMessage: "Who can send email invitations to new users"}),
+        can_create_public_channel_group: $t({defaultMessage: "Who can create public channels"}),
+        can_create_web_public_channel_group: $t({
+            defaultMessage: "Who can create web-public channels",
+        }),
+        can_create_private_channel_group: $t({defaultMessage: "Who can create private channels"}),
+        can_add_subscribers_group: $t({defaultMessage: "Who can subscribe others to channels"}),
+        direct_message_permission_group: $t({
+            defaultMessage: "Who can authorize a direct message conversation",
+        }),
+        direct_message_initiator_group: $t({
+            defaultMessage: "Who can start a direct message conversation",
+        }),
+        can_manage_all_groups: $t({defaultMessage: "Who can administer all user groups"}),
+        can_manage_billing_group: $t({defaultMessage: "Who can manage plans and billing"}),
+        can_create_groups: $t({defaultMessage: "Who can create user groups"}),
+        can_move_messages_between_topics_group: $t({
+            defaultMessage: "Who can edit topics in any channel",
+        }),
+        can_move_messages_between_channels_group: $t({
+            defaultMessage: "Who can move messages out of any channel",
+        }),
+        can_resolve_topics_group: $t({defaultMessage: "Who can resolve topics"}),
+        can_delete_any_message_group: $t({defaultMessage: "Who can delete any message"}),
+        can_delete_own_message_group: $t({
+            defaultMessage: "Who can delete their own messages everywhere",
+        }),
+        can_access_all_users_group: $t({
+            defaultMessage: "Who can view all other users in the organization",
+        }),
+        can_summarize_topics_group: $t({defaultMessage: "Who can use AI summaries"}),
+        can_create_write_only_bots_group: $t({
+            defaultMessage: "Who can create bots that send messages into Zulip",
+        }),
+        can_create_bots_group: $t({defaultMessage: "Who can create any bot"}),
+        can_add_custom_emoji_group: $t({defaultMessage: "Who can add custom emoji"}),
+        can_mention_many_users_group: $t({
+            defaultMessage: "Who can notify a large number of users with a wildcard mention",
+        }),
+        can_set_delete_message_policy_group: $t({
+            defaultMessage: "Who can allow users to delete messages in channels they administer",
+        }),
+        can_set_topics_policy_group: new Handlebars.SafeString(
+            $t_html({
+                defaultMessage:
+                    "Who can configure the per-channel <i>general chat</i> topic configuration <i>(also requires being a channel administrator)</i>",
+            }),
+        ),
+    },
+    stream: {
+        can_add_subscribers_group: $t({defaultMessage: "Who can subscribe anyone to this channel"}),
+        can_create_topic_group: $t({defaultMessage: "Who can start new topics"}),
+        can_delete_any_message_group: $t({
+            defaultMessage: "Who can delete any message in this channel",
+        }),
+        can_delete_own_message_group: $t({
+            defaultMessage: "Who can delete their own messages in this channel",
+        }),
+        can_move_messages_out_of_channel_group: $t({
+            defaultMessage: "Who can move messages out of this channel",
+        }),
+        can_move_messages_within_channel_group: $t({
+            defaultMessage: "Who can move messages inside this channel",
+        }),
+        can_send_message_group: $t({defaultMessage: "Who can post to this channel"}),
+        can_administer_channel_group: $t({defaultMessage: "Who can administer this channel"}),
+        can_subscribe_group: $t({defaultMessage: "Who can subscribe to this channel"}),
+        can_remove_subscribers_group: $t({
+            defaultMessage: "Who can unsubscribe anyone from this channel",
+        }),
+        can_resolve_topics_group: $t({
+            defaultMessage: "Who can resolve topics in this channel",
+        }),
+    },
+    group: {
+        can_add_members_group: $t({defaultMessage: "Who can add members to this group"}),
+        can_join_group: $t({defaultMessage: "Who can join this group"}),
+        can_leave_group: $t({defaultMessage: "Who can leave this group"}),
+        can_manage_group: $t({defaultMessage: "Who can administer this group"}),
+        can_mention_group: $t({defaultMessage: "Who can mention this group"}),
+        can_remove_members_group: $t({defaultMessage: "Who can remove members from this group"}),
+    },
+};
+
+// Order of subsections and its settings is important here as
+// this object is used for rendering the assigned permissions
+// in group permissions panel.
+export const realm_group_permission_settings: {
+    subsection_heading: string;
+    subsection_key: string;
+    settings: RealmGroupSettingName[];
+}[] = [
+    {
+        subsection_heading: $t({defaultMessage: "Joining the organization"}),
+        subsection_key: "org-join-settings",
+        settings: ["can_invite_users_group", "create_multiuse_invite_group"],
+    },
+    {
+        subsection_heading: $t({defaultMessage: "Channel permissions"}),
+        subsection_key: "org-stream-permissions",
+        settings: [
+            "can_create_public_channel_group",
+            "can_create_web_public_channel_group",
+            "can_create_private_channel_group",
+            "can_add_subscribers_group",
+            "can_mention_many_users_group",
+            "can_set_delete_message_policy_group",
+            "can_set_topics_policy_group",
+        ],
+    },
+    {
+        subsection_heading: $t({defaultMessage: "Group permissions"}),
+        subsection_key: "org-group-permissions",
+        settings: ["can_manage_all_groups", "can_create_groups"],
+    },
+    {
+        subsection_heading: $t({defaultMessage: "Direct message permissions"}),
+        subsection_key: "org-direct-message-permissions",
+        settings: ["direct_message_permission_group", "direct_message_initiator_group"],
+    },
+    {
+        subsection_heading: $t({defaultMessage: "Moving messages"}),
+        subsection_key: "org-moving-msgs",
+        settings: [
+            "can_move_messages_between_topics_group",
+            "can_move_messages_between_channels_group",
+            "can_resolve_topics_group",
+        ],
+    },
+    {
+        subsection_heading: $t({defaultMessage: "Message deletion"}),
+        subsection_key: "org-msg-deletion",
+        settings: ["can_delete_any_message_group", "can_delete_own_message_group"],
+    },
+    {
+        subsection_heading: $t({defaultMessage: "Guests"}),
+        subsection_key: "org-guests-permissions",
+        settings: ["can_access_all_users_group"],
+    },
+    {
+        subsection_heading: $t({defaultMessage: "Other permissions"}),
+        subsection_key: "org-other-permissions",
+        settings: [
+            "can_manage_billing_group",
+            "can_summarize_topics_group",
+            "can_create_write_only_bots_group",
+            "can_create_bots_group",
+            "can_add_custom_emoji_group",
+        ],
+    },
+];
+
+export const owner_editable_realm_group_permission_settings = new Set([
+    "can_create_groups",
+    "can_invite_users_group",
+    "can_manage_all_groups",
+    "create_multiuse_invite_group",
+]);
+
+// Order of settings is important, as this list is used to
+// render assigned permissions in permissions panel.
+export const stream_group_permission_settings: StreamGroupSettingName[] = [
+    "can_subscribe_group",
+    "can_add_subscribers_group",
+    "can_remove_subscribers_group",
+    "can_send_message_group",
+    "can_create_topic_group",
+    "can_move_messages_within_channel_group",
+    "can_move_messages_out_of_channel_group",
+    "can_resolve_topics_group",
+    "can_delete_any_message_group",
+    "can_delete_own_message_group",
+    "can_administer_channel_group",
+];
+
+export const stream_group_permission_settings_requiring_content_access: StreamGroupSettingName[] = [
+    "can_add_subscribers_group",
+    "can_subscribe_group",
+];
+
+// Order of settings is important, as this list is used to
+// render assigned permissions in permissions panel.
+export const group_permission_settings: GroupGroupSettingName[] = [
+    "can_manage_group",
+    "can_mention_group",
+    "can_add_members_group",
+    "can_remove_members_group",
+    "can_join_group",
+    "can_leave_group",
+];
 
 // NOTIFICATIONS
 
@@ -815,6 +1078,7 @@ type NotificationSettingCheckbox = {
     is_disabled: boolean;
     is_checked: boolean;
     is_mobile_checkbox: boolean;
+    push_notifications_disabled: boolean;
 };
 
 export function get_notifications_table_row_data(
@@ -829,6 +1093,7 @@ export function get_notifications_table_row_data(
                 is_disabled: true,
                 is_checked: false,
                 is_mobile_checkbox: false,
+                push_notifications_disabled: false,
             };
         }
 
@@ -842,11 +1107,27 @@ export function get_notifications_table_row_data(
             is_disabled: false,
             is_checked: checked,
             is_mobile_checkbox: false,
+            push_notifications_disabled: !realm.realm_push_notifications_enabled,
         };
         if (column === "mobile") {
             checkbox.is_disabled = !realm.realm_push_notifications_enabled;
             checkbox.is_mobile_checkbox = true;
         }
+        return checkbox;
+    });
+}
+
+export function get_custom_stream_specific_notifications_table_row_data(): NotificationSettingCheckbox[] {
+    // Returns an array of NotificationSettingCheckbox for the special row that
+    // allows adding new configuration for a previously uncustomized channel.
+    return stream_specific_notification_settings.map((setting_name) => {
+        const checkbox = {
+            setting_name,
+            is_disabled: true,
+            is_checked: false,
+            is_mobile_checkbox: setting_name === "push_notifications",
+            push_notifications_disabled: !realm.realm_push_notifications_enabled,
+        };
         return checkbox;
     });
 }
@@ -952,12 +1233,12 @@ export const system_user_groups_list = [
     {
         name: "role:everyone",
         dropdown_option_name: $t({defaultMessage: "Admins, moderators, members and guests"}),
-        display_name: $t({defaultMessage: "Everyone"}),
+        display_name: $t({defaultMessage: "Everyone including guests"}),
     },
     {
         name: "role:members",
         dropdown_option_name: $t({defaultMessage: "Admins, moderators and members"}),
-        display_name: $t({defaultMessage: "Members"}),
+        display_name: $t({defaultMessage: "Everyone except guests"}),
     },
     {
         name: "role:fullmembers",
@@ -985,6 +1266,8 @@ export const system_user_groups_list = [
         display_name: $t({defaultMessage: "Nobody"}),
     },
 ];
+
+export const alternate_members_group_typeahead_matching_name = $t({defaultMessage: "Members"});
 
 export const user_topic_visibility_policy_values = {
     followed: {
@@ -1029,43 +1312,71 @@ export const stream_privacy_policy_values = {
         code: "web-public",
         name: $t({defaultMessage: "Web-public"}),
         description: $t({
-            defaultMessage:
-                "Anyone on the internet can view messages; members of your organization can join.",
+            defaultMessage: "Anyone on the internet can view",
         }),
     },
     public: {
         code: "public",
         name: $t({defaultMessage: "Public"}),
         description: $t({
-            defaultMessage: "Members of your organization can view messages and join",
-        }),
-    },
-    private_with_public_history: {
-        code: "invite-only-public-history",
-        name: $t({defaultMessage: "Private, shared history"}),
-        description: $t({
-            defaultMessage: "Joining and viewing messages requires being added by a subscriber",
+            defaultMessage: "Everyone except guests can view and join",
         }),
     },
     private: {
         code: "invite-only",
-        name: $t({defaultMessage: "Private, protected history"}),
+        name: $t({defaultMessage: "Private"}),
         description: $t({
-            defaultMessage:
-                "Joining and viewing messages requires being added by a subscriber; new subscribers cannot see messages sent before they joined",
+            defaultMessage: "Requires permission to view and join",
         }),
     },
 };
 
-export const export_type_values = {
-    export_public: {
+export type ExportTypeOption = {
+    value: number;
+    description: string;
+    default: boolean;
+};
+
+export type ExportTypeSlug = "public" | "full_with_consent";
+
+export const export_type_values: Record<ExportTypeSlug, ExportTypeOption> = {
+    public: {
         value: 1,
         description: $t({defaultMessage: "Public data"}),
         default: false,
     },
-    export_full_with_consent: {
+    full_with_consent: {
         value: 2,
         description: $t({defaultMessage: "Standard"}),
         default: true,
     },
 };
+
+export const bot_type_values = {
+    default_bot: {
+        type_id: 1,
+        name: $t({defaultMessage: "Generic bot"}),
+    },
+    incoming_webhook_bot: {
+        type_id: 2,
+        name: $t({defaultMessage: "Incoming webhook"}),
+    },
+    outgoing_webhook_bot: {
+        type_id: 3,
+        name: $t({defaultMessage: "Outgoing webhook"}),
+    },
+    embedded_bot: {
+        type_id: 4,
+        name: $t({defaultMessage: "Embedded bot"}),
+    },
+};
+
+export const realm_plan_types = {
+    self_hosted: {code: 1},
+    limited: {code: 2},
+    standard: {code: 3},
+    standard_free: {code: 4},
+    plus: {code: 10},
+};
+
+export const no_folder_selected = -1;

@@ -2,6 +2,7 @@
 
 const assert = require("node:assert/strict");
 
+const {make_realm} = require("./lib/example_realm.cjs");
 const {mock_esm, zrequire} = require("./lib/namespace.cjs");
 const {run_test, noop} = require("./lib/test.cjs");
 const $ = require("./lib/zjquery.cjs");
@@ -14,6 +15,7 @@ initialize_user_settings({user_settings});
 
 window.scrollTo = noop;
 const test_url = () => "https://www.example.com";
+const test_permalink = () => "https://www.example.com/with/12";
 
 // We assign this in our test() wrapper.
 let messages;
@@ -94,12 +96,15 @@ const ListWidget = mock_esm("../src/list_widget", {
 
 mock_esm("../src/compose_closed_ui", {
     set_standard_text_for_reply_button: noop,
-    update_buttons_for_non_specific_views: noop,
+    update_buttons: noop,
 });
 mock_esm("../src/hash_util", {
-    by_stream_url: test_url,
+    channel_url_by_user_setting: test_url,
     by_stream_topic_url: test_url,
     by_conversation_and_time_url: test_url,
+});
+mock_esm("../src/stream_topic_history", {
+    channel_topic_permalink_hash: test_permalink,
 });
 mock_esm("../src/message_list_data", {
     MessageListData: class {},
@@ -185,13 +190,20 @@ mock_esm("../src/unread", {
         return 0;
     },
     topic_has_any_unread_mentions: () => false,
+    num_unread_mentions_for_user_ids_strings(user_ids_string) {
+        if (user_ids_string === "2,3") {
+            return false;
+        }
+        return true;
+    },
 });
 mock_esm("../src/resize", {
     update_recent_view: noop,
 });
-const dropdown_widget = mock_esm("../src/dropdown_widget", {
-    DataTypes: {NUMBER: "number", STRING: "string"},
+mock_esm("../src/popup_banners", {
+    close_found_missing_unreads_banner: noop,
 });
+const dropdown_widget = mock_esm("../src/dropdown_widget");
 dropdown_widget.DropdownWidget = function DropdownWidget() {
     this.setup = noop;
     this.render = noop;
@@ -202,6 +214,7 @@ const {buddy_list} = zrequire("buddy_list");
 const activity_ui = zrequire("activity_ui");
 const people = zrequire("people");
 const rt = zrequire("recent_view_ui");
+rt.set_hide_other_views(noop);
 const recent_view_util = zrequire("recent_view_util");
 const rt_data = zrequire("recent_view_data");
 const muted_users = zrequire("muted_users");
@@ -210,13 +223,14 @@ const sub_store = zrequire("sub_store");
 const util = zrequire("util");
 
 const REALM_EMPTY_TOPIC_DISPLAY_NAME = "test general chat";
-set_realm({realm_empty_topic_display_name: REALM_EMPTY_TOPIC_DISPLAY_NAME});
+set_realm(make_realm({realm_empty_topic_display_name: REALM_EMPTY_TOPIC_DISPLAY_NAME}));
 
 for (const stream_id of [stream1, stream2, stream3, stream4, stream6]) {
     sub_store.add_hydrated_sub(stream_id, {
         color: "",
         invite_only: false,
         is_web_public: true,
+        is_archived: false,
         subscribed: true,
     });
 }
@@ -407,6 +421,7 @@ function generate_topic_data(topic_info_array) {
             invite_only: false,
             is_web_public: true,
             is_private: false,
+            is_archived: false,
             last_msg_time: "Just now",
             last_msg_url: "https://www.example.com",
             full_last_msg_date_time: "date at time",
@@ -419,7 +434,7 @@ function generate_topic_data(topic_info_array) {
             topic_display_name: util.get_final_topic_display_name(topic),
             is_empty_string_topic: topic === "",
             conversation_key: get_topic_key(stream_id, topic),
-            topic_url: "https://www.example.com",
+            topic_url: "https://www.example.com/with/12",
             unread_count,
             mention_in_unread: false,
             visibility_policy,
@@ -675,20 +690,18 @@ test("test_filter_pm", ({mock_template}) => {
         is_spectator: false,
     };
 
-    const expected_user_with_icon = [
-        {name: "translated: Muted user", status_emoji_info: undefined},
+    const expected_users_with_icons = [
         {name: "Spike Spiegel", status_emoji_info: undefined},
+        {name: "translated: Muted user", status_emoji_info: undefined},
     ];
-    let i = 0;
 
     mock_template("recent_view_table.hbs", false, (data) => {
         assert.deepEqual(data, expected);
     });
 
-    mock_template("user_with_status_icon.hbs", false, (data) => {
-        assert.deepEqual(data, expected_user_with_icon[i]);
-        i += 1;
-        return "<user_with_status_icon stub>";
+    mock_template("users_with_status_icons.hbs", false, (data) => {
+        assert.deepEqual(data, {users: expected_users_with_icons});
+        return "<users_with_status_icons stub>";
     });
 
     mock_template("recent_view_row.hbs", true, (_data, html) => {
@@ -1040,7 +1053,7 @@ test("test_delete_messages", ({override}) => {
 
     // messages[0] was removed.
     let reduced_msgs = messages.slice(1);
-    override(all_messages_data, "all_messages", () => reduced_msgs);
+    override(all_messages_data, "all_messages_after_mute_filtering", () => reduced_msgs);
 
     let all_topics = rt_data.get_conversations();
     assert.equal(
@@ -1071,7 +1084,7 @@ test("test_delete_messages", ({override}) => {
 });
 
 test("test_topic_edit", ({override}) => {
-    override(all_messages_data, "all_messages", () => messages);
+    override(all_messages_data, "all_messages_after_mute_filtering", () => messages);
     recent_view_util.set_visible(false);
 
     // NOTE: This test should always run in the end as it modified the messages data.
@@ -1166,5 +1179,6 @@ test("test_search", () => {
     assert.equal(rt.topic_in_search_results("\\", "general", "\\"), true);
     assert.equal(rt.topic_in_search_results("\\", "general", "\\\\"), true);
 
-    // TODO: Add a test for empty topic name after CZO discussion.
+    // Test for empty string topic name.
+    assert.equal(rt.topic_in_search_results("general chat", "Scotland", ""), true);
 });

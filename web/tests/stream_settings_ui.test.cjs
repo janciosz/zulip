@@ -2,6 +2,8 @@
 
 const assert = require("node:assert/strict");
 
+const {make_user_group} = require("./lib/example_group.cjs");
+const {make_realm} = require("./lib/example_realm.cjs");
 const {mock_esm, set_global, zrequire} = require("./lib/namespace.cjs");
 const {run_test} = require("./lib/test.cjs");
 const $ = require("./lib/zjquery.cjs");
@@ -13,7 +15,7 @@ const scroll_util = mock_esm("../src/scroll_util", {
 });
 
 mock_esm("../src/hash_util", {
-    by_stream_url() {},
+    channel_url_by_user_setting() {},
 });
 
 mock_esm("../src/browser_history", {
@@ -23,38 +25,54 @@ mock_esm("../src/browser_history", {
 mock_esm("../src/hash_parser", {
     get_current_hash_section: () => denmark_stream_id,
 });
+
+mock_esm("../src/group_permission_settings", {
+    get_group_permission_setting_config() {
+        return {
+            allow_everyone_group: false,
+        };
+    },
+});
+
+mock_esm("../src/resize", {
+    resize_settings_overlay() {},
+});
+
 set_global("page_params", {});
 
 const {set_current_user, set_realm} = zrequire("state_data");
 const stream_data = zrequire("stream_data");
+const stream_settings_components = zrequire("stream_settings_components");
 const stream_settings_ui = zrequire("stream_settings_ui");
 const user_groups = zrequire("user_groups");
 const {initialize_user_settings} = zrequire("user_settings");
 
-set_realm({});
+const realm = make_realm();
+set_realm(realm);
 set_current_user({});
 initialize_user_settings({user_settings: {}});
 
-const admins_group = {
+const admins_group = make_user_group({
     name: "Admins",
     id: 1,
     members: new Set([1]),
     is_system_group: true,
-    direct_subgroup_ids: new Set([]),
-};
-const nobody_group = {
+    direct_subgroup_ids: new Set(),
+});
+const nobody_group = make_user_group({
     name: "Nobody",
     id: 2,
-    members: new Set([]),
+    members: new Set(),
     is_system_group: true,
-    direct_subgroup_ids: new Set([]),
-};
+    direct_subgroup_ids: new Set(),
+});
 const initialize_user_groups = () => {
     user_groups.initialize({realm_user_groups: [admins_group, nobody_group]});
 };
 
-run_test("redraw_left_panel", ({mock_template}) => {
+run_test("redraw_left_panel", ({override, mock_template}) => {
     initialize_user_groups();
+    override(realm, "realm_can_add_subscribers_group", admins_group.id);
 
     // set-up sub rows stubs
     const denmark = {
@@ -68,8 +86,11 @@ run_test("redraw_left_panel", ({mock_template}) => {
         color: "red",
         can_administer_channel_group: nobody_group.id,
         can_remove_subscribers_group: admins_group.id,
+        can_add_subscribers_group: admins_group.id,
+        can_subscribe_group: admins_group.id,
         date_created: 1691057093,
         creator_id: null,
+        subscriber_count: 0,
     };
     const poland = {
         elem: "poland",
@@ -82,8 +103,11 @@ run_test("redraw_left_panel", ({mock_template}) => {
         color: "red",
         can_administer_channel_group: nobody_group.id,
         can_remove_subscribers_group: admins_group.id,
+        can_add_subscribers_group: admins_group.id,
+        can_subscribe_group: admins_group.id,
         date_created: 1691057093,
         creator_id: null,
+        subscriber_count: 0,
     };
     const pomona = {
         elem: "pomona",
@@ -96,8 +120,11 @@ run_test("redraw_left_panel", ({mock_template}) => {
         color: "red",
         can_remove_subscribers_group: admins_group.id,
         can_administer_channel_group: nobody_group.id,
+        can_add_subscribers_group: admins_group.id,
+        can_subscribe_group: admins_group.id,
         date_created: 1691057093,
         creator_id: null,
+        subscriber_count: 0,
     };
     const cpp = {
         elem: "cpp",
@@ -110,8 +137,11 @@ run_test("redraw_left_panel", ({mock_template}) => {
         color: "red",
         can_administer_channel_group: nobody_group.id,
         can_remove_subscribers_group: admins_group.id,
+        can_add_subscribers_group: admins_group.id,
+        can_subscribe_group: admins_group.id,
         date_created: 1691057093,
         creator_id: null,
+        subscriber_count: 0,
     };
     const zzyzx = {
         elem: "zzyzx",
@@ -124,8 +154,11 @@ run_test("redraw_left_panel", ({mock_template}) => {
         color: "red",
         can_administer_channel_group: nobody_group.id,
         can_remove_subscribers_group: admins_group.id,
+        can_add_subscribers_group: admins_group.id,
+        can_subscribe_group: admins_group.id,
         date_created: 1691057093,
         creator_id: null,
+        subscriber_count: 0,
     };
     const abcd = {
         elem: "abcd",
@@ -138,8 +171,11 @@ run_test("redraw_left_panel", ({mock_template}) => {
         color: "red",
         can_administer_channel_group: nobody_group.id,
         can_remove_subscribers_group: admins_group.id,
+        can_add_subscribers_group: admins_group.id,
+        can_subscribe_group: admins_group.id,
         date_created: 1691057093,
         creator_id: null,
+        subscriber_count: 0,
     };
     const utopia = {
         elem: "utopia",
@@ -152,8 +188,11 @@ run_test("redraw_left_panel", ({mock_template}) => {
         color: "red",
         can_administer_channel_group: nobody_group.id,
         can_remove_subscribers_group: admins_group.id,
+        can_add_subscribers_group: admins_group.id,
+        can_subscribe_group: admins_group.id,
         date_created: 1691057093,
         creator_id: null,
+        subscriber_count: 0,
     };
     const jerry = {
         elem: "jerry",
@@ -166,8 +205,11 @@ run_test("redraw_left_panel", ({mock_template}) => {
         color: "red",
         can_administer_channel_group: nobody_group.id,
         can_remove_subscribers_group: admins_group.id,
+        can_add_subscribers_group: admins_group.id,
+        can_subscribe_group: admins_group.id,
         date_created: 1691057093,
         creator_id: null,
+        subscriber_count: 0,
     };
 
     const sub_row_data = [denmark, poland, pomona, cpp, zzyzx, abcd, utopia, jerry];
@@ -182,6 +224,18 @@ run_test("redraw_left_panel", ({mock_template}) => {
         populated_subs = data.subscriptions;
     });
 
+    const filters_dropdown_widget = {
+        render: function render() {},
+        value: () => "",
+    };
+    stream_settings_components.set_archived_status_filters_for_tests(filters_dropdown_widget);
+
+    const folder_filter_dropdown_widget = {
+        render: function render() {},
+        value: () => -2,
+    };
+    stream_settings_components.set_folder_filter_for_tests(folder_filter_dropdown_widget);
+
     stream_settings_ui.render_left_panel_superset();
 
     const sub_stubs = [];
@@ -195,6 +249,11 @@ run_test("redraw_left_panel", ({mock_template}) => {
     }
 
     $.create("#channels_overlay_container .stream-row", {children: sub_stubs});
+
+    const $no_streams_message = $(".no-streams-to-show");
+    const $child_element = $(".subscribed_streams_tab_empty_text");
+    $no_streams_message.children = () => $child_element;
+    $child_element.hide = () => [];
 
     let ui_called = false;
     scroll_util.reset_scrollbar = ($elem) => {
@@ -218,58 +277,46 @@ run_test("redraw_left_panel", ({mock_template}) => {
     }
 
     // Search with single keyword
-    test_filter({input: "Po", show_subscribed: false, show_not_subscribed: false}, [
-        poland,
-        pomona,
-    ]);
+    test_filter({input: "Po", show_subscribed: false, show_available: false}, [poland, pomona]);
     assert.ok(ui_called);
 
     // The denmark row is active, even though it's not displayed.
     assert.ok($denmark_row.hasClass("active"));
 
     // Search with multiple keywords
-    test_filter({input: "Denmark, Pol", show_subscribed: false, show_not_subscribed: false}, [
+    test_filter({input: "Denmark, Pol", show_subscribed: false, show_available: false}, [
         denmark,
         poland,
     ]);
-    test_filter({input: "Den, Pol", show_subscribed: false, show_not_subscribed: false}, [
+    test_filter({input: "Den, Pol", show_subscribed: false, show_available: false}, [
         denmark,
         poland,
     ]);
 
     // Search is case-insensitive
-    test_filter({input: "po", show_subscribed: false, show_not_subscribed: false}, [
-        poland,
-        pomona,
-    ]);
+    test_filter({input: "po", show_subscribed: false, show_available: false}, [poland, pomona]);
 
     // Search handles unusual characters like C++
-    test_filter({input: "c++", show_subscribed: false, show_not_subscribed: false}, [cpp]);
+    test_filter({input: "c++", show_subscribed: false, show_available: false}, [cpp]);
 
     // Search subscribed streams only
-    test_filter({input: "d", show_subscribed: true, show_not_subscribed: false}, [poland]);
+    test_filter({input: "d", show_subscribed: true, show_available: false}, [poland]);
 
     // Search unsubscribed streams only
-    test_filter({input: "d", show_subscribed: false, show_not_subscribed: true}, [abcd, denmark]);
+    test_filter({input: "d", show_subscribed: false, show_available: true}, [abcd, denmark]);
 
     // Search terms match stream description
-    test_filter({input: "Co", show_subscribed: false, show_not_subscribed: false}, [
-        denmark,
-        pomona,
-    ]);
+    test_filter({input: "Co", show_subscribed: false, show_available: false}, [denmark, pomona]);
 
     // Search names AND descriptions
-    test_filter({input: "Mon", show_subscribed: false, show_not_subscribed: false}, [
-        pomona,
-        poland,
-    ]);
+    test_filter({input: "Mon", show_subscribed: false, show_available: false}, [pomona, poland]);
 
     // Explicitly order streams by name
     test_filter(
         {
             input: "",
             show_subscribed: false,
-            show_not_subscribed: false,
+            show_available: false,
             sort_order: "by-stream-name",
         },
         [abcd, cpp, denmark, jerry, poland, pomona, utopia, zzyzx],
@@ -280,7 +327,7 @@ run_test("redraw_left_panel", ({mock_template}) => {
         {
             input: "",
             show_subscribed: false,
-            show_not_subscribed: false,
+            show_available: false,
             sort_order: "by-subscriber-count",
         },
         [utopia, abcd, poland, cpp, zzyzx, denmark, jerry, pomona],
@@ -291,7 +338,7 @@ run_test("redraw_left_panel", ({mock_template}) => {
         {
             input: "",
             show_subscribed: false,
-            show_not_subscribed: false,
+            show_available: false,
             sort_order: "by-weekly-traffic",
         },
         [poland, utopia, cpp, zzyzx, jerry, abcd, pomona, denmark],
@@ -302,7 +349,7 @@ run_test("redraw_left_panel", ({mock_template}) => {
         {
             input: "",
             show_subscribed: true,
-            show_not_subscribed: false,
+            show_available: false,
             sort_order: "by-subscriber-count",
         },
         [poland, cpp, zzyzx, pomona],
@@ -313,7 +360,7 @@ run_test("redraw_left_panel", ({mock_template}) => {
         {
             input: "",
             show_subscribed: false,
-            show_not_subscribed: true,
+            show_available: true,
             sort_order: "by-subscriber-count",
         },
         [utopia, abcd, denmark, jerry],
@@ -333,6 +380,7 @@ run_test("redraw_left_panel", ({mock_template}) => {
     test_filter({input: "d", show_subscribed: true}, [poland]);
     assert.ok($(".stream-row-denmark").hasClass("active"));
 
+    $(".stream-row.active").attr("data-stream-id", 101);
     stream_settings_ui.switch_stream_tab("subscribed");
     assert.ok(!$(".stream-row-denmark").hasClass("active"));
     assert.ok(!$(".right .settings").visible());

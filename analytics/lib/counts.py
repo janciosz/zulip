@@ -2,11 +2,12 @@ import logging
 import time
 from collections import OrderedDict, defaultdict
 from collections.abc import Callable, Sequence
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import TypeAlias, Union
 
 from django.conf import settings
 from django.db import connection, models
+from django.utils.timezone import now as timezone_now
 from psycopg2.sql import SQL, Composable, Identifier, Literal
 from typing_extensions import override
 
@@ -37,6 +38,7 @@ logger = logging.getLogger("zulip.analytics")
 
 # You can't subtract timedelta.max from a datetime, so use this instead
 TIMEDELTA_MAX = timedelta(days=365 * 1000)
+
 
 ## Class definitions ##
 
@@ -81,6 +83,27 @@ class CountStat:
         if fillstate.state == FillState.DONE:
             return fillstate.end_time
         return fillstate.end_time - self.time_increment
+
+    def current_month_accumulated_count_for_user(self, user: UserProfile) -> int:
+        now = timezone_now()
+        start_of_month = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
+        if now.month == 12:  # nocoverage
+            start_of_next_month = datetime(now.year + 1, 1, 1, tzinfo=timezone.utc)
+        else:  # nocoverage
+            start_of_next_month = datetime(now.year, now.month + 1, 1, tzinfo=timezone.utc)
+
+        # We just want to check we are not using BaseCount, otherwise all
+        # `output_table` have `objects` property.
+        assert self.data_collector.output_table == UserCount
+        result = self.data_collector.output_table.objects.filter(  # type: ignore[attr-defined] # see above
+            user=user,
+            property=self.property,
+            end_time__gt=start_of_month,
+            end_time__lte=start_of_next_month,
+        ).aggregate(models.Sum("value"))
+
+        total_value = result["value__sum"] or 0
+        return total_value
 
 
 class LoggingCountStat(CountStat):
@@ -608,9 +631,9 @@ def count_message_type_by_user_query(realm: Realm | None) -> QueryFn:
     (
         SELECT zerver_userprofile.realm_id, zerver_userprofile.id, count(*),
         CASE WHEN
-                  zerver_recipient.type = 1 THEN 'private_message'
+                  zerver_recipient.type = 1 OR (zerver_recipient.type = 3 AND zerver_huddle.group_size <= 2) THEN 'private_message'
              WHEN
-                  zerver_recipient.type = 3 THEN 'huddle_message'
+                  zerver_recipient.type = 3 AND zerver_huddle.group_size > 2 THEN 'huddle_message'
              WHEN
                   zerver_stream.invite_only = TRUE THEN 'private_stream'
              ELSE 'public_stream'
@@ -627,12 +650,15 @@ def count_message_type_by_user_query(realm: Realm | None) -> QueryFn:
         JOIN zerver_recipient
         ON
             zerver_message.recipient_id = zerver_recipient.id
+        LEFT JOIN zerver_huddle
+        ON
+            zerver_recipient.type_id = zerver_huddle.id
         LEFT JOIN zerver_stream
         ON
             zerver_recipient.type_id = zerver_stream.id
         GROUP BY
             zerver_userprofile.realm_id, zerver_userprofile.id,
-            zerver_recipient.type, zerver_stream.invite_only
+            zerver_recipient.type, zerver_stream.invite_only, zerver_huddle.group_size
     ) AS subquery
     GROUP BY realm_id, id, message_type
 """
@@ -851,6 +877,9 @@ def get_count_stats(realm: Realm | None = None) -> dict[str, CountStat]:
             ),
             CountStat.DAY,
         ),
+        # AI credit usage stats for users, in units of $1/10^9, which is safe for
+        # aggregation because we're using bigints for the values.
+        LoggingCountStat("ai_credit_usage::day", UserCount, CountStat.DAY),
         # Counts the number of active users in the UserProfile.is_active sense.
         # Important that this stay a daily stat, so that 'realm_active_humans::day' works as expected.
         CountStat(

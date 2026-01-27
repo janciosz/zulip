@@ -18,13 +18,26 @@ export type SettingsSubscription = StreamSubscription & {
     can_change_name_description: boolean;
     should_display_subscription_button: boolean;
     should_display_preview_button: boolean;
-    can_change_stream_permissions: boolean;
+    can_change_stream_permissions_requiring_content_access: boolean;
+    can_change_stream_permissions_requiring_metadata_access: boolean;
     can_access_subscribers: boolean;
     can_add_subscribers: boolean;
     can_remove_subscribers: boolean;
+    can_archive_stream: boolean;
     preview_url: string;
     is_old_stream: boolean;
     subscriber_count: number;
+};
+
+export const ARCHIVED_STATUS_FILTERS = {
+    ALL_CHANNELS: "all_channels",
+    NON_ARCHIVED_CHANNELS: "non_archived_channels",
+    ARCHIVED_CHANNELS: "archived_channels",
+};
+
+export const FOLDER_FILTERS = {
+    UNCATEGORIZED_DROPDOWN_OPTION: -1,
+    ANY_FOLDER_DROPDOWN_OPTION: -2,
 };
 
 export function get_sub_for_settings(sub: StreamSubscription): SettingsSubscription {
@@ -40,18 +53,21 @@ export function get_sub_for_settings(sub: StreamSubscription): SettingsSubscript
 
         is_creator: sub.creator_id === current_user.user_id,
         is_realm_admin: current_user.is_admin,
-        // Admin can change any stream's name & description either stream is public or
-        // private, subscribed or unsubscribed.
-        can_change_name_description: stream_data.can_edit_description(sub),
+        can_change_name_description:
+            stream_data.can_change_permissions_requiring_metadata_access(sub),
 
         should_display_subscription_button: stream_data.can_toggle_subscription(sub),
         should_display_preview_button: stream_data.can_preview(sub),
-        can_change_stream_permissions: stream_data.can_change_permissions(sub),
+        can_change_stream_permissions_requiring_content_access:
+            stream_data.can_change_permissions_requiring_content_access(sub),
+        can_change_stream_permissions_requiring_metadata_access:
+            stream_data.can_change_permissions_requiring_metadata_access(sub),
         can_access_subscribers: stream_data.can_view_subscribers(sub),
         can_add_subscribers: stream_data.can_subscribe_others(sub),
         can_remove_subscribers: stream_data.can_unsubscribe_others(sub),
+        can_archive_stream: stream_data.can_archive_stream(sub),
 
-        preview_url: hash_util.by_stream_url(sub.stream_id),
+        preview_url: hash_util.channel_url_by_user_setting(sub.stream_id),
         is_old_stream: sub.stream_weekly_traffic !== null,
 
         subscriber_count: peer_data.get_subscriber_count(sub.stream_id),
@@ -63,7 +79,7 @@ function get_subs_for_settings(subs: StreamSubscription[]): SettingsSubscription
     // delegating, so that we can more efficiently compute subscriber counts
     // (in bulk).  If that plan appears to have been aborted, feel free to
     // inline this.
-    return subs.filter((sub) => !sub.is_archived).map((sub) => get_sub_for_settings(sub));
+    return subs.map((sub) => get_sub_for_settings(sub));
 }
 
 export function get_updated_unsorted_subs(): SettingsSubscription[] {
@@ -86,7 +102,7 @@ export function get_unmatched_streams_for_notification_settings(): ({
     invite_only: boolean;
     is_web_public: boolean;
 })[] {
-    const subscribed_rows = stream_data.subscribed_subs();
+    const subscribed_rows = stream_data.subscribed_subs().filter((sub) => !sub.is_archived);
     subscribed_rows.sort((a, b) => util.strcmp(a.name, b.name));
 
     const notification_settings = [];
@@ -133,14 +149,12 @@ export function get_unmatched_streams_for_notification_settings(): ({
 }
 
 export function get_streams_for_settings_page(): SettingsSubscription[] {
-    // TODO: This function is only used for copy-from-stream, so
-    //       the current name is slightly misleading now, plus
-    //       it's not entirely clear we need unsubscribed streams
-    //       for that.  Also we may be revisiting that UI.
-
-    // Build up our list of subscribed streams from the data we already have.
-    const subscribed_rows = stream_data.subscribed_subs();
-    const unsubscribed_rows = stream_data.unsubscribed_subs();
+    // Build up our list of non-archived subscribed and unsubscribed
+    // streams from the data we already have.
+    const subscribed_rows = stream_data.subscribed_subs().filter((stream) => !stream.is_archived);
+    const unsubscribed_rows = stream_data
+        .unsubscribed_subs()
+        .filter((stream) => !stream.is_archived);
 
     // Sort and combine all our streams.
     function by_name(a: StreamSubscription, b: StreamSubscription): number {

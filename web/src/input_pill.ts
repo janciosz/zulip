@@ -15,6 +15,7 @@ export type InputPillConfig = {
     exclude_inaccessible_users?: boolean;
     setting_name?: string;
     setting_type?: "realm" | "stream" | "group";
+    user_id?: number;
 };
 
 type InputPillCreateOptions<ItemType> = {
@@ -29,7 +30,7 @@ type InputPillCreateOptions<ItemType> = {
     ) => ItemType | undefined;
     get_text_from_item: (item: ItemType) => string;
     get_display_value_from_item: (item: ItemType) => string;
-    generate_pill_html?: (item: ItemType) => string;
+    generate_pill_html?: (item: ItemType, disabled?: boolean) => string;
     on_pill_exit?: (
         clicked_pill: HTMLElement,
         all_pills: InputPill<ItemType>[],
@@ -41,6 +42,7 @@ type InputPillCreateOptions<ItemType> = {
 export type InputPill<ItemType> = {
     item: ItemType;
     $element: JQuery;
+    disabled: boolean;
 };
 
 type InputPillStore<ItemType> = {
@@ -56,6 +58,7 @@ type InputPillStore<ItemType> = {
     on_pill_exit: InputPillCreateOptions<ItemType>["on_pill_exit"];
     onPillCreate?: () => void;
     onPillRemove?: (pill: InputPill<ItemType>, trigger: RemovePillTrigger) => void;
+    onPillExpand?: (pill: JQuery) => void;
     createPillonPaste?: () => void;
     split_text_on_comma: boolean;
     convert_to_pill_on_enter: boolean;
@@ -65,13 +68,20 @@ type InputPillStore<ItemType> = {
 // These are the functions that are exposed to other modules.
 export type InputPillContainer<ItemType> = {
     appendValue: (text: string) => void;
-    appendValidatedData: (item: ItemType) => void;
+    appendValidatedData: (item: ItemType, disabled?: boolean, quiet?: boolean) => void;
     getByElement: (element: HTMLElement) => InputPill<ItemType> | undefined;
+    getPillByPredicate: (predicate: (item: ItemType) => boolean) => InputPill<ItemType> | undefined;
+    updatePill: (element: HTMLElement, new_item: ItemType) => void;
     items: () => ItemType[];
+    removePill: (
+        element: HTMLElement,
+        trigger: RemovePillTrigger,
+    ) => InputPill<ItemType> | undefined;
     onPillCreate: (callback: () => void) => void;
     onPillRemove: (
         callback: (pill: InputPill<ItemType>, trigger: RemovePillTrigger) => void,
     ) => void;
+    onPillExpand: (callback: (pill: JQuery) => void) => void;
     onTextInputHook: (callback: () => void) => void;
     createPillonPaste: (callback: () => void) => void;
     clear: (quiet?: boolean) => void;
@@ -147,20 +157,25 @@ export function create<ItemType extends {type: string}>(
             return item;
         },
 
+        // Helper to generate pill HTML with the appropriate renderer
+        generatePillHtml(item: ItemType, disabled: boolean): string {
+            if (store.generate_pill_html !== undefined) {
+                return store.generate_pill_html(item, disabled);
+            }
+            return render_input_pill({
+                display_value: store.get_display_value_from_item(item),
+                disabled,
+            });
+        },
+
         // This is generally called by typeahead logic, where we have all
         // the data we need (as opposed to, say, just a user-typed email).
-        appendValidatedData(item: ItemType) {
-            let pill_html;
-            if (store.generate_pill_html !== undefined) {
-                pill_html = store.generate_pill_html(item);
-            } else {
-                pill_html = render_input_pill({
-                    display_value: store.get_display_value_from_item(item),
-                });
-            }
+        appendValidatedData(item: ItemType, disabled = false, quiet = false) {
+            const pill_html = funcs.generatePillHtml(item, disabled);
             const payload: InputPill<ItemType> = {
                 item,
                 $element: $(pill_html),
+                disabled,
             };
 
             store.pills.push(payload);
@@ -175,7 +190,7 @@ export function create<ItemType extends {type: string}>(
             // manually clear it here.
             this.clear_text();
 
-            if (store.onPillCreate !== undefined) {
+            if (!quiet && store.onPillCreate !== undefined) {
                 store.onPillCreate();
             }
         },
@@ -210,6 +225,9 @@ export function create<ItemType extends {type: string}>(
             const idx = store.pills.findIndex((pill) => pill.$element[0] === element);
 
             if (idx !== -1) {
+                if (store.pills[idx]!.disabled) {
+                    return undefined;
+                }
                 store.pills[idx]!.$element.remove();
                 const pill = util.the(store.pills.splice(idx, 1));
                 if (store.onPillRemove !== undefined) {
@@ -235,7 +253,7 @@ export function create<ItemType extends {type: string}>(
         removeLastPill(trigger: RemovePillTrigger, quiet?: boolean) {
             const pill = store.pills.pop();
 
-            if (pill) {
+            if (pill && !pill.disabled) {
                 pill.$element.remove();
                 if (!quiet && store.onPillRemove !== undefined) {
                     store.onPillRemove(pill, trigger);
@@ -280,6 +298,34 @@ export function create<ItemType extends {type: string}>(
             return store.pills.find((pill) => pill.$element[0] === element);
         },
 
+        // This searches for a pill using a predicate function and returns it,
+        // or undefined if no pill matches.
+        getPillByPredicate(
+            predicate: (item: ItemType) => boolean,
+        ): InputPill<ItemType> | undefined {
+            return store.pills.find((pill) => predicate(pill.item));
+        },
+
+        // Updates a pill's item data and refreshes its HTML representation in-place.
+        // This is useful for real-time updates like user deactivated status.
+        updatePill(element: HTMLElement, new_item: ItemType): void {
+            const pill = this.getByElement(element);
+            if (!pill) {
+                return;
+            }
+
+            // Update the item data
+            pill.item = new_item;
+
+            // Regenerate the pill HTML with updated data
+            const pill_html = funcs.generatePillHtml(new_item, pill.disabled);
+
+            // Replace the pill element in the DOM
+            const $new_element = $(pill_html);
+            pill.$element.replaceWith($new_element);
+            pill.$element = $new_element;
+        },
+
         _get_pills_for_testing() {
             return store.pills;
         },
@@ -321,8 +367,8 @@ export function create<ItemType extends {type: string}>(
                     if (ret) {
                         // clear the input.
                         funcs.clear(this);
-                        e.stopPropagation();
                     }
+                    e.stopPropagation();
                 }
 
                 return;
@@ -458,6 +504,15 @@ export function create<ItemType extends {type: string}>(
             store.$input.trigger("focus");
         });
 
+        store.$parent.on("click", ".expand", function (this: HTMLElement, e) {
+            assert(store.onPillExpand !== undefined);
+            e.stopPropagation();
+            store.onPillExpand($(this).closest(".pill"));
+            const pill = util.the($(this).closest(".pill"));
+            funcs.removePill(pill, "close");
+            store.$input.trigger("focus");
+        });
+
         store.$parent.on("click", function (e) {
             if ($(e.target).is(".pill-container")) {
                 $(this).find(".input").trigger("focus");
@@ -478,8 +533,11 @@ export function create<ItemType extends {type: string}>(
         appendValidatedData: funcs.appendValidatedData.bind(funcs),
 
         getByElement: funcs.getByElement.bind(funcs),
+        getPillByPredicate: funcs.getPillByPredicate.bind(funcs),
+        updatePill: funcs.updatePill.bind(funcs),
         getCurrentText: funcs.getCurrentText.bind(funcs),
         items: funcs.items.bind(funcs),
+        removePill: funcs.removePill.bind(funcs),
 
         onPillCreate(callback) {
             store.onPillCreate = callback;
@@ -487,6 +545,10 @@ export function create<ItemType extends {type: string}>(
 
         onPillRemove(callback) {
             store.onPillRemove = callback;
+        },
+
+        onPillExpand(callback) {
+            store.onPillExpand = callback;
         },
 
         onTextInputHook(callback) {

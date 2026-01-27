@@ -11,10 +11,11 @@ from zerver.lib.message_cache import MessageDict, sew_messages_and_reactions
 from zerver.lib.per_request_cache import flush_per_request_caches
 from zerver.lib.test_classes import ZulipTestCase
 from zerver.lib.test_helpers import make_client
-from zerver.lib.topic import TOPIC_LINKS
+from zerver.lib.topic import TOPIC_LINKS, TOPIC_NAME
 from zerver.lib.types import DisplayRecipientT, UserDisplayRecipient
 from zerver.models import Message, Reaction, Realm, RealmFilter, Recipient, Stream, UserProfile
-from zerver.models.realms import get_realm
+from zerver.models.realms import MessageEditHistoryVisibilityPolicyEnum, get_realm
+from zerver.models.recipients import get_or_create_direct_message_group
 from zerver.models.streams import get_stream
 
 
@@ -421,7 +422,7 @@ class MessageHydrationTest(ZulipTestCase):
             apply_markdown=True,
             client_gravatar=True,
             allow_empty_topic_name=True,
-            allow_edit_history=False,
+            message_edit_history_visibility_policy=MessageEditHistoryVisibilityPolicyEnum.none.value,
             user_profile=cordelia,
             realm=cordelia.realm,
         )
@@ -470,7 +471,7 @@ class MessageHydrationTest(ZulipTestCase):
             apply_markdown=True,
             client_gravatar=True,
             allow_empty_topic_name=True,
-            allow_edit_history=False,
+            message_edit_history_visibility_policy=MessageEditHistoryVisibilityPolicyEnum.none.value,
             user_profile=self.example_user("polonius"),
             realm=realm,
         )
@@ -516,7 +517,59 @@ class MessageHydrationTest(ZulipTestCase):
             apply_markdown=True,
             client_gravatar=True,
             allow_empty_topic_name=True,
-            allow_edit_history=False,
+            message_edit_history_visibility_policy=MessageEditHistoryVisibilityPolicyEnum.none.value,
+            user_profile=cordelia,
+            realm=cordelia.realm,
+        )
+        message = messages[0]
+
+        # Find which display_recipient in the list is cordelia:
+        for display_recipient in message["display_recipient"]:
+            if display_recipient["id"] == cordelia.id:
+                cordelia_display_recipient = display_recipient
+
+        # Make sure the email is up-to-date.
+        self.assertEqual(cordelia_display_recipient["email"], cordelia_new_email)
+
+    def test_display_recipient_up_to_date_when_direct_message_group_exist(self) -> None:
+        """
+        This is a test for a bug where due to caching of message_dicts,
+        after updating a user's information, fetching those cached messages
+        via messages_for_ids would return message_dicts with display_recipient
+        still having the old information. The returned message_dicts should have
+        up-to-date display_recipients and we check for that here.
+        """
+
+        hamlet = self.example_user("hamlet")
+        cordelia = self.example_user("cordelia")
+
+        direct_message_group = get_or_create_direct_message_group([hamlet.id, cordelia.id])
+
+        message_id = self.send_personal_message(hamlet, cordelia, "test")
+
+        recipient = direct_message_group.recipient
+        # Cause the display_recipient to get cached:
+        assert recipient is not None
+        get_display_recipient(recipient)
+
+        # Change cordelia's email:
+        cordelia_new_email = "new-cordelia@zulip.com"
+        cordelia.email = cordelia_new_email
+        cordelia.save()
+
+        # Local display_recipient cache needs to be flushed.
+        # flush_per_request_caches() is called after every request,
+        # so it makes sense to run it here.
+        flush_per_request_caches()
+
+        messages = messages_for_ids(
+            message_ids=[message_id],
+            user_message_flags={message_id: ["read"]},
+            search_fields={},
+            apply_markdown=True,
+            client_gravatar=True,
+            allow_empty_topic_name=True,
+            message_edit_history_visibility_policy=MessageEditHistoryVisibilityPolicyEnum.none.value,
             user_profile=cordelia,
             realm=cordelia.realm,
         )
@@ -562,7 +615,7 @@ class TestMessageForIdsDisplayRecipientFetching(ZulipTestCase):
             apply_markdown=True,
             client_gravatar=True,
             allow_empty_topic_name=True,
-            allow_edit_history=False,
+            message_edit_history_visibility_policy=MessageEditHistoryVisibilityPolicyEnum.none.value,
             user_profile=cordelia,
             realm=cordelia.realm,
         )
@@ -586,7 +639,7 @@ class TestMessageForIdsDisplayRecipientFetching(ZulipTestCase):
             apply_markdown=True,
             client_gravatar=True,
             allow_empty_topic_name=True,
-            allow_edit_history=False,
+            message_edit_history_visibility_policy=MessageEditHistoryVisibilityPolicyEnum.none.value,
             user_profile=cordelia,
             realm=cordelia.realm,
         )
@@ -611,7 +664,7 @@ class TestMessageForIdsDisplayRecipientFetching(ZulipTestCase):
             apply_markdown=True,
             client_gravatar=True,
             allow_empty_topic_name=True,
-            allow_edit_history=False,
+            message_edit_history_visibility_policy=MessageEditHistoryVisibilityPolicyEnum.none.value,
             user_profile=cordelia,
             realm=cordelia.realm,
         )
@@ -648,7 +701,7 @@ class TestMessageForIdsDisplayRecipientFetching(ZulipTestCase):
             apply_markdown=True,
             client_gravatar=True,
             allow_empty_topic_name=True,
-            allow_edit_history=False,
+            message_edit_history_visibility_policy=MessageEditHistoryVisibilityPolicyEnum.none.value,
             user_profile=cordelia,
             realm=cordelia.realm,
         )
@@ -663,6 +716,43 @@ class TestMessageForIdsDisplayRecipientFetching(ZulipTestCase):
             messages[4]["display_recipient"], [hamlet, cordelia, othello, iago]
         )
         self._verify_display_recipient(messages[5]["display_recipient"], [cordelia, othello])
+
+    def test_topic_field(self) -> None:
+        hamlet = self.example_user("hamlet")
+        cordelia = self.example_user("cordelia")
+        othello = self.example_user("othello")
+        iago = self.example_user("iago")
+
+        self.subscribe(cordelia, "Denmark")
+        self.subscribe(hamlet, "Scotland")
+
+        message_ids = [
+            self.send_group_direct_message(hamlet, [cordelia, othello], "test"),
+            self.send_stream_message(cordelia, "Verona", content="test"),
+            self.send_personal_message(hamlet, cordelia, "test"),
+            self.send_stream_message(cordelia, "Denmark", content="test"),
+            self.send_group_direct_message(cordelia, [hamlet, othello, iago], "test"),
+            self.send_personal_message(cordelia, othello, "test"),
+        ]
+
+        messages = messages_for_ids(
+            message_ids=message_ids,
+            user_message_flags={message_id: ["read"] for message_id in message_ids},
+            search_fields={},
+            apply_markdown=True,
+            client_gravatar=True,
+            allow_empty_topic_name=True,
+            message_edit_history_visibility_policy=MessageEditHistoryVisibilityPolicyEnum.none.value,
+            user_profile=cordelia,
+            realm=cordelia.realm,
+        )
+        self.assertEqual(messages[0][TOPIC_NAME], "")
+        self.assertEqual(messages[2][TOPIC_NAME], "")
+        self.assertEqual(messages[4][TOPIC_NAME], "")
+        self.assertEqual(messages[5][TOPIC_NAME], "")
+
+        self.assertEqual(messages[1][TOPIC_NAME], "test")
+        self.assertEqual(messages[3][TOPIC_NAME], "test")
 
 
 class SewMessageAndReactionTest(ZulipTestCase):

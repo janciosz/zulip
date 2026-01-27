@@ -6,7 +6,7 @@ import * as tippy from "tippy.js";
 import render_drafts_tooltip from "../templates/drafts_tooltip.hbs";
 import render_narrow_to_compose_recipients_tooltip from "../templates/narrow_to_compose_recipients_tooltip.hbs";
 
-import * as compose_recipient from "./compose_recipient.ts";
+import * as blueslip from "./blueslip.ts";
 import * as compose_state from "./compose_state.ts";
 import * as compose_validate from "./compose_validate.ts";
 import {$t} from "./i18n.ts";
@@ -14,9 +14,85 @@ import {pick_empty_narrow_banner} from "./narrow_banner.ts";
 import * as narrow_state from "./narrow_state.ts";
 import * as popover_menus from "./popover_menus.ts";
 import {realm} from "./state_data.ts";
-import {EXTRA_LONG_HOVER_DELAY, INSTANT_HOVER_DELAY, LONG_HOVER_DELAY} from "./tippyjs.ts";
+import * as stream_data from "./stream_data.ts";
+import {
+    EXTRA_LONG_HOVER_DELAY,
+    INSTANT_HOVER_DELAY,
+    LONG_HOVER_DELAY,
+    SINGLETON_INSTANT_HOVER_DELAY,
+    SINGLETON_LONG_HOVER_DELAY,
+    get_tooltip_content,
+} from "./tippyjs.ts";
 import {parse_html} from "./ui_util.ts";
 import {user_settings} from "./user_settings.ts";
+
+type SingletonContext = "compose" | `edit_message:${string}`;
+type SingletonTooltips = {
+    tooltip_instances: tippy.Instance[] | null;
+    singleton_instance: tippy.CreateSingletonInstance | null;
+};
+
+const compose_button_singleton_context_map = new Map<SingletonContext, SingletonTooltips>();
+
+// Ensure proper teardown of singleton instances, especially for "Save/Cancel" actions or when handling edit window time limits.
+// Reference: http://atomiks.github.io/tippyjs/v6/addons/#destroy
+export function clean_up_compose_singleton_tooltip(context: SingletonContext): void {
+    const singleton_tooltips = compose_button_singleton_context_map.get(context);
+    if (singleton_tooltips) {
+        singleton_tooltips.singleton_instance?.destroy();
+        if (singleton_tooltips.tooltip_instances) {
+            for (const tippy_instance of singleton_tooltips.tooltip_instances) {
+                if (!tippy_instance.state.isDestroyed) {
+                    tippy_instance.destroy();
+                }
+            }
+        }
+        compose_button_singleton_context_map.delete(context);
+    }
+}
+
+export function initialize_compose_tooltips(context: SingletonContext, selector: string): void {
+    // Listen on body for the very first mouseenter on any element matching `selector`
+    $(document.body).one("mousemove", selector, (e) => {
+        // Clean up existing instances first
+        clean_up_compose_singleton_tooltip(context);
+
+        const tooltip_instances = tippy.default(selector, {
+            trigger: "mouseenter",
+            appendTo: () => document.body,
+            placement: "top",
+        });
+
+        const singleton_instance = tippy.createSingleton(tooltip_instances, {
+            delay: LONG_HOVER_DELAY,
+            appendTo: () => document.body,
+            onTrigger(instance, event) {
+                const currentTarget = event.currentTarget;
+                if (currentTarget instanceof HTMLElement) {
+                    const content = get_tooltip_content(currentTarget);
+                    if (content) {
+                        instance.setContent(content);
+                    }
+                    if (currentTarget.classList?.contains("disabled-on-hover")) {
+                        instance.setProps({delay: SINGLETON_INSTANT_HOVER_DELAY});
+                    } else {
+                        instance.setProps({delay: SINGLETON_LONG_HOVER_DELAY});
+                    }
+                }
+            },
+        });
+
+        // Show the tooltip since user has hovered over the element.
+        if (e.currentTarget instanceof HTMLElement) {
+            e.currentTarget.dispatchEvent(new MouseEvent("mouseenter"));
+        }
+
+        compose_button_singleton_context_map.set(context, {
+            tooltip_instances,
+            singleton_instance,
+        });
+    });
+}
 
 export function initialize(): void {
     tippy.delegate("body", {
@@ -49,7 +125,9 @@ export function initialize(): void {
             const button_type = $elem.attr("data-reply-button-type");
             switch (button_type) {
                 case "direct_disabled": {
-                    instance.setContent(pick_empty_narrow_banner().title);
+                    const narrow_filter = narrow_state.filter();
+                    assert(narrow_filter !== undefined);
+                    instance.setContent(pick_empty_narrow_banner(narrow_filter).title);
                     return;
                 }
                 case "stream_disabled": {
@@ -112,9 +190,16 @@ export function initialize(): void {
                         ),
                     );
                 } else {
-                    instance.setContent(
-                        parse_html($("#new_topic_message_button_tooltip_template").html()),
-                    );
+                    const stream_id = narrow_state.stream_id()!;
+                    if (!stream_data.can_create_new_topics_in_stream(stream_id)) {
+                        instance.setContent(
+                            parse_html($("#new_message_button_tooltip_template").html()),
+                        );
+                    } else {
+                        instance.setContent(
+                            parse_html($("#new_topic_message_button_tooltip_template").html()),
+                        );
+                    }
                 }
                 return undefined;
             }
@@ -127,40 +212,6 @@ export function initialize(): void {
         },
         onHidden(instance) {
             instance.destroy();
-        },
-    });
-
-    tippy.delegate("body", {
-        // Only display Tippy content on classes accompanied by a `data-` attribute.
-        target: `
-        .compose_control_button[data-tooltip-template-id],
-        .compose_control_button[data-tippy-content],
-        .compose_control_button_container
-        `,
-        // Add some additional delay when they open
-        // so that regular users don't have to see
-        // them unless they want to.
-        delay: LONG_HOVER_DELAY,
-        // By default, tippyjs uses a trigger value of "mouseenter focus",
-        // which means the tooltips can appear either when the element is
-        // hovered over or when it receives focus (e.g. by being clicked).
-        // However, we only want the tooltips to appear on hover, not on click.
-        // Therefore, we need to remove the "focus" trigger from the buttons,
-        // so that the tooltips don't appear when the buttons are clicked.
-        trigger: "mouseenter",
-        // This ensures that the upload files tooltip
-        // doesn't hide behind the left sidebar.
-        appendTo: () => document.body,
-        // If the button is `.disabled-on-hover`, then we want to show the
-        // tooltip instantly, to make it clear to the user that the button
-        // is disabled, and why.
-        onTrigger(instance, event) {
-            assert(event.currentTarget instanceof HTMLElement);
-            if (event.currentTarget.classList.contains("disabled-on-hover")) {
-                instance.setProps({delay: INSTANT_HOVER_DELAY});
-            } else {
-                instance.setProps({delay: LONG_HOVER_DELAY});
-            }
         },
     });
 
@@ -208,17 +259,43 @@ export function initialize(): void {
 
     tippy.delegate("body", {
         target: "#compose-send-button",
-        delay: EXTRA_LONG_HOVER_DELAY,
+        // 350px at 14px/1em
+        maxWidth: "25em",
         // By default, tippyjs uses a trigger value of "mouseenter focus",
         // but by specifying "mouseenter", this will prevent showing the
         // Send tooltip when tabbing to the Send button.
         trigger: "mouseenter",
         appendTo: () => document.body,
+        onTrigger(instance) {
+            if (instance.reference.classList.contains("disabled-message-send-controls")) {
+                instance.setProps({
+                    delay: 0,
+                });
+            } else {
+                instance.setProps({
+                    delay: EXTRA_LONG_HOVER_DELAY,
+                });
+            }
+        },
         onShow(instance) {
-            // Don't show Send button tooltip if the popover is displayed.
+            // Don't show send-area tooltips if the popover is displayed.
             if (popover_menus.is_scheduled_messages_popover_displayed()) {
                 return false;
             }
+
+            if (instance.reference.classList.contains("disabled-message-send-controls")) {
+                const error_message = compose_validate.get_disabled_send_tooltip_html();
+                instance.setContent(parse_html(error_message));
+
+                if (!error_message) {
+                    blueslip.error("Compose send button incorrectly disabled.");
+                    // We don't return but show normal tooltip to user.
+                    instance.reference.classList.remove("disabled-message-send-controls");
+                } else {
+                    return undefined;
+                }
+            }
+
             if (user_settings.enter_sends) {
                 instance.setContent(parse_html($("#send-enter-tooltip-template").html()));
             } else {
@@ -244,7 +321,8 @@ export function initialize(): void {
                 } else if (
                     _.isEqual(narrow_filter.sorted_term_types(), ["channel"]) &&
                     compose_state.get_message_type() === "stream" &&
-                    narrow_filter.operands("channel")[0] === compose_state.stream_name()
+                    narrow_filter.terms_with_operator("channel")[0]!.operand ===
+                        compose_state.stream_name()
                 ) {
                     display_current_view = $t({
                         defaultMessage: "Currently viewing the entire channel.",
@@ -261,21 +339,6 @@ export function initialize(): void {
 
             return parse_html(render_narrow_to_compose_recipients_tooltip({display_current_view}));
         },
-        onHidden(instance) {
-            instance.destroy();
-        },
-    });
-
-    tippy.delegate("body", {
-        // TODO: Might need to target just the Send button itself
-        // in the new design
-        target: ".disabled-message-send-controls",
-        // 350px at 14px/1em
-        maxWidth: "25em",
-        content: () =>
-            compose_recipient.get_posting_policy_error_message() ||
-            compose_validate.get_disabled_send_tooltip(),
-        appendTo: () => document.body,
         onHidden(instance) {
             instance.destroy();
         },

@@ -8,18 +8,13 @@ from django.db import connection
 from django.utils.timezone import now as timezone_now
 from typing_extensions import override
 
+from zerver.actions.user_settings import do_change_user_setting
 from zerver.actions.users import do_deactivate_user
 from zerver.lib.presence import format_legacy_presence_dict, get_presence_dict_by_realm
 from zerver.lib.test_classes import ZulipTestCase
 from zerver.lib.test_helpers import make_client, reset_email_visibility_to_everyone_in_zulip_realm
 from zerver.lib.timestamp import datetime_to_timestamp
-from zerver.models import (
-    PushDeviceToken,
-    UserActivity,
-    UserActivityInterval,
-    UserPresence,
-    UserProfile,
-)
+from zerver.models import PushDeviceToken, UserActivityInterval, UserPresence, UserProfile
 from zerver.models.realms import get_realm
 
 
@@ -580,46 +575,6 @@ class UserPresenceTests(ZulipTestCase):
         )
         self.assertEqual(filter_presence_idle_user_ids({user_profile.id}), [])
 
-    def test_no_mit(self) -> None:
-        """Zephyr mirror realms such as MIT never get a list of users"""
-        user = self.mit_user("espuser")
-        self.login_user(user)
-        result = self.client_post("/json/users/me/presence", {"status": "idle"}, subdomain="zephyr")
-        response_dict = self.assert_json_success(result)
-        self.assertEqual(response_dict["presences"], {})
-        self.assertEqual(response_dict["presence_last_update_id"], -1)
-
-    def test_mirror_presence(self) -> None:
-        """Zephyr mirror realms find out the status of their mirror bot"""
-        user_profile = self.mit_user("espuser")
-        self.login_user(user_profile)
-
-        def post_presence() -> dict[str, Any]:
-            result = self.client_post(
-                "/json/users/me/presence", {"status": "idle"}, subdomain="zephyr"
-            )
-            json = self.assert_json_success(result)
-            return json
-
-        json = post_presence()
-        self.assertEqual(json["zephyr_mirror_active"], False)
-
-        self._simulate_mirror_activity_for_user(user_profile)
-        json = post_presence()
-        self.assertEqual(json["zephyr_mirror_active"], True)
-
-    def _simulate_mirror_activity_for_user(self, user_profile: UserProfile) -> None:
-        last_visit = timezone_now()
-        client = make_client("zephyr_mirror")
-
-        UserActivity.objects.get_or_create(
-            user_profile=user_profile,
-            client=client,
-            query="get_events",
-            count=2,
-            last_visit=last_visit,
-        )
-
     def test_same_realm(self) -> None:
         espuser = self.mit_user("espuser")
         self.login_user(espuser)
@@ -678,6 +633,31 @@ class UserPresenceTests(ZulipTestCase):
         result = self.client_get("/json/realm/presence")
         result_dict = self.assert_json_success(result)
         self.assertEqual(set(result_dict["presences"].keys()), {othello.email})
+
+    def test_query_counts(self) -> None:
+        self.login("hamlet")
+        with self.assert_database_query_count(6):
+            # 1. session
+            # 2. narrow user cache
+            # 3. client
+            # 4. lock the userpresence row
+            # 5. update the userpresence row
+            # 6. select other userpresence data
+            self.assert_json_success(
+                self.client_post("/json/users/me/presence", {"status": "active"})
+            )
+
+        with self.assert_database_query_count(3, keep_cache_warm=True):
+            # With a warm cache, we skip the first three queries
+            self.assert_json_success(
+                self.client_post("/json/users/me/presence", {"status": "active"})
+            )
+
+        with self.assert_database_query_count(3, keep_cache_warm=True):
+            # It's the same story if we're becoming idle, as well
+            self.assert_json_success(
+                self.client_post("/json/users/me/presence", {"status": "idle"})
+            )
 
 
 class SingleUserPresenceTests(ZulipTestCase):
@@ -986,6 +966,88 @@ class GetRealmStatusesTest(ZulipTestCase):
             set(json["presences"].keys()), {hamlet.email, polonius.email, othello.email}
         )
 
+    def test_do_change_user_setting_presence_enabled(self) -> None:
+        """
+        Tests the logic for backdating user's presence
+        """
+        hamlet = self.example_user("hamlet")
+        UserPresence.objects.filter(user_profile=hamlet).delete()
+        now = timezone_now()
+
+        # If the user has no presence at all, disabling presence_enabled should not change that state.
+        with time_machine.travel(now, tick=False), self.captureOnCommitCallbacks(execute=True):
+            do_change_user_setting(hamlet, "presence_enabled", False, acting_user=hamlet)
+        self.assertFalse(UserPresence.objects.filter(user_profile=hamlet).exists())
+
+        # Enabling presence_enabled creates a new, current presence record.
+        with time_machine.travel(now, tick=False), self.captureOnCommitCallbacks(execute=True):
+            do_change_user_setting(hamlet, "presence_enabled", True, acting_user=hamlet)
+
+        presence = UserPresence.objects.get(user_profile=hamlet)
+        self.assertEqual(presence.last_connected_time, now)
+        self.assertEqual(presence.last_active_time, now)
+
+        # Disabling presence_enabled with a very recent presence record will cause it to get backdated
+        # by some minutes to make the user immediately appear offline.
+        with time_machine.travel(now, tick=False), self.captureOnCommitCallbacks(execute=True):
+            do_change_user_setting(hamlet, "presence_enabled", False, acting_user=hamlet)
+        presence = UserPresence.objects.get(user_profile=hamlet)
+        self.assertEqual(
+            presence.last_connected_time,
+            now
+            - timedelta(
+                seconds=settings.OFFLINE_THRESHOLD_SECS
+                + settings.PRESENCE_UPDATE_MIN_FREQ_SECONDS
+                + 10
+            ),
+        )
+        self.assertEqual(
+            presence.last_active_time,
+            now
+            - timedelta(
+                seconds=settings.OFFLINE_THRESHOLD_SECS
+                + settings.PRESENCE_UPDATE_MIN_FREQ_SECONDS
+                + 10
+            ),
+        )
+
+        # Now we set up a very old presence record.
+        hamlet.presence_enabled = True
+        hamlet.save()
+        presence.last_connected_time = now - timedelta(days=100)
+        presence.last_active_time = now - timedelta(days=100)
+        presence.save()
+
+        # With a very old presence record, disabling presence_enabled should not change that.
+        with time_machine.travel(now, tick=False), self.captureOnCommitCallbacks(execute=True):
+            do_change_user_setting(hamlet, "presence_enabled", False, acting_user=hamlet)
+        presence = UserPresence.objects.get(user_profile=hamlet)
+        self.assertEqual(presence.last_connected_time, now - timedelta(days=100))
+        self.assertEqual(presence.last_active_time, now - timedelta(days=100))
+
+        hamlet.presence_enabled = True
+        hamlet.save()
+        # Now set up the final edge case - a very old last_active_time and a recent last_connected_time.
+        # In this case, last_connected_time should get backdated (to ensure the user appears offline),
+        # without pushing last_active_time forward.
+        presence.last_active_time = now - timedelta(days=100)
+        presence.last_connected_time = now - timedelta(seconds=1)
+        presence.save()
+
+        with time_machine.travel(now, tick=False), self.captureOnCommitCallbacks(execute=True):
+            do_change_user_setting(hamlet, "presence_enabled", False, acting_user=hamlet)
+        presence = UserPresence.objects.get(user_profile=hamlet)
+        self.assertEqual(
+            presence.last_connected_time,
+            now
+            - timedelta(
+                seconds=settings.OFFLINE_THRESHOLD_SECS
+                + settings.PRESENCE_UPDATE_MIN_FREQ_SECONDS
+                + 10
+            ),
+        )
+        self.assertEqual(presence.last_active_time, now - timedelta(days=100))
+
     def test_presence_disabled(self) -> None:
         # Disable presence status and test whether the presence
         # is reported or not.
@@ -996,23 +1058,30 @@ class GetRealmStatusesTest(ZulipTestCase):
         othello.save(update_fields=["presence_enabled"])
         hamlet.save(update_fields=["presence_enabled"])
 
+        # Verify the initial UserActivityInterval state is as expected.
+        self.assertEqual(UserActivityInterval.objects.filter(user_profile=othello).count(), 0)
+
         result = self.api_post(
             othello,
             "/api/v1/users/me/presence",
-            dict(status="active"),
+            # Include new_user_input=true to test the UserActivityInterval update
+            # codepath.
+            dict(status="active", new_user_input="true"),
             HTTP_USER_AGENT="ZulipAndroid/1.0",
         )
-
         result = self.api_post(
             hamlet,
             "/api/v1/users/me/presence",
             dict(status="idle"),
             HTTP_USER_AGENT="ZulipDesktop/1.0",
         )
+
         json = self.assert_json_success(result)
 
         # Othello's presence status is disabled so it won't be reported.
         self.assertEqual(set(json["presences"].keys()), {hamlet.email})
+        # However, the UserActivityInterval still gets updated.
+        self.assertEqual(UserActivityInterval.objects.filter(user_profile=othello).count(), 1)
 
         result = self.api_post(
             hamlet,

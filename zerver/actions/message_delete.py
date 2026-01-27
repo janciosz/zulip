@@ -1,9 +1,10 @@
+from collections import defaultdict
 from collections.abc import Iterable
 from typing import TypedDict
 
+from zerver.actions.message_flags import do_clear_mobile_push_notifications_for_ids
 from zerver.lib import retention
-from zerver.lib.message import event_recipient_ids_for_action_on_messages
-from zerver.lib.retention import move_messages_to_archive
+from zerver.lib.retention import _process_grouped_messages_deletion, move_messages_to_archive
 from zerver.models import Message, Realm, Stream, UserProfile
 from zerver.tornado.django_api import send_event_on_commit
 
@@ -48,50 +49,47 @@ def check_update_first_message_id(
 def do_delete_messages(
     realm: Realm, messages: Iterable[Message], *, acting_user: UserProfile | None
 ) -> None:
-    # messages in delete_message event belong to the same topic
-    # or is a single direct message, as any other behaviour is not possible with
-    # the current callers to this method.
-    messages = list(messages)
-    message_ids = [message.id for message in messages]
-    if not message_ids:
-        return
+    """1:1 Direct messages must be grouped to a single conversation by
+    the caller, since this logic does not know how to handle multiple
+    senders sharing a single Recipient object.
 
-    event: DeleteMessagesEvent = {
-        "type": "delete_message",
-        "message_ids": message_ids,
-    }
-
-    sample_message = messages[0]
-    message_type = "stream"
-    users_to_notify = set()
-    if not sample_message.is_stream_message():
-        assert len(messages) == 1
-        message_type = "private"
-        archiving_chunk_size = retention.MESSAGE_BATCH_SIZE
-
-    if message_type == "stream":
-        stream_id = sample_message.recipient.type_id
-        event["stream_id"] = stream_id
-        event["topic"] = sample_message.topic_name()
-        stream = Stream.objects.get(id=stream_id)
-        archiving_chunk_size = retention.STREAM_MESSAGE_BATCH_SIZE
-
-    # We exclude long-term idle users, since they by definition have no active clients.
-    users_to_notify = event_recipient_ids_for_action_on_messages(
-        messages,
-        channel=stream if message_type == "stream" else None,
+    When the Recipient.PERSONAL is no longer a case to consider, this
+    restriction can be deleted.
+    """
+    message_ids = []
+    private_messages_by_recipient: defaultdict[int, list[Message]] = defaultdict(list)
+    stream_messages_by_recipient_and_topic: defaultdict[tuple[int, str], list[Message]] = (
+        defaultdict(list)
     )
+    stream_by_recipient_id = {}
+    for message in messages:
+        message_ids.append(message.id)
+        if message.is_channel_message:
+            recipient_id = message.recipient_id
+            # topics are case-insensitive.
+            topic_name = message.topic_name().lower()
+            stream_messages_by_recipient_and_topic[(recipient_id, topic_name)].append(message)
+        else:
+            recipient_id = message.recipient.id
+            private_messages_by_recipient[recipient_id].append(message)
 
-    if acting_user is not None:
-        # Always send event to the user who deleted the message.
-        users_to_notify.add(acting_user.id)
+    do_clear_mobile_push_notifications_for_ids(user_profile_ids=None, message_ids=message_ids)
 
-    move_messages_to_archive(message_ids, realm=realm, chunk_size=archiving_chunk_size)
-    if message_type == "stream":
-        check_update_first_message_id(realm, stream, message_ids, users_to_notify)
+    for recipient_id, grouped_messages in sorted(private_messages_by_recipient.items()):
+        _process_grouped_messages_deletion(
+            realm, grouped_messages, stream=None, topic=None, acting_user=acting_user
+        )
 
-    event["message_type"] = message_type
-    send_event_on_commit(realm, event, users_to_notify)
+    for (
+        (recipient_id, topic_name),
+        grouped_messages,
+    ) in sorted(stream_messages_by_recipient_and_topic.items()):
+        if recipient_id not in stream_by_recipient_id:
+            stream_by_recipient_id[recipient_id] = Stream.objects.get(recipient_id=recipient_id)
+        stream = stream_by_recipient_id[recipient_id]
+        _process_grouped_messages_deletion(
+            realm, grouped_messages, stream=stream, topic=topic_name, acting_user=acting_user
+        )
 
 
 def do_delete_messages_by_sender(user: UserProfile) -> None:
@@ -101,5 +99,6 @@ def do_delete_messages_by_sender(user: UserProfile) -> None:
         .values_list("id", flat=True)
         .order_by("id")
     )
-    if message_ids:
-        move_messages_to_archive(message_ids, chunk_size=retention.STREAM_MESSAGE_BATCH_SIZE)
+    move_messages_to_archive(
+        message_ids, user.realm, chunk_size=retention.STREAM_MESSAGE_BATCH_SIZE
+    )

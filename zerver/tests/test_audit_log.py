@@ -1,4 +1,5 @@
 from datetime import timedelta
+from enum import Enum
 from typing import Any
 
 from django.contrib.auth.password_validation import validate_password
@@ -11,11 +12,23 @@ from zerver.actions.bots import (
     do_change_default_events_register_stream,
     do_change_default_sending_stream,
 )
+from zerver.actions.channel_folders import (
+    check_add_channel_folder,
+    do_archive_channel_folder,
+    do_change_channel_folder_description,
+    do_change_channel_folder_name,
+    do_unarchive_channel_folder,
+)
 from zerver.actions.create_realm import do_create_realm
 from zerver.actions.create_user import (
     do_activate_mirror_dummy_user,
     do_create_user,
     do_reactivate_user,
+)
+from zerver.actions.navigation_views import (
+    do_add_navigation_view,
+    do_remove_navigation_view,
+    do_update_navigation_view,
 )
 from zerver.actions.realm_domains import (
     do_add_realm_domain,
@@ -44,6 +57,7 @@ from zerver.actions.realm_settings import (
 from zerver.actions.streams import (
     bulk_add_subscriptions,
     bulk_remove_subscriptions,
+    do_change_stream_folder,
     do_change_subscription_property,
     do_deactivate_stream,
     do_rename_stream,
@@ -55,6 +69,7 @@ from zerver.actions.user_groups import (
     check_add_user_group,
     do_change_user_group_permission_setting,
     do_deactivate_user_group,
+    do_reactivate_user_group,
     do_update_user_group_description,
     do_update_user_group_name,
     remove_subgroups_from_user_group,
@@ -67,7 +82,7 @@ from zerver.actions.user_settings import (
     do_change_user_setting,
     do_regenerate_api_key,
 )
-from zerver.actions.users import do_change_user_role, do_deactivate_user
+from zerver.actions.users import do_change_is_imported_stub, do_change_user_role, do_deactivate_user
 from zerver.lib.emoji import get_emoji_file_name, get_emoji_url
 from zerver.lib.message import get_last_message_id
 from zerver.lib.stream_traffic import get_streams_traffic
@@ -93,6 +108,7 @@ from zerver.models.realm_emoji import EmojiInfo, get_all_custom_emoji_for_realm
 from zerver.models.realm_playgrounds import get_realm_playgrounds
 from zerver.models.realms import RealmDomainDict, get_realm, get_realm_domains
 from zerver.models.streams import get_stream
+from zerver.models.users import ResolvedTopicNoticeAutoReadPolicyEnum
 
 
 class TestRealmAuditLog(ZulipTestCase):
@@ -113,6 +129,9 @@ class TestRealmAuditLog(ZulipTestCase):
         now = timezone_now()
         user = do_create_user("email", "password", realm, "full_name", acting_user=None)
         do_deactivate_user(user, acting_user=user)
+
+        user.is_mirror_dummy = True
+        user.save(update_fields=["is_mirror_dummy"])
         do_activate_mirror_dummy_user(user, acting_user=user)
         do_deactivate_user(user, acting_user=user)
         do_reactivate_user(user, acting_user=user)
@@ -172,15 +191,32 @@ class TestRealmAuditLog(ZulipTestCase):
         user_profile = self.example_user("hamlet")
         acting_user = self.example_user("iago")
         do_change_user_role(
-            user_profile, UserProfile.ROLE_REALM_ADMINISTRATOR, acting_user=acting_user
+            user_profile,
+            UserProfile.ROLE_REALM_ADMINISTRATOR,
+            acting_user=acting_user,
+            notify=False,
         )
-        do_change_user_role(user_profile, UserProfile.ROLE_MEMBER, acting_user=acting_user)
-        do_change_user_role(user_profile, UserProfile.ROLE_GUEST, acting_user=acting_user)
-        do_change_user_role(user_profile, UserProfile.ROLE_MEMBER, acting_user=acting_user)
-        do_change_user_role(user_profile, UserProfile.ROLE_REALM_OWNER, acting_user=acting_user)
-        do_change_user_role(user_profile, UserProfile.ROLE_MEMBER, acting_user=acting_user)
-        do_change_user_role(user_profile, UserProfile.ROLE_MODERATOR, acting_user=acting_user)
-        do_change_user_role(user_profile, UserProfile.ROLE_MEMBER, acting_user=acting_user)
+        do_change_user_role(
+            user_profile, UserProfile.ROLE_MEMBER, acting_user=acting_user, notify=False
+        )
+        do_change_user_role(
+            user_profile, UserProfile.ROLE_GUEST, acting_user=acting_user, notify=False
+        )
+        do_change_user_role(
+            user_profile, UserProfile.ROLE_MEMBER, acting_user=acting_user, notify=False
+        )
+        do_change_user_role(
+            user_profile, UserProfile.ROLE_REALM_OWNER, acting_user=acting_user, notify=False
+        )
+        do_change_user_role(
+            user_profile, UserProfile.ROLE_MEMBER, acting_user=acting_user, notify=False
+        )
+        do_change_user_role(
+            user_profile, UserProfile.ROLE_MODERATOR, acting_user=acting_user, notify=False
+        )
+        do_change_user_role(
+            user_profile, UserProfile.ROLE_MEMBER, acting_user=acting_user, notify=False
+        )
         old_values_seen = set()
         new_values_seen = set()
         for event in RealmAuditLog.objects.filter(
@@ -279,20 +315,20 @@ class TestRealmAuditLog(ZulipTestCase):
     def test_change_email(self) -> None:
         now = timezone_now()
         user = self.example_user("hamlet")
+        original_email = user.delivery_email
         new_email = "test@example.com"
         do_change_user_delivery_email(user, new_email, acting_user=user)
-        self.assertEqual(
-            RealmAuditLog.objects.filter(
-                event_type=AuditLogEventType.USER_EMAIL_CHANGED, event_time__gte=now
-            ).count(),
-            1,
-        )
         self.assertEqual(new_email, user.delivery_email)
 
-        # Test the RealmAuditLog stringification
         audit_entry = RealmAuditLog.objects.get(
             event_type=AuditLogEventType.USER_EMAIL_CHANGED, event_time__gte=now
         )
+        self.assertEqual(audit_entry.modified_user, user)
+        self.assertEqual(
+            audit_entry.extra_data,
+            {RealmAuditLog.OLD_VALUE: original_email, RealmAuditLog.NEW_VALUE: new_email},
+        )
+        # Test the RealmAuditLog stringification
         self.assertTrue(
             repr(audit_entry).startswith(
                 f"<RealmAuditLog: {AuditLogEventType.USER_EMAIL_CHANGED.name} "
@@ -330,29 +366,37 @@ class TestRealmAuditLog(ZulipTestCase):
     def test_change_tos_version(self) -> None:
         now = timezone_now()
         user = self.example_user("hamlet")
+        old_tos_version = user.tos_version
         tos_version = "android"
         do_change_tos_version(user, tos_version)
-        self.assertEqual(
-            RealmAuditLog.objects.filter(
-                event_type=AuditLogEventType.USER_TERMS_OF_SERVICE_VERSION_CHANGED,
-                event_time__gte=now,
-            ).count(),
-            1,
+        audit_log_entries = RealmAuditLog.objects.filter(
+            event_type=AuditLogEventType.USER_TERMS_OF_SERVICE_VERSION_CHANGED, event_time__gte=now
         )
+        self.assertEqual(audit_log_entries.count(), 1)
+        expected_extra_data = {
+            RealmAuditLog.OLD_VALUE: old_tos_version,
+            RealmAuditLog.NEW_VALUE: tos_version,
+        }
+        self.assertEqual(audit_log_entries[0].extra_data, expected_extra_data)
         self.assertEqual(tos_version, user.tos_version)
 
     def test_change_bot_owner(self) -> None:
         now = timezone_now()
         admin = self.example_user("iago")
         bot = self.notification_bot(admin.realm)
+        # Check that original owner of the notification bot is the bot itself.
+        self.assertEqual(bot.bot_owner, bot)
         bot_owner = self.example_user("hamlet")
         do_change_bot_owner(bot, bot_owner, admin)
-        self.assertEqual(
-            RealmAuditLog.objects.filter(
-                event_type=AuditLogEventType.USER_BOT_OWNER_CHANGED, event_time__gte=now
-            ).count(),
-            1,
+        audit_log_entries = RealmAuditLog.objects.filter(
+            event_type=AuditLogEventType.USER_BOT_OWNER_CHANGED, event_time__gte=now
         )
+        self.assertEqual(audit_log_entries.count(), 1)
+        expected_extra_data = {
+            RealmAuditLog.OLD_VALUE: bot.id,
+            RealmAuditLog.NEW_VALUE: bot_owner.id,
+        }
+        self.assertEqual(audit_log_entries[0].extra_data, expected_extra_data)
         self.assertEqual(bot_owner, bot.bot_owner)
 
     def test_regenerate_api_key(self) -> None:
@@ -369,11 +413,10 @@ class TestRealmAuditLog(ZulipTestCase):
 
     def test_get_streams_traffic(self) -> None:
         realm = get_realm("zulip")
-        stream_name = "whatever"
-        stream = self.make_stream(stream_name, realm)
-        stream_ids = {stream.id}
+        stream = self.make_stream("whatever", realm)
+        stream_2 = self.make_stream("whatever_2", realm)
 
-        result = get_streams_traffic(stream_ids, realm)
+        result = get_streams_traffic(realm)
         self.assertEqual(result, {})
 
         StreamCount.objects.create(
@@ -383,9 +426,19 @@ class TestRealmAuditLog(ZulipTestCase):
             end_time=timezone_now(),
             value=999,
         )
+        StreamCount.objects.create(
+            realm=realm,
+            stream=stream_2,
+            property="messages_in_stream:is_bot:day",
+            end_time=timezone_now(),
+            value=23,
+        )
 
-        result = get_streams_traffic(stream_ids, realm)
+        result = get_streams_traffic(realm, {stream.id})
         self.assertEqual(result, {stream.id: 999})
+
+        all_streams_traffic = get_streams_traffic(realm)
+        self.assertEqual(all_streams_traffic, {stream.id: 999, stream_2.id: 23})
 
     def test_subscriptions(self) -> None:
         now = timezone_now()
@@ -549,10 +602,10 @@ class TestRealmAuditLog(ZulipTestCase):
         )
 
         administrators_system_group = NamedUserGroup.objects.get(
-            name=SystemGroups.ADMINISTRATORS, realm=realm, is_system_group=True
+            name=SystemGroups.ADMINISTRATORS, realm_for_sharding=realm, is_system_group=True
         )
         everyone_system_group = NamedUserGroup.objects.get(
-            name=SystemGroups.EVERYONE, realm=realm, is_system_group=True
+            name=SystemGroups.EVERYONE, realm_for_sharding=realm, is_system_group=True
         )
 
         value_expected = {
@@ -656,7 +709,7 @@ class TestRealmAuditLog(ZulipTestCase):
         user = self.example_user("hamlet")
         old_value = realm.moderation_request_channel
         stream = self.make_stream("private_stream", invite_only=True)
-
+        assert old_value is not None
         do_set_realm_moderation_request_channel(realm, stream, stream.id, acting_user=user)
         self.assertEqual(
             RealmAuditLog.objects.filter(
@@ -665,7 +718,10 @@ class TestRealmAuditLog(ZulipTestCase):
                 event_time__gte=now,
                 acting_user=user,
                 extra_data={
-                    RealmAuditLog.OLD_VALUE: old_value,
+                    # `populate_db` configures `moderation_request_channel` for
+                    # API testing purposes, so the `old_value` here is
+                    # not `None`.
+                    RealmAuditLog.OLD_VALUE: old_value.id,
                     RealmAuditLog.NEW_VALUE: stream.id,
                     "property": "moderation_request_channel",
                 },
@@ -808,15 +864,73 @@ class TestRealmAuditLog(ZulipTestCase):
         )
         self.assertEqual(stream.name, "updated name")
 
+    def test_change_stream_folder(self) -> None:
+        user = self.example_user("iago")
+        stream = self.make_stream("test", user.realm)
+        frontend_folder = check_add_channel_folder(user.realm, "Frontend", "", acting_user=user)
+        backend_folder = check_add_channel_folder(user.realm, "Backend", "", acting_user=user)
+
+        now = timezone_now()
+        do_change_stream_folder(stream, frontend_folder, acting_user=user)
+        self.assertEqual(
+            RealmAuditLog.objects.filter(
+                realm=user.realm,
+                event_type=AuditLogEventType.CHANNEL_FOLDER_CHANGED,
+                event_time__gte=now,
+                acting_user=user,
+                modified_stream=stream,
+                extra_data={
+                    RealmAuditLog.OLD_VALUE: None,
+                    RealmAuditLog.NEW_VALUE: frontend_folder.id,
+                },
+            ).count(),
+            1,
+        )
+
+        now = timezone_now()
+        do_change_stream_folder(stream, backend_folder, acting_user=user)
+        self.assertEqual(
+            RealmAuditLog.objects.filter(
+                realm=user.realm,
+                event_type=AuditLogEventType.CHANNEL_FOLDER_CHANGED,
+                event_time__gte=now,
+                acting_user=user,
+                modified_stream=stream,
+                extra_data={
+                    RealmAuditLog.OLD_VALUE: frontend_folder.id,
+                    RealmAuditLog.NEW_VALUE: backend_folder.id,
+                },
+            ).count(),
+            1,
+        )
+
+        now = timezone_now()
+        do_change_stream_folder(stream, None, acting_user=user)
+        self.assertEqual(
+            RealmAuditLog.objects.filter(
+                realm=user.realm,
+                event_type=AuditLogEventType.CHANNEL_FOLDER_CHANGED,
+                event_time__gte=now,
+                acting_user=user,
+                modified_stream=stream,
+                extra_data={
+                    RealmAuditLog.OLD_VALUE: backend_folder.id,
+                    RealmAuditLog.NEW_VALUE: None,
+                },
+            ).count(),
+            1,
+        )
+
     def test_change_user_settings(self) -> None:
         user = self.example_user("hamlet")
-        value: bool | int | str
-        test_values = dict(
+        value: bool | int | str | Enum
+        test_values: dict[str, Any] = dict(
             default_language="de",
             web_animate_image_previews="on_hover",
             web_home_view="all_messages",
             emojiset="twitter",
             notification_sound="ding",
+            resolved_topic_notice_auto_read_policy=ResolvedTopicNoticeAutoReadPolicyEnum.always,
         )
 
         for setting, setting_type in user.property_types.items():
@@ -830,9 +944,13 @@ class TestRealmAuditLog(ZulipTestCase):
 
             old_value = getattr(user, setting)
             do_change_user_setting(user, setting, value, acting_user=user)
+            if isinstance(value, Enum):
+                new_value = value.value
+            else:
+                new_value = value
             expected_extra_data = {
                 RealmAuditLog.OLD_VALUE: old_value,
-                RealmAuditLog.NEW_VALUE: value,
+                RealmAuditLog.NEW_VALUE: new_value,
                 "property": setting,
             }
             self.assertEqual(
@@ -846,7 +964,7 @@ class TestRealmAuditLog(ZulipTestCase):
                 ).count(),
                 1,
             )
-            self.assertEqual(getattr(user, setting), value)
+            self.assertEqual(getattr(user, setting), new_value)
 
     def test_realm_domain_entries(self) -> None:
         user = self.example_user("iago")
@@ -1145,7 +1263,7 @@ class TestRealmAuditLog(ZulipTestCase):
 
         system_user_group_ids = sorted(
             NamedUserGroup.objects.filter(
-                realm=realm,
+                realm_for_sharding=realm,
                 is_system_group=True,
             ).values_list("id", flat=True)
         )
@@ -1201,7 +1319,7 @@ class TestRealmAuditLog(ZulipTestCase):
         cordelia = self.example_user("cordelia")
         now = timezone_now()
         public_group = NamedUserGroup.objects.get(
-            name=SystemGroups.EVERYONE_ON_INTERNET, realm=hamlet.realm
+            name=SystemGroups.EVERYONE_ON_INTERNET, realm_for_sharding=hamlet.realm
         )
         user_group = check_add_user_group(
             hamlet.realm,
@@ -1366,7 +1484,7 @@ class TestRealmAuditLog(ZulipTestCase):
 
         old_group = user_group.can_mention_group
         new_group = NamedUserGroup.objects.get(
-            name=SystemGroups.EVERYONE_ON_INTERNET, realm=user_group.realm
+            name=SystemGroups.EVERYONE_ON_INTERNET, realm_for_sharding=user_group.realm
         ).usergroup_ptr
         self.assertNotEqual(old_group.id, new_group.id)
         do_change_user_group_permission_setting(
@@ -1392,7 +1510,7 @@ class TestRealmAuditLog(ZulipTestCase):
         )
 
         moderators_group = NamedUserGroup.objects.get(
-            name=SystemGroups.MODERATORS, realm=user_group.realm, is_system_group=True
+            name=SystemGroups.MODERATORS, realm_for_sharding=user_group.realm, is_system_group=True
         )
         old_group = user_group.can_mention_group
         new_group = self.create_or_update_anonymous_group_for_setting([hamlet], [moderators_group])
@@ -1463,7 +1581,7 @@ class TestRealmAuditLog(ZulipTestCase):
 
         old_setting_api_value = get_group_setting_value_for_api(user_group.can_mention_group)
         new_group = NamedUserGroup.objects.get(
-            name=SystemGroups.EVERYONE, realm=user_group.realm, is_system_group=True
+            name=SystemGroups.EVERYONE, realm_for_sharding=user_group.realm, is_system_group=True
         )
         now = timezone_now()
         do_change_user_group_permission_setting(
@@ -1491,7 +1609,7 @@ class TestRealmAuditLog(ZulipTestCase):
             },
         )
 
-    def test_user_group_deactivation(self) -> None:
+    def test_user_group_deactivation_and_reactivation(self) -> None:
         hamlet = self.example_user("hamlet")
         cordelia = self.example_user("cordelia")
         user_group = check_add_user_group(
@@ -1512,3 +1630,209 @@ class TestRealmAuditLog(ZulipTestCase):
         self.assert_length(audit_log_entries, 1)
         self.assertIsNone(audit_log_entries[0].modified_user)
         self.assertEqual(audit_log_entries[0].modified_user_group, user_group)
+
+        do_reactivate_user_group(user_group, acting_user=hamlet)
+        audit_log_entries = RealmAuditLog.objects.filter(
+            acting_user=hamlet,
+            realm=hamlet.realm,
+            event_time__gte=now,
+            event_type=AuditLogEventType.USER_GROUP_REACTIVATED,
+        )
+        self.assert_length(audit_log_entries, 1)
+        self.assertIsNone(audit_log_entries[0].modified_user)
+        self.assertEqual(audit_log_entries[0].modified_user_group, user_group)
+
+    def test_channel_folders(self) -> None:
+        iago = self.example_user("iago")
+        now = timezone_now()
+        channel_folder = check_add_channel_folder(
+            iago.realm,
+            "Frontend",
+            "Channels for frontend discussions",
+            acting_user=iago,
+        )
+
+        audit_log_entries = RealmAuditLog.objects.filter(
+            acting_user=iago,
+            realm=iago.realm,
+            event_time__gte=now,
+            event_type=AuditLogEventType.CHANNEL_FOLDER_CREATED,
+        )
+        self.assert_length(audit_log_entries, 1)
+        self.assertIsNone(audit_log_entries[0].modified_user)
+        self.assertIsNone(audit_log_entries[0].modified_user_group)
+        self.assertEqual(audit_log_entries[0].modified_channel_folder, channel_folder)
+
+        do_change_channel_folder_name(
+            channel_folder,
+            "Web frontend",
+            acting_user=iago,
+        )
+        audit_log_entries = RealmAuditLog.objects.filter(
+            acting_user=iago,
+            realm=iago.realm,
+            event_time__gte=now,
+            event_type=AuditLogEventType.CHANNEL_FOLDER_NAME_CHANGED,
+        )
+        self.assert_length(audit_log_entries, 1)
+        self.assertIsNone(audit_log_entries[0].modified_user)
+        self.assertIsNone(audit_log_entries[0].modified_user_group)
+        self.assertEqual(audit_log_entries[0].modified_channel_folder, channel_folder)
+        self.assertEqual(
+            audit_log_entries[0].extra_data,
+            {RealmAuditLog.OLD_VALUE: "Frontend", RealmAuditLog.NEW_VALUE: "Web frontend"},
+        )
+
+        do_change_channel_folder_description(
+            channel_folder,
+            "Channels for web frontend discussion",
+            acting_user=iago,
+        )
+        audit_log_entries = RealmAuditLog.objects.filter(
+            acting_user=iago,
+            realm=iago.realm,
+            event_time__gte=now,
+            event_type=AuditLogEventType.CHANNEL_FOLDER_DESCRIPTION_CHANGED,
+        )
+        self.assert_length(audit_log_entries, 1)
+        self.assertIsNone(audit_log_entries[0].modified_user)
+        self.assertIsNone(audit_log_entries[0].modified_user_group)
+        self.assertEqual(audit_log_entries[0].modified_channel_folder, channel_folder)
+        self.assertEqual(
+            audit_log_entries[0].extra_data,
+            {
+                RealmAuditLog.OLD_VALUE: "Channels for frontend discussions",
+                RealmAuditLog.NEW_VALUE: "Channels for web frontend discussion",
+            },
+        )
+
+        do_archive_channel_folder(channel_folder, acting_user=iago)
+        audit_log_entries = RealmAuditLog.objects.filter(
+            acting_user=iago,
+            realm=iago.realm,
+            event_time__gte=now,
+            event_type=AuditLogEventType.CHANNEL_FOLDER_ARCHIVED,
+        )
+        self.assert_length(audit_log_entries, 1)
+        self.assertIsNone(audit_log_entries[0].modified_user)
+        self.assertIsNone(audit_log_entries[0].modified_user_group)
+        self.assertEqual(audit_log_entries[0].modified_channel_folder, channel_folder)
+
+        do_unarchive_channel_folder(channel_folder, acting_user=iago)
+        audit_log_entries = RealmAuditLog.objects.filter(
+            acting_user=iago,
+            realm=iago.realm,
+            event_time__gte=now,
+            event_type=AuditLogEventType.CHANNEL_FOLDER_UNARCHIVED,
+        )
+        self.assert_length(audit_log_entries, 1)
+        self.assertIsNone(audit_log_entries[0].modified_user)
+        self.assertIsNone(audit_log_entries[0].modified_user_group)
+        self.assertEqual(audit_log_entries[0].modified_channel_folder, channel_folder)
+
+    def test_navigation_view_entries(self) -> None:
+        hamlet = self.example_user("hamlet")
+
+        now = timezone_now()
+        navigation_view = do_add_navigation_view(
+            hamlet,
+            "inbox",
+            True,
+            "Inbox",
+        )
+        audit_log_entries = RealmAuditLog.objects.filter(
+            acting_user=hamlet,
+            realm=hamlet.realm,
+            event_time__gte=now,
+            event_type=AuditLogEventType.NAVIGATION_VIEW_CREATED,
+        )
+        self.assert_length(audit_log_entries, 1)
+        self.assertEqual(audit_log_entries[0].modified_user, hamlet)
+        self.assertEqual(audit_log_entries[0].extra_data, {"fragment": "inbox"})
+
+        now = timezone_now()
+        do_update_navigation_view(
+            hamlet,
+            navigation_view,
+            False,
+        )
+        audit_log_entries = RealmAuditLog.objects.filter(
+            acting_user=hamlet,
+            realm=hamlet.realm,
+            event_time__gte=now,
+            event_type=AuditLogEventType.NAVIGATION_VIEW_UPDATED,
+        )
+        self.assert_length(audit_log_entries, 1)
+        self.assertEqual(audit_log_entries[0].modified_user, hamlet)
+        self.assertEqual(
+            audit_log_entries[0].extra_data,
+            {
+                "fragment": "inbox",
+                RealmAuditLog.OLD_VALUE: True,
+                RealmAuditLog.NEW_VALUE: False,
+                "property": "is_pinned",
+            },
+        )
+
+        now = timezone_now()
+        do_update_navigation_view(hamlet, navigation_view, True, "Inbox view")
+        audit_log_entries = RealmAuditLog.objects.filter(
+            acting_user=hamlet,
+            realm=hamlet.realm,
+            event_time__gte=now,
+            event_type=AuditLogEventType.NAVIGATION_VIEW_UPDATED,
+        )
+        self.assert_length(audit_log_entries, 2)
+        self.assertEqual(audit_log_entries[0].modified_user, hamlet)
+        self.assertEqual(audit_log_entries[1].modified_user, hamlet)
+        self.assertEqual(
+            audit_log_entries[0].extra_data,
+            {
+                "fragment": "inbox",
+                RealmAuditLog.OLD_VALUE: "Inbox",
+                RealmAuditLog.NEW_VALUE: "Inbox view",
+                "property": "name",
+            },
+        )
+        self.assertEqual(
+            audit_log_entries[1].extra_data,
+            {
+                "fragment": "inbox",
+                RealmAuditLog.OLD_VALUE: False,
+                RealmAuditLog.NEW_VALUE: True,
+                "property": "is_pinned",
+            },
+        )
+
+        now = timezone_now()
+        do_remove_navigation_view(
+            hamlet,
+            navigation_view,
+        )
+        audit_log_entries = RealmAuditLog.objects.filter(
+            acting_user=hamlet,
+            realm=hamlet.realm,
+            event_time__gte=now,
+            event_type=AuditLogEventType.NAVIGATION_VIEW_DELETED,
+        )
+        self.assert_length(audit_log_entries, 1)
+        self.assertEqual(audit_log_entries[0].modified_user, hamlet)
+        self.assertEqual(audit_log_entries[0].extra_data, {"fragment": "inbox"})
+
+    def test_changing_is_imported_stub(self) -> None:
+        hamlet = self.example_user("hamlet")
+        hamlet.is_imported_stub = True
+        hamlet.save()
+
+        now = timezone_now()
+        do_change_is_imported_stub(hamlet)
+
+        audit_log_entries = RealmAuditLog.objects.filter(
+            acting_user=hamlet,
+            realm=hamlet.realm,
+            event_time__gte=now,
+            event_type=AuditLogEventType.USER_IS_IMPORTED_STUB_CHANGED,
+        )
+        self.assert_length(audit_log_entries, 1)
+        self.assertEqual(audit_log_entries[0].modified_user, hamlet)
+        self.assertEqual(audit_log_entries[0].extra_data, {})
